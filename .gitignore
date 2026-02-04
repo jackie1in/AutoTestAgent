@@ -1,0 +1,6 @@
+test_cases/*
+screenshots/*
+.venv/*
+__pycache__/*
+.env
+agent_history.*

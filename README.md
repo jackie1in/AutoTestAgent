@@ -38,7 +38,7 @@
 ## 安装
 
 ```bash
-# 使用 uv (推荐)
+# 使用 uv (推荐) https://docs.astral.sh/uv/getting-started/installation/
 uv sync
 
 # 或使用 pip
