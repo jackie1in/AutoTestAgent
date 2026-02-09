@@ -12,6 +12,7 @@ Features:
 import asyncio
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any
@@ -21,7 +22,58 @@ from enum import Enum
 from dotenv import load_dotenv
 from browser_use import Agent, Browser, BrowserProfile, ChatOpenAI
 
+from local_skills import (
+    load_skills_dir,
+    build_skill_tree,
+    match_skills,
+    match_skills_with_llm,
+    build_extend_system_message,
+    run_skill_creator,
+    run_skill_creator_from_record,
+    SkillTreeNode,
+)
+
 load_dotenv()
+
+# URL pattern for extracting from prompt (http/https)
+_URL_PATTERN = re.compile(r"https?://[^\s\]\)\"\'<>]+", re.IGNORECASE)
+
+
+def extract_url_from_prompt(prompt: str) -> Optional[str]:
+    """Extract the first http(s) URL from a prompt string. Returns None if none found."""
+    if not prompt or not prompt.strip():
+        return None
+    m = _URL_PATTERN.search(prompt)
+    return m.group(0).rstrip(".,;:") if m else None
+
+
+async def infer_url_from_task(task: str, llm_config: "LLMConfig") -> Optional[str]:
+    """
+    Use LLM to infer a start URL from the task description (e.g. "在百度搜索" -> https://www.baidu.com).
+    Returns the first http(s) URL found in the response, or None.
+    """
+    if not task or not task.strip():
+        return None
+    system = (
+        "You are a helper. Given a short task description for a browser automation, "
+        "reply with the single most likely start URL the user wants to open, or reply 'none' if unclear. "
+        "Reply with only the URL (e.g. https://www.example.com) or the word none, no other text."
+    )
+    user = f"Task: {task}"
+    llm = llm_config.create_llm()
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    try:
+        if hasattr(llm, "ainvoke"):
+            response = await llm.ainvoke(messages)
+        else:
+            response = await asyncio.to_thread(llm.invoke, messages)
+    except Exception:
+        return None
+    text = (getattr(response, "content", None) or str(response)).strip().lower()
+    if "none" in text and not _URL_PATTERN.search(text):
+        return None
+    m = _URL_PATTERN.search(text)
+    return m.group(0).rstrip(".,;:") if m else None
 
 
 @dataclass
@@ -221,10 +273,14 @@ class UITestRecorder:
         headless: bool = False,
         test_cases_dir: str = "test_cases",
         llm_config: Optional[LLMConfig] = None,
+        skills_dir: str = "skills",
+        auto_skills: bool = True,
     ):
         self.headless = headless
         self.test_cases_dir = test_cases_dir
         self.llm_config = llm_config or LLMConfig.from_env()
+        self.skills_dir = skills_dir
+        self.auto_skills = auto_skills
         self.recorded_actions: list[RecordedAction] = []
         self.current_step = 0
         self.current_url = ""
@@ -448,6 +504,7 @@ class UITestRecorder:
         test_name: str = "",
         description: str = "",
         max_steps: int = 50,
+        force_skill_id: Optional[str] = None,
     ) -> TestCase:
         """Record a test case by running an AI agent task"""
         self.recorded_actions = []
@@ -466,22 +523,56 @@ class UITestRecorder:
             headless=self.headless,
         )
         
-        # Prepend URL navigation if provided
-        full_task = task
+        # If start_url is set, open it via initial_actions so the browser is not blank
+        initial_actions = []
         if start_url:
-            full_task = f"First, navigate to {start_url}. Then, {task}"
+            initial_actions = [{"navigate": {"url": start_url, "new_tab": False}}]
+        full_task = task if initial_actions else (f"First, navigate to {start_url}. Then, {task}" if start_url else task)
         
         llm = self.llm_config.create_llm()
         print(f"Using LLM: {self.llm_config.model}")
         if self.llm_config.base_url:
             print(f"Base URL: {self.llm_config.base_url}")
         
-        agent = Agent(
+        extend_system_message = ""
+        if self.auto_skills and self.skills_dir:
+            skills = load_skills_dir(self.skills_dir)
+            prompt_preview = (task[:80] + "…") if len(task) > 80 else task
+            print(f"[Skills] Matching skills for prompt: {prompt_preview!r}")
+            matched = match_skills(task, skills)
+            if force_skill_id:
+                for s in skills:
+                    if s.id == force_skill_id:
+                        if s not in matched:
+                            matched.insert(0, s)
+                        break
+            if matched:
+                extend_system_message = build_extend_system_message(matched)
+                print(f"[Skills] Using skills: {[s.name for s in matched]}")
+            else:
+                # No keyword match: ask LLM to pick by task + skill descriptions
+                try:
+                    print("[Skills] No keyword match; asking LLM to select skills from descriptions...")
+                    matched = await match_skills_with_llm(task, skills, self.llm_config, top_k=5)
+                    if matched:
+                        extend_system_message = build_extend_system_message(matched)
+                        print(f"[Skills] LLM selected: {[s.name for s in matched]}")
+                    else:
+                        print("[Skills] No skills matched (keyword or LLM).")
+                except Exception as e:
+                    print(f"[Skills] LLM selection failed: {e}; no skills will be used.")
+        
+        agent_kw: dict = dict(
             task=full_task,
             llm=llm,
             browser=browser,
             generate_gif=True,
         )
+        if extend_system_message:
+            agent_kw["extend_system_message"] = extend_system_message
+        if initial_actions:
+            agent_kw["initial_actions"] = initial_actions
+        agent = Agent(**agent_kw)
         
         try:
             print("Starting recording...")
@@ -521,6 +612,25 @@ class UITestRecorder:
             
             return test_case
             
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            # Save partial recording so we can still generate skill from it
+            if self.recorded_actions:
+                test_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_partial"
+                self._partial_test_case = TestCase(
+                    id=test_id,
+                    name=test_name or f"Test_{test_id}",
+                    description=description or task,
+                    created_at=datetime.now().isoformat(),
+                    updated_at=datetime.now().isoformat(),
+                    start_url=start_url,
+                    actions=list(self.recorded_actions),
+                    metadata={"task": task, "max_steps": max_steps, "partial": True},
+                )
+                self._partial_test_case.save(self.test_cases_dir)
+                print(f"\n[Interrupted] Partial recording saved ({len(self.recorded_actions)} actions).")
+            else:
+                self._partial_test_case = None
+            raise
         finally:
             await browser.stop()
 
@@ -702,12 +812,20 @@ INSTRUCTIONS:
             # Generate replay task
             replay_task = self._generate_replay_task(test_case)
             
-            agent = Agent(
+            # If test case has start_url, open it first so the browser is not blank
+            initial_actions = []
+            if test_case.start_url:
+                initial_actions = [{"navigate": {"url": test_case.start_url, "new_tab": False}}]
+            
+            agent_kw: dict = dict(
                 task=replay_task,
                 llm=llm,
                 browser=browser,
                 generate_gif=True,
             )
+            if initial_actions:
+                agent_kw["initial_actions"] = initial_actions
+            agent = Agent(**agent_kw)
             
             print("Starting replay...")
             
@@ -843,47 +961,138 @@ INSTRUCTIONS:
         return results
 
 
+async def resolve_record_inputs(record_args: dict) -> dict:
+    """Resolve task, start_url, test_name from record_args (prompts/inference as needed). Returns dict for both skill-creator and record."""
+    task = record_args.get("task")
+    if not task:
+        task = input("Enter the task description: ").strip()
+    if not task:
+        raise ValueError("Task is required.")
+    llm_config = LLMConfig.from_env()
+    start_url = record_args.get("start_url")
+    if not (start_url and str(start_url).strip()):
+        extracted = extract_url_from_prompt(task)
+        if extracted:
+            start_url = extracted
+            print(f"Using URL from prompt: {start_url}")
+        else:
+            inferred = await infer_url_from_task(task, llm_config)
+            if inferred:
+                start_url = inferred
+                print(f"Using URL from task (AI): {start_url}")
+            elif start_url is None:
+                start_url = input("Enter start URL (optional): ").strip()
+            else:
+                start_url = ""
+    if start_url is None:
+        start_url = ""
+    test_name = record_args.get("test_name")
+    if test_name is None:
+        test_name = input("Enter test name (optional): ").strip()
+    if test_name is None:
+        test_name = ""
+    return {"task": task, "start_url": (start_url or "").strip(), "test_name": test_name or "", "llm_config": llm_config}
+
+
+async def run_skill_creator_flow(record_args: dict, resolved: Optional[dict] = None):
+    """Run skill-creator to generate a parameterized skill for the record topic. If resolved is provided, use it and do not prompt."""
+    if resolved:
+        task = resolved["task"]
+        start_url = resolved["start_url"]
+        llm_config = resolved["llm_config"]
+    else:
+        task = record_args.get("task")
+        if not task:
+            task = input("Enter the record topic (task description): ").strip()
+        if not task:
+            print("Task is required for --skill-creator.")
+            return
+        start_url = record_args.get("start_url") or ""
+        if start_url is None:
+            start_url = input("Enter start URL (optional): ").strip() or ""
+        llm_config = LLMConfig.from_env()
+    skills_dir = record_args.get("skills_dir") or "skills"
+    print(f"Using LLM: {llm_config.model}")
+    print(f"Generating parameterized skill for: {task}")
+    try:
+        path = await run_skill_creator(task, start_url, skills_dir, llm_config)
+        print(f"\nSkill written to: {path}")
+    except Exception as e:
+        print(f"Skill-creator failed: {e}")
+        raise
+
+
+async def do_record(
+    resolved: dict,
+    headless: bool = False,
+    skills_dir: str = "skills",
+    no_auto_skills: bool = False,
+    force_skill: Optional[str] = None,
+):
+    """Run browser record with already-resolved task/start_url/test_name. Shared by record-only and skill-creator+record."""
+    task = resolved["task"]
+    start_url = resolved["start_url"]
+    test_name = resolved["test_name"]
+    llm_config = resolved["llm_config"]
+    print("\n" + "="*60)
+    print("UI Test Recorder")
+    print("="*60 + "\n")
+    print(f"Using LLM: {llm_config.model}")
+    recorder = UITestRecorder(
+        headless=headless,
+        llm_config=llm_config,
+        skills_dir=skills_dir or "skills",
+        auto_skills=not no_auto_skills,
+    )
+    try:
+        test_case = await recorder.record(
+            task=task,
+            start_url=start_url,
+            test_name=test_name,
+            description=task,
+            force_skill_id=force_skill,
+        )
+        print(f"\nTest case saved with ID: {test_case.id}")
+        return test_case
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        # Return partial so caller can still run skill-creator from it
+        partial = getattr(recorder, "_partial_test_case", None)
+        if partial is not None:
+            return partial
+        raise
+
+
 async def interactive_record(
     task: Optional[str] = None,
     start_url: Optional[str] = None,
     test_name: Optional[str] = None,
     headless: bool = False,
+    skills_dir: str = "skills",
+    no_auto_skills: bool = False,
+    force_skill: Optional[str] = None,
 ):
-    """Interactive recording session"""
-    print("\n" + "="*60)
-    print("UI Test Recorder")
-    print("="*60 + "\n")
-    
-    # Get task from argument or prompt
-    if not task:
-        task = input("Enter the task description: ").strip()
-    if not task:
-        print("Task is required!")
-        return
-    
-    # Get other inputs if not provided
-    if start_url is None:
-        start_url = input("Enter start URL (optional): ").strip()
-    if test_name is None:
-        test_name = input("Enter test name (optional): ").strip()
-    
-    description = task
-    
-    # Get LLM config from env
-    llm_config = LLMConfig.from_env()
-    print(f"Using LLM: {llm_config.model}")
-    
-    # Record
-    recorder = UITestRecorder(headless=headless, llm_config=llm_config)
-    test_case = await recorder.record(
-        task=task,
-        start_url=start_url,
-        test_name=test_name,
-        description=description,
+    """Resolve inputs (if needed) then run record. Uses resolve_record_inputs + do_record for reuse."""
+    record_args = {
+        "task": task,
+        "start_url": start_url,
+        "test_name": test_name,
+        "headless": headless,
+        "skills_dir": skills_dir,
+        "no_auto_skills": no_auto_skills,
+        "force_skill": force_skill,
+    }
+    try:
+        resolved = await resolve_record_inputs(record_args)
+    except ValueError as e:
+        print(f"{e}")
+        return None
+    return await do_record(
+        resolved,
+        headless=headless,
+        skills_dir=skills_dir,
+        no_auto_skills=no_auto_skills,
+        force_skill=force_skill,
     )
-    
-    print(f"\nTest case saved with ID: {test_case.id}")
-    return test_case
 
 
 async def interactive_replay(test_id: Optional[str] = None, headless: bool = False):
@@ -922,6 +1131,28 @@ async def interactive_replay(test_id: Optional[str] = None, headless: bool = Fal
     results = await player.replay(test_id, auto_correct=True)
     
     return results
+
+
+def list_skills(skills_dir: str = "skills"):
+    """List all local skills (tree) and their name/description."""
+    skills = load_skills_dir(skills_dir)
+    if not skills:
+        print(f"\nNo skills found in {skills_dir}/")
+        return
+    tree = build_skill_tree(skills, skills_dir)
+    print(f"\n{'='*60}\nSkills ({skills_dir}/)\n{'='*60}")
+    def _walk(node: SkillTreeNode, prefix: str):
+        for i, child in enumerate(node.children):
+            is_last = i == len(node.children) - 1
+            branch = "└── " if is_last else "├── "
+            skill_info = f" ({child.skill.name})" if child.skill else ""
+            print(f"{prefix}{branch}{child.name}{skill_info}")
+            if child.skill and child.skill.description:
+                desc = (child.skill.description[:60] + "...") if len(child.skill.description) > 60 else child.skill.description
+                print(f"{prefix}    {'    ' if is_last else '│   '}  {desc}")
+            _walk(child, prefix + ("    " if is_last else "│   "))
+    _walk(tree, "")
+    print(f"\nTotal: {len(skills)} skill(s)\n")
 
 
 def list_test_cases():
@@ -1040,6 +1271,7 @@ Commands:
   record [options] [prompt]  - Record a new test case
   replay [test_id]          - Replay a saved test case (with auto-correction)
   list                      - List all saved test cases
+  list-skills [--skills-dir] - List local skills (tree)
   view <test_id>            - View details of a test case
   delete <test_id>          - Delete a test case
   help                      - Show this help message
@@ -1049,6 +1281,10 @@ Record Options:
   -u, --url <url>       Start URL
   -n, --name <name>     Test case name
   --headless            Run in headless mode (no browser window)
+  --skill-creator       Generate a parameterized skill for this topic, then run record (skill first, then browser)
+  --skills-dir <path>   Skills directory (default: skills)
+  --no-auto-skills      Disable auto-matching of skills from prompt
+  -s, --skill <id>      Force-include skill by id (e.g. login)
 
 Examples:
   # Record with prompt
@@ -1058,6 +1294,9 @@ Examples:
   
   # Interactive record
   python main.py record
+  
+  # Generate skill for this topic, then record (browser opens after skill is created)
+  python main.py record --skill-creator -p "login to example.com" -u "https://example.com"
   
   # Replay (with auto-correction)
   python main.py replay                    # Interactive selection
@@ -1089,6 +1328,10 @@ def parse_record_args(args: list[str]) -> dict:
         "start_url": None,
         "test_name": None,
         "headless": False,
+        "skill_creator": False,
+        "skills_dir": "skills",
+        "no_auto_skills": False,
+        "force_skill": None,
     }
     
     i = 0
@@ -1114,6 +1357,24 @@ def parse_record_args(args: list[str]) -> dict:
             result["headless"] = True
             i += 1
             continue
+        elif arg in ("--skill-creator",):
+            result["skill_creator"] = True
+            i += 1
+            continue
+        elif arg in ("--skills-dir",):
+            if i + 1 < len(args):
+                result["skills_dir"] = args[i + 1]
+                i += 2
+                continue
+        elif arg in ("--no-auto-skills",):
+            result["no_auto_skills"] = True
+            i += 1
+            continue
+        elif arg in ("-s", "--skill",):
+            if i + 1 < len(args):
+                result["force_skill"] = args[i + 1]
+                i += 2
+                continue
         else:
             if result["task"] is None and not arg.startswith("-"):
                 result["task"] = arg
@@ -1132,7 +1393,44 @@ async def main_async(args: list[str]):
     
     if command == "record":
         record_args = parse_record_args(args[1:])
-        await interactive_record(**record_args)
+        try:
+            resolved = await resolve_record_inputs(record_args)
+        except ValueError as e:
+            print(f"{e}")
+            return
+        headless = record_args.get("headless", False)
+        skills_dir = record_args.get("skills_dir") or "skills"
+        no_auto_skills = record_args.get("no_auto_skills", False)
+        force_skill = record_args.get("force_skill")
+        do_record_kw = dict(
+            resolved=resolved,
+            headless=headless,
+            skills_dir=skills_dir,
+            no_auto_skills=no_auto_skills,
+            force_skill=force_skill,
+        )
+        if record_args.get("skill_creator"):
+            print("\n" + "="*60)
+            print("Record first, then generate skill from recording")
+            print("="*60 + "\n")
+            test_case = await do_record(**do_record_kw)
+            if test_case:
+                if not test_case.actions:
+                    print("\nNo actions recorded; skipping skill generation (run record until steps are captured).")
+                else:
+                    print(f"\n[Skill-creator] Generating skill from {len(test_case.actions)} recorded actions (LLM: {resolved['llm_config'].model})...")
+                    try:
+                        path = await run_skill_creator_from_record(
+                            test_case.to_dict(),
+                            skills_dir=skills_dir,
+                            llm_config=resolved["llm_config"],
+                        )
+                        print(f"\nSkill (from recording) written to: {path}")
+                    except Exception as e:
+                        print(f"Skill-creator from record failed: {e}")
+                        raise
+        else:
+            await do_record(**do_record_kw)
     
     elif command == "replay":
         test_id = args[1] if len(args) > 1 else None
@@ -1140,6 +1438,13 @@ async def main_async(args: list[str]):
     
     elif command == "list":
         list_test_cases()
+    
+    elif command == "list-skills":
+        skills_dir = "skills"
+        rest = args[1:]
+        if len(rest) >= 2 and rest[0] == "--skills-dir":
+            skills_dir = rest[1]
+        list_skills(skills_dir)
     
     elif command == "view":
         if len(args) < 2:

@@ -81,8 +81,12 @@ uv run python main.py replay 20240101_120000    # 指定用例
 
 # 管理测试用例
 uv run python main.py list                      # 列出所有用例
+uv run python main.py list-skills               # 列出本地 skills 树
 uv run python main.py view 20240101_120000      # 查看详情
 uv run python main.py delete 20240101_120000    # 删除用例
+
+# 先录制，再用本次录制的 actions 生成参数化 skill（可中途 Ctrl+C，会保存已录步骤并照常生成 skill）
+uv run python main.py record --skill-creator -p "登录 example.com" -u "https://example.com"
 ```
 
 ### 命令参数
@@ -94,6 +98,10 @@ uv run python main.py delete 20240101_120000    # 删除用例
 | `-u, --url` | 起始 URL |
 | `-n, --name` | 用例名称 |
 | `--headless` | 无头模式 (不显示浏览器) |
+| `--skill-creator` | 录制结束后用录制数据生成参数化 skill；中途 Ctrl+C 会保存已录步骤并生成 skill |
+| `--skills-dir` | skills 目录，默认 `skills` |
+| `--no-auto-skills` | 关闭按 prompt 自动匹配 skills |
+| `-s, --skill` | 强制加载指定 id 的 skill |
 
 ### 编程接口
 
@@ -178,17 +186,38 @@ asyncio.run(main())
 | `go_forward` | 前进 |
 | `refresh` | 刷新页面 |
 
+## 本地 Skills（agentskills.io）
+
+录制时会根据任务描述**自动匹配**本地 skills，并将匹配到的 skill 内容注入 Agent，使录制更贴合场景。
+
+- **格式**: 每个 skill 是一个目录，内含 `SKILL.md`，符合 [Agent Skills 规范](https://agentskills.io/specification)：frontmatter 必填 `name`（1–64 字符、小写字母数字连字符）、`description`（1–1024 字符），正文为 Markdown。
+- **目录**: 默认 `skills/`，可配置 `--skills-dir`。子目录如 `skills/login/` 对应 skill id `login`。
+- **匹配**: 根据 prompt 与各 skill 的 `description` 做**关键词匹配**，取 top-k 注入。**description 中应包含任务类型、动作、场景等关键词**（如：登录、表单、搜索、login、sign-in），便于被自动匹配。
+- **录制并生成 skill**: 使用 `record --skill-creator -p "任务" -u "URL"` 会先执行录制，录制结束（或中途 Ctrl+C）后用本次录制的 actions 调用 `skills/skill-creator` 生成**参数化** skill（占位符如 `{{base_url}}`、`{{username}}`）写入 `skills/<name>/`。
+- **列出 skills**: `python main.py list-skills` 可查看技能树与描述。
+
+### 创建或修改 skill
+
+- **录制并生成 skill**：`record --skill-creator -p "任务描述" -u "https://example.com"` 会先录制，再用录制数据在 `skills/<name>/` 下生成参数化 SKILL.md；中途 Ctrl+C 会保存已录步骤并照常生成。
+- **手动创建**：在 `skills/` 下新建目录，添加 `SKILL.md`（YAML frontmatter 含 `name`、`description` + 正文）；可选建 `scripts/`、`references/`、`assets/`。
+- **详细规范与流程**：见 `skills/skill-creator/SKILL.md`；UI 录制/回放类 skill 可参考 `skills/skill-creator/references/ui-test-skills.md`。
+
 ## 项目结构
 
 ```
 advanced/
 ├── main.py              # CLI 入口
 ├── ui_test_agent.py     # 核心模块
-├── pyproject.toml       # 项目配置
+├── local_skills.py      # 本地 skill 加载、匹配、skill-creator 流程
+├── pyproject.toml      # 项目配置
 ├── .env                 # 环境变量 (需创建)
 ├── .env.example         # 环境变量模板
+├── skills/              # 本地 skills 目录 (SKILL.md 符合 agentskills.io)
+│   ├── login/
+│   │   └── SKILL.md
+│   └── skill-creator/   # 用于 record --skill-creator
 ├── test_cases/          # 测试用例存储目录
-└── replay_reports/      # 回放失败报告目录
+└── replay_reports/     # 回放失败报告目录
 ```
 
 ## 架构设计
