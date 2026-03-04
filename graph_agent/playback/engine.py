@@ -77,11 +77,17 @@ async def run_playback(
                     selector = edge.selector
                     action = edge.action
                     
+                    # T7: 兼容 edge.intent is None，不依赖 intent.summary 必然存在
+                    intent_summary = (
+                        getattr(edge.intent, "summary", None) or ""
+                        if edge.intent
+                        else ""
+                    )
                     log_entry: dict = {
                         "step_index": i,
                         "selector": selector,
                         "action": action,
-                        "intent": edge.intent.summary if edge.intent else "",
+                        "intent": intent_summary,
                     }
                     
                     try:
