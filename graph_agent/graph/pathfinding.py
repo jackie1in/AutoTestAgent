@@ -110,6 +110,9 @@ def get_path_from_intent(user_query: str, graph: nx.DiGraph) -> list[GraphEdge]:
             score = _match_score(intent, user_query)
             if score > 0:
                 matching.append((score, u, v, data))
+            else:
+                # Non-matching intent: still traversable to reach matching edges
+                traversal.append((u, v, data))
 
         # Try matching edges first
         matching.sort(key=lambda x: x[0], reverse=True)
