@@ -114,3 +114,35 @@ def test_save_preserves_intent_null_in_json():
         content = path.read_text(encoding="utf-8")
         assert '"intent": null' in content
         assert '"intent_failure_reason": "reason"' in content
+
+
+def test_save_load_roundtrip_t4_metadata():
+    """T4: metadata with intent_missing_count, filtered_non_ui_edges, mapping_stopped, stop_reason round-trips."""
+    G = nx.DiGraph()
+    G.add_node("a", url="https://a.com")
+    G.add_node("b", url="https://b.com")
+    G.add_node("c", url="https://c.com")
+    G.add_edge(
+        "a",
+        "b",
+        selector="#x",
+        action=ActionType.CLICK,
+        intent=Intent(summary="Click login", raw="click", verb="Click", object="Login"),
+        intent_failure_reason=None,
+    )
+    G.add_edge("b", "c", selector="#y", action=ActionType.FILL, intent=None, intent_failure_reason="parse failed")
+
+    G.graph["filtered_non_ui_edges"] = 3
+    G.graph["mapping_stopped"] = True
+    G.graph["stop_reason"] = "unfillable form"
+    G.graph["intent_missing_count"] = 1
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "graph.json"
+        save_graph(G, path)
+
+        loaded = load_graph(path)
+        assert loaded.graph["filtered_non_ui_edges"] == 3
+        assert loaded.graph["mapping_stopped"] is True
+        assert loaded.graph["stop_reason"] == "unfillable form"
+        assert loaded.graph["intent_missing_count"] == 1

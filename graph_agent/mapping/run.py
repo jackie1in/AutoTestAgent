@@ -27,7 +27,7 @@ DEFAULT_TASK_TEMPLATE = (
     "并在最终回复中写明原因（例如：Stopped: unfillable form / Stopped: would delete data）。"
 )
 
-FILTERED_ACTION_KEYS = {"read_file", "write_file", "done"}
+FILTERED_ACTION_KEYS = {"read_file", "write_file", "done", "unknown"}
 
 
 def _clean_url(url: str) -> str:
@@ -389,9 +389,18 @@ async def run_mapping(
             break
     else:
         G.graph["mapping_stopped"] = False
+        G.graph["stop_reason"] = None
+
+    # T4: intent_missing_count for quality assessment
+    intent_missing_count = sum(1 for _u, _v, d in G.edges(data=True) if d.get("intent") is None)
+    G.graph["intent_missing_count"] = intent_missing_count
 
     save_graph(G, output_path)
-    print(f"Graph saved: {output_path} (nodes={G.number_of_nodes()}, edges={G.number_of_edges()})")
+    edge_count = G.number_of_edges()
+    print(
+        f"Graph saved: {output_path} "
+        f"(nodes={G.number_of_nodes()}, edges={edge_count}, intent_missing={intent_missing_count})"
+    )
     return G
 
 
