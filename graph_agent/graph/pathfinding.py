@@ -83,74 +83,76 @@ def get_path_from_intent(user_query: str, graph: nx.DiGraph) -> list[GraphEdge]:
 
     Entry = node with in_degree 0.
     Match priority: intent.key > intent.summary.
+    Skips intent=None edges for matching but traverses through them to reach matching edges.
     """
     if graph.number_of_edges() == 0:
         return []
-        
+
     # Find all nodes with in_degree 0 as potential start nodes
     entries = [n for n in graph if graph.in_degree(n) == 0]
-    
-    # Also consider nodes that are part of a cycle or have incoming edges but are logical starts
-    # For now, let's just try ALL nodes if no clear entries found, or maybe just the first node in the list?
     if not entries:
-        # Fallback: try the first node in the graph
         entries = list(graph.nodes())[:1]
 
-    def dfs(node: str, path: list[GraphEdge], visited: set[str]) -> list[GraphEdge] | None:
-        # Check if current path matches user query well enough to return
-        # This is a heuristic: if we have edges and the last edge's intent matches the query, maybe that's enough?
-        # Or if the query is contained in the concatenation of intents?
-        
-        candidates: list[tuple[float, str, str, dict, Intent]] = []
+    def dfs(
+        node: str,
+        path: list[GraphEdge],
+        visited: set[str],
+        has_matched: bool,
+    ) -> list[GraphEdge] | None:
+        matching: list[tuple[float, str, str, dict]] = []
+        traversal: list[tuple[str, str, dict]] = []
         for u, v, data in graph.out_edges(node, data=True):
             intent = data.get("intent")
-            if intent is None:
-                continue
-            if not isinstance(intent, Intent):
-                # Legacy dict or unsupported shape is treated as missing intent.
+            if intent is None or not isinstance(intent, Intent):
+                # Skip for matching; collect for traversal (T6: empty intent tolerance)
+                traversal.append((u, v, data))
                 continue
             score = _match_score(intent, user_query)
-            if score <= 0:
-                continue
-            candidates.append((score, u, v, data, intent))
+            if score > 0:
+                matching.append((score, u, v, data))
 
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        matched_extensions = False
-        for _score, u, v, data, _intent in candidates:
+        # Try matching edges first
+        matching.sort(key=lambda x: x[0], reverse=True)
+        for _score, u, v, data in matching:
             if v in visited:
                 continue
-
-            matched_extensions = True
             visited.add(v)
-            edge_model = _edge_to_model(u, v, data)
-            path.append(edge_model)
-            
-            result = dfs(v, path, visited)
+            path.append(_edge_to_model(u, v, data))
+            result = dfs(v, path, visited, True)
             if result is not None:
                 return result
-                
             path.pop()
             visited.discard(v)
-            
-        # If we have a valid path so far but couldn't extend it further with matching edges,
-        # return the current path as a valid result (greedy matching).
-        if path:
+
+        # If we have a path with at least one match, return it (greedy)
+        if has_matched and path:
             return list(path)
-            
+
+        # Traverse through null-intent edges to reach nodes with matching edges
+        for u, v, data in traversal:
+            if v in visited:
+                continue
+            visited.add(v)
+            path.append(_edge_to_model(u, v, data))
+            result = dfs(v, path, visited, has_matched)
+            if result is not None:
+                return result
+            path.pop()
+            visited.discard(v)
+
         return None
 
     for start in entries:
         visited = {start}
-        result = dfs(start, [], visited)
+        result = dfs(start, [], visited, False)
         if result is not None:
             return result
-            
-    # If no path found from entries, try searching from ANY node that has a matching outgoing edge
-    # This handles cases where the graph has cycles or we start in the middle of a flow
+
     for node in graph.nodes():
-        if node in entries: continue
+        if node in entries:
+            continue
         visited = {node}
-        result = dfs(node, [], visited)
+        result = dfs(node, [], visited, False)
         if result is not None:
             return result
 
