@@ -1,6 +1,13 @@
 test_cases/*
 screenshots/*
 .venv/*
-__pycache__/*
+**/__pycache__/*
 .env
 agent_history.*
+web-ui
+browser-use
+vibetest-use
+.worktrees
+.pytest_cache/*
+.mypy_cache/*
+**/data/*

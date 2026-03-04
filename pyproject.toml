@@ -5,9 +5,17 @@ description = "UI Automation Testing Agent based on Browser-Use with recording a
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "browser-use>=0.11.8",
+    "browser-use==0.12.1",
     "python-dotenv>=1.0.0",
     "langchain-core>=0.2.0",
+    "langchain-openai>=0.1.0",
+    "langchain-anthropic>=0.1.0",
+    "networkx>=3.0",
+    "openai>=1.0.0",
+    "numpy>=1.24.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.27.0",
+    "playwright>=1.40.0",
 ]
 
 [project.scripts]
@@ -17,4 +25,18 @@ ui-test = "ui_test_agent:main"
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "types-networkx>=3.6.1.20260210",
+]
+graph_agent = [
+    "browser-use==0.12.1",
+    "playwright",
+    "networkx",
+    "fastapi",
+    "uvicorn",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+markers = [
+    "integration: marks tests as integration (deselect with '-m \"not integration\"')",
 ]
