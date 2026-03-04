@@ -38,7 +38,7 @@ class PlaybackRequest(BaseModel):
 
 
 def _graph_to_json_dict(G):
-    """Convert nx.DiGraph to API shape."""
+    """Convert nx.DiGraph to API shape. Includes intent_failure_reason and diagnostic stats."""
     nodes = []
     for nid, data in G.nodes(data=True):
         node = {"id": str(nid)}
@@ -51,9 +51,16 @@ def _graph_to_json_dict(G):
         nodes.append(node)
         
     edges = []
+    missing_count = 0
+    failure_reasons: set[str] = set()
     for u, v, data in G.edges(data=True):
         intent = data.get("intent")
         intent_dict = intent.model_dump() if isinstance(intent, Intent) else None
+        if intent is None:
+            missing_count += 1
+            reason = data.get("intent_failure_reason")
+            if reason:
+                failure_reasons.add(reason)
         
         constraints = data.get("constraints")
         constraints_dict = constraints.model_dump() if isinstance(constraints, ElementConstraints) else None
@@ -69,14 +76,19 @@ def _graph_to_json_dict(G):
             "constraints": constraints_dict,
         }
         edges.append(edge)
-    return {"nodes": nodes, "edges": edges}
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "missing_count": missing_count,
+        "failure_reasons": sorted(failure_reasons),
+    }
 
 
 @app.get("/api/graph")
 def get_graph():
     """Load graph from graph_agent/data/graph.json. Return 200 with nodes/edges; if file missing return empty graph."""
     if not GRAPH_PATH.exists():
-        return {"nodes": [], "edges": []}
+        return {"nodes": [], "edges": [], "missing_count": 0, "failure_reasons": []}
     G = load_graph(GRAPH_PATH)
     return _graph_to_json_dict(G)
 

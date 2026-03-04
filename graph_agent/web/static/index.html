@@ -74,6 +74,16 @@
     #log .final { font-weight: bold; margin-top: 0.5em; }
     .form-row { margin-bottom: 0.75rem; }
     .form-row:last-of-type { margin-bottom: 1rem; }
+    .diagnostics {
+      margin-top: 0.5rem;
+      font-size: 0.8rem;
+      color: var(--muted);
+      padding: 0.5rem;
+      background: var(--surface);
+      border-radius: 6px;
+      border: 1px solid var(--muted);
+    }
+    .diagnostics .missing { color: var(--error); }
   </style>
 </head>
 <body>
@@ -82,6 +92,7 @@
   <section>
     <label>图谱</label>
     <div id="graph"></div>
+    <div id="diagnostics" class="diagnostics" style="display:none;"></div>
   </section>
 
   <section>
@@ -143,13 +154,16 @@
         const visEdges = new vis.DataSet(
           (edges || []).map(function (e) {
             const summary = e.intent ? (e.intent.summary || e.intent.raw || "") : (e.semantic_label || "");
+            const fallback = e.intent_failure_reason ? "[缺失] " + (e.intent_failure_reason.length > 40 ? e.intent_failure_reason.slice(0, 40) + "…" : e.intent_failure_reason) : "[无意图]";
+            const label = summary || fallback || e.selector || "";
+            const title = summary ? ((summary || "") + (e.selector ? " " + e.selector : "")) : (e.intent_failure_reason || fallback) + (e.selector ? " " + e.selector : "");
             return {
               from: e.source,
               to: e.target,
-              label: summary || e.selector || "",
-              title: (summary || "") + (e.selector ? " " + e.selector : ""),
+              label: label,
+              title: title,
               arrows: "to",
-              color: { color: "#565f89" }
+              color: { color: e.intent ? "#565f89" : "#f7768e" }
             };
           })
         );
@@ -186,6 +200,17 @@
           .then(function (r) { return r.json(); })
           .then(function (data) {
             renderGraph(data.nodes || [], data.edges || []);
+            const diagEl = document.getElementById("diagnostics");
+            const missing = data.missing_count || 0;
+            const reasons = data.failure_reasons || [];
+            if (missing > 0) {
+              diagEl.style.display = "block";
+              diagEl.innerHTML = "<span class=\"missing\">" + missing + " 条边缺失意图</span>" +
+                (reasons.length ? "<br><details><summary>失败原因</summary><ul>" +
+                  reasons.map(function (r) { return "<li>" + r + "</li>"; }).join("") + "</ul></details>" : "");
+            } else {
+              diagEl.style.display = "none";
+            }
           })
           .catch(function (err) {
             log("加载图谱失败: " + err.message, "error");
