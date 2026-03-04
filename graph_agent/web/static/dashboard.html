@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dashboard — Graph Agent</title>
+  <style>
+    :root {
+      --bg: #1a1b26;
+      --surface: #24283b;
+      --text: #c0caf5;
+      --muted: #565f89;
+      --accent: #7aa2f7;
+      --success: #9ece6a;
+      --error: #f7768e;
+      --warning: #e0af68;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "JetBrains Mono", "SF Mono", Consolas, monospace;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 1rem;
+      min-height: 100vh;
+    }
+    h1 { font-size: 1.25rem; margin: 0 0 1rem 0; color: var(--accent); }
+    nav {
+      margin-bottom: 1.5rem;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid var(--muted);
+    }
+    nav a {
+      color: var(--accent);
+      text-decoration: none;
+      margin-right: 1rem;
+    }
+    nav a:hover { text-decoration: underline; }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    .metric-card {
+      background: var(--surface);
+      border: 1px solid var(--muted);
+      border-radius: 8px;
+      padding: 1rem;
+    }
+    .metric-card .label {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-bottom: 0.25rem;
+    }
+    .metric-card .value {
+      font-size: 1.5rem;
+      font-weight: bold;
+      color: var(--accent);
+    }
+    .metric-card .value.success { color: var(--success); }
+    .metric-card .value.warning { color: var(--warning); }
+    .metric-card .value.error { color: var(--error); }
+    .status-section {
+      background: var(--surface);
+      border: 1px solid var(--muted);
+      border-radius: 8px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+    }
+    .status-section .label { color: var(--muted); font-size: 0.85rem; }
+    #error-msg {
+      color: var(--error);
+      margin-top: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>Dashboard — 图谱统计</h1>
+  <nav>
+    <a href="/">图谱 · 意图 · 回放</a>
+    <a href="/dashboard.html">Dashboard</a>
+  </nav>
+
+  <div id="metrics" class="metrics"></div>
+  <div id="status" class="status-section" style="display:none;"></div>
+  <div id="error-msg"></div>
+
+  <script>
+    (function () {
+      const metricsEl = document.getElementById("metrics");
+      const statusEl = document.getElementById("status");
+      const errorEl = document.getElementById("error-msg");
+
+      function getAuthHeaders() {
+        const token = localStorage.getItem("access_token");
+        return token ? { "Authorization": "Bearer " + token } : {};
+      }
+
+      function renderMetric(label, value, cssClass) {
+        const card = document.createElement("div");
+        card.className = "metric-card";
+        card.innerHTML =
+          "<div class=\"label\">" + label + "</div>" +
+          "<div class=\"value" + (cssClass ? " " + cssClass : "") + "\">" + value + "</div>";
+        return card;
+      }
+
+      function loadDashboard() {
+        fetch("/api/dashboard", { headers: getAuthHeaders() })
+          .then(function (r) {
+            if (r.status === 401) {
+              window.location.href = "/?login=1";
+              return;
+            }
+            return r.json();
+          })
+          .then(function (data) {
+            if (!data) return;
+            errorEl.textContent = "";
+            metricsEl.innerHTML = "";
+
+            const edgeCount = data.edge_count ?? 0;
+            const missingCount = data.intent_missing_count ?? 0;
+            const successRate = data.intent_success_rate ?? 1;
+
+            metricsEl.appendChild(renderMetric("节点数", data.node_count ?? 0, ""));
+            metricsEl.appendChild(renderMetric("边数", edgeCount, ""));
+            metricsEl.appendChild(renderMetric("缺失意图边数", missingCount, missingCount > 0 ? "error" : ""));
+            metricsEl.appendChild(renderMetric(
+              "意图成功率",
+              (successRate * 100).toFixed(2) + "%",
+              successRate >= 0.7 ? "success" : successRate >= 0.3 ? "warning" : "error"
+            ));
+            metricsEl.appendChild(renderMetric("过滤非 UI 边数", data.filtered_non_ui_edges ?? 0, ""));
+
+            if (data.mapping_stopped != null || data.stop_reason) {
+              statusEl.style.display = "block";
+              statusEl.innerHTML =
+                "<div class=\"label\">Mapping 状态</div>" +
+                "<div>mapping_stopped: " + (data.mapping_stopped ?? "—") + "</div>" +
+                (data.stop_reason ? "<div>stop_reason: " + data.stop_reason + "</div>" : "");
+            } else {
+              statusEl.style.display = "none";
+            }
+          })
+          .catch(function (err) {
+            errorEl.textContent = "加载失败: " + err.message;
+          });
+      }
+
+      loadDashboard();
+    })();
+  </script>
+</body>
+</html>

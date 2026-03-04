@@ -233,6 +233,46 @@ async def _sse_generator(edge_list: list[GraphEdge], test_data: dict, start_url:
     await task
 
 
+@app.get("/api/dashboard")
+def get_dashboard(_user: dict = Depends(get_current_user)):
+    """
+    Return dashboard statistics: edge_count, intent_missing_count, intent_success_rate,
+    filtered_non_ui_edges, node_count, mapping_stopped, stop_reason.
+    """
+    if not GRAPH_PATH.exists():
+        return {
+            "node_count": 0,
+            "edge_count": 0,
+            "intent_missing_count": 0,
+            "intent_success_rate": 1.0,
+            "filtered_non_ui_edges": 0,
+            "mapping_stopped": None,
+            "stop_reason": None,
+        }
+    G = load_graph(GRAPH_PATH)
+    node_count = G.number_of_nodes()
+    edge_count = G.number_of_edges()
+    missing_count = sum(
+        1 for _u, _v, data in G.edges(data=True) if data.get("intent") is None
+    )
+    intent_success_rate = (
+        1.0 - (missing_count / edge_count) if edge_count > 0 else 1.0
+    )
+    metadata = dict(G.graph)
+    filtered_non_ui_edges = metadata.get("filtered_non_ui_edges", 0)
+    mapping_stopped = metadata.get("mapping_stopped")
+    stop_reason = metadata.get("stop_reason")
+    return {
+        "node_count": node_count,
+        "edge_count": edge_count,
+        "intent_missing_count": missing_count,
+        "intent_success_rate": round(intent_success_rate, 4),
+        "filtered_non_ui_edges": filtered_non_ui_edges,
+        "mapping_stopped": mapping_stopped,
+        "stop_reason": stop_reason,
+    }
+
+
 @app.post("/api/playback")
 def post_playback(body: PlaybackRequest, _user: dict = Depends(get_current_user)):
     """

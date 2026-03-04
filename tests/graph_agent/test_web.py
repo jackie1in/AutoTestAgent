@@ -146,3 +146,57 @@ def test_api_graph_empty_when_file_missing():
     assert data["edges"] == []
     assert data["missing_count"] == 0
     assert data["failure_reasons"] == []
+
+
+def test_api_dashboard_requires_auth():
+    """GET /api/dashboard returns 401 without token."""
+    client = TestClient(app)
+    resp = client.get("/api/dashboard")
+    assert resp.status_code == 401
+
+
+def test_api_dashboard_empty_when_file_missing():
+    """Dashboard returns zeroed stats when graph file does not exist."""
+    with patch("graph_agent.web.app.GRAPH_PATH") as mock_path:
+        mock_path.exists.return_value = False
+        client = TestClient(app)
+        resp = client.get("/api/dashboard", headers=_auth_headers(client))
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["node_count"] == 0
+    assert data["edge_count"] == 0
+    assert data["intent_missing_count"] == 0
+    assert data["intent_success_rate"] == 1.0
+    assert data["filtered_non_ui_edges"] == 0
+    assert data["mapping_stopped"] is None
+    assert data["stop_reason"] is None
+
+
+def test_api_dashboard_returns_stats():
+    """Dashboard returns graph statistics with metadata."""
+    G = nx.DiGraph()
+    G.add_node("a", url="https://a.com")
+    G.add_node("b", url="https://b.com")
+    G.add_node("c", url="https://c.com")
+    G.add_edge("a", "b", selector="#x", action=ActionType.CLICK, intent=None, intent_failure_reason="parse failed")
+    G.add_edge("b", "c", selector="#login", action=ActionType.CLICK, intent=Intent(
+        raw="click login", verb="Click", object="Login", summary="Click login", key="submit_login"
+    ), intent_failure_reason=None)
+    G.graph["filtered_non_ui_edges"] = 3
+    G.graph["mapping_stopped"] = True
+    G.graph["stop_reason"] = "Stopped: unfillable form"
+
+    with patch("graph_agent.web.app.GRAPH_PATH") as mock_path:
+        mock_path.exists.return_value = True
+        with patch("graph_agent.web.app.load_graph", return_value=G):
+            client = TestClient(app)
+            resp = client.get("/api/dashboard", headers=_auth_headers(client))
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["node_count"] == 3
+    assert data["edge_count"] == 2
+    assert data["intent_missing_count"] == 1
+    assert data["intent_success_rate"] == 0.5
+    assert data["filtered_non_ui_edges"] == 3
+    assert data["mapping_stopped"] is True
+    assert data["stop_reason"] == "Stopped: unfillable form"
