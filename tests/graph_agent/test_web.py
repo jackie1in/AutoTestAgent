@@ -1,4 +1,4 @@
-"""Tests for web API (T8: API 与前端展示联动)."""
+"""Tests for web API (T8: API 与前端展示联动) and auth."""
 
 from unittest.mock import patch
 
@@ -8,6 +8,56 @@ from fastapi.testclient import TestClient
 
 from graph_agent.models import ActionType, Intent
 from graph_agent.web.app import app
+
+
+def _auth_headers(client: TestClient) -> dict:
+    """Login and return Authorization headers for protected endpoints."""
+    resp = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
+    assert resp.status_code == 200
+    token = resp.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_auth_login_success():
+    """POST /api/auth/login returns token for valid credentials."""
+    client = TestClient(app)
+    resp = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "access_token" in data
+    assert data["token_type"] == "bearer"
+    assert len(data["access_token"]) > 0
+
+
+def test_auth_login_invalid_credentials():
+    """POST /api/auth/login returns 401 for invalid credentials."""
+    client = TestClient(app)
+    resp = client.post("/api/auth/login", json={"username": "admin", "password": "wrong"})
+    assert resp.status_code == 401
+    assert "error" in resp.json()
+
+
+def test_api_graph_requires_auth():
+    """GET /api/graph returns 401 without token."""
+    with patch("graph_agent.web.app.GRAPH_PATH") as mock_path:
+        mock_path.exists.return_value = False
+        client = TestClient(app)
+        resp = client.get("/api/graph")
+    assert resp.status_code == 401
+
+
+def test_api_intents_requires_auth():
+    """GET /api/intents returns 401 without token."""
+    client = TestClient(app)
+    resp = client.get("/api/intents")
+    assert resp.status_code == 401
+
+
+def test_api_playback_requires_auth():
+    """POST /api/playback returns 401 without token."""
+    client = TestClient(app)
+    resp = client.post("/api/playback", json={"intent": "x", "test_data": {}})
+    assert resp.status_code == 401
 
 
 def test_api_intents_ignores_null_intent_edges():
@@ -30,7 +80,7 @@ def test_api_intents_ignores_null_intent_edges():
         mock_path.exists.return_value = True
         with patch("graph_agent.web.app.load_graph", return_value=G):
             client = TestClient(app)
-            resp = client.get("/api/intents")
+            resp = client.get("/api/intents", headers=_auth_headers(client))
     assert resp.status_code == 200
     data = resp.json()
     assert len(data) == 1
@@ -56,7 +106,7 @@ def test_api_graph_returns_intent_failure_reason():
         mock_path.exists.return_value = True
         with patch("graph_agent.web.app.load_graph", return_value=G):
             client = TestClient(app)
-            resp = client.get("/api/graph")
+            resp = client.get("/api/graph", headers=_auth_headers(client))
     assert resp.status_code == 200
     data = resp.json()
     assert len(data["edges"]) == 1
@@ -77,7 +127,7 @@ def test_api_graph_returns_missing_count_and_failure_reasons():
         mock_path.exists.return_value = True
         with patch("graph_agent.web.app.load_graph", return_value=G):
             client = TestClient(app)
-            resp = client.get("/api/graph")
+            resp = client.get("/api/graph", headers=_auth_headers(client))
     assert resp.status_code == 200
     data = resp.json()
     assert data["missing_count"] == 2
@@ -89,7 +139,7 @@ def test_api_graph_empty_when_file_missing():
     with patch("graph_agent.web.app.GRAPH_PATH") as mock_path:
         mock_path.exists.return_value = False
         client = TestClient(app)
-        resp = client.get("/api/graph")
+        resp = client.get("/api/graph", headers=_auth_headers(client))
     assert resp.status_code == 200
     data = resp.json()
     assert data["nodes"] == []

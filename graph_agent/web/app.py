@@ -1,4 +1,4 @@
-"""FastAPI app: GET /api/graph, GET /api/intents, POST /api/playback (SSE)."""
+"""FastAPI app: GET /api/graph, GET /api/intents, POST /api/playback (SSE), POST /api/auth/login."""
 
 import json
 import asyncio
@@ -7,17 +7,22 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-load_dotenv()
-
 from graph_agent.graph.io import load_graph
 from graph_agent.graph.pathfinding import get_path_from_intent
+from graph_agent.models import ElementConstraints, GraphEdge, Intent
 from graph_agent.playback.engine import run_playback
-from graph_agent.models import GraphEdge, Intent, ActionType, ElementConstraints
+from graph_agent.web.auth import (
+    authenticate_user,
+    create_access_token,
+    get_current_user,
+)
+
+load_dotenv()
 
 # graph_agent/web/app.py -> graph_agent -> data/graph.json
 GRAPH_PATH = Path(__file__).resolve().parent.parent / "data" / "graph.json"
@@ -35,6 +40,13 @@ class PlaybackRequest(BaseModel):
 
     intent: str
     test_data: dict = {}
+
+
+class LoginRequest(BaseModel):
+    """Request body for POST /api/auth/login."""
+
+    username: str
+    password: str
 
 
 def _graph_to_json_dict(G):
@@ -84,8 +96,20 @@ def _graph_to_json_dict(G):
     }
 
 
+@app.post("/api/auth/login")
+def post_login(body: LoginRequest):
+    """Authenticate user and return JWT access token."""
+    if not authenticate_user(body.username, body.password):
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Invalid username or password"},
+        )
+    token = create_access_token(data={"sub": body.username})
+    return {"access_token": token, "token_type": "bearer"}
+
+
 @app.get("/api/graph")
-def get_graph():
+def get_graph(_user: dict = Depends(get_current_user)):
     """Load graph from graph_agent/data/graph.json. Return 200 with nodes/edges; if file missing return empty graph."""
     if not GRAPH_PATH.exists():
         return {"nodes": [], "edges": [], "missing_count": 0, "failure_reasons": []}
@@ -94,7 +118,7 @@ def get_graph():
 
 
 @app.get("/api/intents")
-def get_intents():
+def get_intents(_user: dict = Depends(get_current_user)):
     """Return unique intents with key/summary/confidence for UI selection."""
     if not GRAPH_PATH.exists():
         return []
@@ -210,7 +234,7 @@ async def _sse_generator(edge_list: list[GraphEdge], test_data: dict, start_url:
 
 
 @app.post("/api/playback")
-def post_playback(body: PlaybackRequest):
+def post_playback(body: PlaybackRequest, _user: dict = Depends(get_current_user)):
     """
     Run playback for the given intent and test_data.
     Loads graph, resolves path from intent, runs playback in a background thread, streams SSE.
