@@ -85,61 +85,6 @@ class DataKeyExtractor:
             return None
 
 
-class IntentAnalyzer:
-    """Analyzes raw thought strings to extract structured intent."""
-
-    def analyze(self, thought: str) -> Intent:
-        """Convert raw thought into structured Intent."""
-        thought = thought.strip()
-        verb = "Interact"
-        obj = "Element"
-        summary = thought
-
-        # Simple rule-based extraction
-        # "Click the login button" -> Verb: Click, Object: login button
-        # "Type 'user' into username field" -> Verb: Type, Object: username field
-        
-        lower_thought = thought.lower()
-        
-        if "click" in lower_thought:
-            verb = "Click"
-            parts = re.split(r"click\s+(?:on\s+)?", lower_thought, maxsplit=1)
-            if len(parts) > 1:
-                obj = parts[1].strip()
-        elif "type" in lower_thought or "enter" in lower_thought or "fill" in lower_thought:
-            verb = "Fill"
-            # Try to find what is being filled
-            if "into" in lower_thought:
-                parts = lower_thought.split("into")
-                if len(parts) > 1:
-                    obj = parts[1].strip()
-            elif "in" in lower_thought:
-                 parts = lower_thought.split("in")
-                 if len(parts) > 1:
-                    obj = parts[1].strip()
-        elif "navigate" in lower_thought or "go to" in lower_thought:
-            verb = "Navigate"
-            if "to" in lower_thought:
-                parts = lower_thought.split("to")
-                if len(parts) > 1:
-                    obj = parts[1].strip()
-
-        # Clean up object
-        obj = obj.strip(".,")
-        if not obj:
-            obj = "Element"
-            
-        # Capitalize for display
-        obj = obj.title()
-
-        return Intent(
-            raw=thought,
-            verb=verb,
-            object=obj,
-            summary=summary
-        )
-
-
 def _get_next_goal(thought: dict | object) -> str:
     """Extract and clean next_goal from thought."""
     raw_goal = ""
