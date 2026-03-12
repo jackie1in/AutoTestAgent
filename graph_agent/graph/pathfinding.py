@@ -225,7 +225,11 @@ def _expand_template_to_path(
     active_keys: set[str] | None = None,
     seen_edge_ids: set[str] | None = None,
 ) -> list[GraphEdge]:
-    """Expand template plus explicit prerequisites into a replayable edge path."""
+    """Expand template plus explicit prerequisites into a replayable edge path.
+
+    When a dependency's exit_node differs from the next template's entry_node,
+    inserts the connecting path from the graph so playback can reach the correct state.
+    """
     active = active_keys if active_keys is not None else set()
     seen = seen_edge_ids if seen_edge_ids is not None else set()
     if template.business_key in active:
@@ -234,10 +238,20 @@ def _expand_template_to_path(
     active.add(template.business_key)
     expanded: list[GraphEdge] = []
     try:
+        last_exit_node: str | None = None
         for dependency_key in template.depends_on:
             dependency = templates_by_key.get(dependency_key)
             if dependency is None:
                 return []
+            if last_exit_node is not None and last_exit_node != dependency.entry_node:
+                connecting = _get_connecting_path(graph, last_exit_node, dependency.entry_node)
+                for edge in connecting:
+                    edge_id = edge.edge_id
+                    if edge_id and edge_id in seen:
+                        continue
+                    if edge_id:
+                        seen.add(edge_id)
+                    expanded.append(edge)
             dependency_path = _expand_template_to_path(
                 dependency,
                 graph,
@@ -247,6 +261,17 @@ def _expand_template_to_path(
             if dependency.steps and not dependency_path:
                 return []
             for edge in dependency_path:
+                edge_id = edge.edge_id
+                if edge_id and edge_id in seen:
+                    continue
+                if edge_id:
+                    seen.add(edge_id)
+                expanded.append(edge)
+            last_exit_node = dependency.exit_node
+
+        if last_exit_node is not None and last_exit_node != template.entry_node:
+            connecting = _get_connecting_path(graph, last_exit_node, template.entry_node)
+            for edge in connecting:
                 edge_id = edge.edge_id
                 if edge_id and edge_id in seen:
                     continue
@@ -264,6 +289,26 @@ def _expand_template_to_path(
     finally:
         active.discard(template.business_key)
     return expanded
+
+
+def _get_connecting_path(graph: nx.Graph, from_node: str, to_node: str) -> list[GraphEdge]:
+    """Return GraphEdges along shortest path from from_node to to_node, or [] if no path or same node."""
+    if from_node == to_node:
+        return []
+    if from_node not in graph or to_node not in graph:
+        return []
+    try:
+        node_path = nx.shortest_path(graph, from_node, to_node)
+    except (nx.NetworkXNoPath, nx.NodeNotFound):
+        return []
+    edges: list[GraphEdge] = []
+    for i in range(len(node_path) - 1):
+        u, v = node_path[i], node_path[i + 1]
+        for _u, _v, data in _iter_out_edges(graph, u):
+            if str(_v) == str(v):
+                edges.append(_edge_to_model(str(_u), str(_v), data))
+                break
+    return edges
 
 
 def _iter_out_edges(graph: nx.Graph, node: str) -> list[tuple[str, str, dict]]:

@@ -631,3 +631,102 @@ async def test_generate_business_templates_attaches_auth_login_when_no_direct_te
     by_key = {template.business_key: template for template in templates}
 
     assert by_key["project.create.submit"].depends_on == ["auth.login"]
+
+
+@pytest.mark.asyncio
+async def test_generate_business_templates_attaches_path_based_dependency_when_no_direct_touch():
+    """When template B's entry is reachable from template A's exit via graph path (not direct), A should be depends_on."""
+    G: nx.MultiDiGraph = nx.MultiDiGraph()
+    G.add_node("login", url="https://example.com/login")
+    G.add_node("login-filled", url="https://example.com/login")
+    G.add_node("secure", url="https://example.com/secure")
+    G.add_node("intermediate", url="https://example.com/secure/nav")
+    G.add_node("bridge", url="https://example.com/secure/bridge")
+    G.add_node("target", url="https://example.com/secure/target")
+    G.add_edge(
+        "login",
+        "login-filled",
+        key="step-0",
+        edge_id="step-0",
+        step_index=0,
+        selector="#user",
+        action=ActionType.FILL,
+        intent=_intent("Fill user", "auth.fill.username"),
+        param_name="username",
+    )
+    G.add_edge(
+        "login-filled",
+        "secure",
+        key="step-1",
+        edge_id="step-1",
+        step_index=1,
+        selector="#login",
+        action=ActionType.CLICK,
+        intent=_intent("Submit login", "auth.submit.login"),
+    )
+    G.add_edge(
+        "secure",
+        "intermediate",
+        key="step-2",
+        edge_id="step-2",
+        step_index=2,
+        selector="#nav",
+        action=ActionType.CLICK,
+        intent=None,
+        intent_failure_reason="parse failed",
+    )
+    G.add_edge(
+        "intermediate",
+        "bridge",
+        key="step-3",
+        edge_id="step-3",
+        step_index=3,
+        selector="#bridge",
+        action=ActionType.CLICK,
+        intent=_intent("Enter bridge", "nav.bridge"),
+    )
+    G.add_edge(
+        "bridge",
+        "target",
+        key="step-4",
+        edge_id="step-4",
+        step_index=4,
+        selector="#action",
+        action=ActionType.CLICK,
+        intent=_intent("Open target", "project.target.open"),
+    )
+
+    async def classifier(payload: dict[str, object]) -> dict[str, object] | None:
+        edge_ids = [step.get("edge_id") for step in payload["steps"]]  # type: ignore[index]
+        if edge_ids == ["step-0", "step-1"]:
+            return {
+                "is_business_flow": True,
+                "business_key": "auth.login",
+                "summary": "登录",
+                "slots": {},
+                "confidence": 0.95,
+                "evidence": {},
+            }
+        if edge_ids == ["step-3", "step-4"]:
+            return {
+                "is_business_flow": True,
+                "business_key": "project.target.open",
+                "summary": "打开目标",
+                "slots": {},
+                "confidence": 0.9,
+                "evidence": {},
+            }
+        return {
+            "is_business_flow": False,
+            "business_key": "",
+            "summary": "",
+            "slots": {},
+            "confidence": 0.0,
+            "evidence": {},
+        }
+
+    templates = await generate_business_templates(G, classifier=classifier, max_path_length=5)
+    by_key = {template.business_key: template for template in templates}
+
+    assert "project.target.open" in by_key
+    assert "auth.login" in by_key["project.target.open"].depends_on

@@ -336,3 +336,93 @@ def test_pathfinding_submit_login_query_prefers_submit_edge_over_go_to_login():
     assert path[-1].selector == 'button[type="submit"]'
     assert path[-1].intent is not None
     assert path[-1].intent.key == "submit_login"
+
+
+def test_pathfinding_inserts_connecting_path_when_dependency_exit_differs_from_template_entry():
+    """When dependency exit_node != template entry_node, pathfinding should insert connecting graph edges."""
+    G = nx.MultiDiGraph()
+    G.add_node("login", url="https://a.com/login")
+    G.add_node("secure", url="https://a.com/secure")
+    G.add_node("bridge", url="https://a.com/bridge")
+    G.add_node("target", url="https://a.com/target")
+    G.add_edge(
+        "login",
+        "secure",
+        key="step-1",
+        edge_id="step-1",
+        step_index=1,
+        selector="#login",
+        action=ActionType.CLICK,
+        intent=_make_intent("Submit login", key="auth.submit.login"),
+    )
+    G.add_edge(
+        "secure",
+        "bridge",
+        key="step-2",
+        edge_id="step-2",
+        step_index=2,
+        selector="#bridge",
+        action=ActionType.CLICK,
+        intent=_make_intent("Go to bridge", key="nav.bridge"),
+    )
+    G.add_edge(
+        "bridge",
+        "target",
+        key="step-3",
+        edge_id="step-3",
+        step_index=3,
+        selector="#target",
+        action=ActionType.CLICK,
+        intent=_make_intent("Open target", key="project.target.open"),
+    )
+    G.graph["business_templates"] = [
+        BusinessTemplate(
+            template_id="tpl-auth",
+            business_key="auth.login",
+            summary="登录",
+            entry_node="login",
+            exit_node="secure",
+            path_length=1,
+            confidence=0.95,
+            steps=[
+                BusinessTemplateStep(
+                    edge_id="step-1",
+                    source="login",
+                    target="secure",
+                    selector="#login",
+                    action=ActionType.CLICK,
+                    intent_key="auth.submit.login",
+                    param_name=None,
+                )
+            ],
+            slots={},
+            evidence={},
+        ).model_dump(mode="json"),
+        BusinessTemplate(
+            template_id="tpl-target",
+            business_key="project.target.open",
+            summary="打开目标",
+            entry_node="bridge",
+            exit_node="target",
+            path_length=1,
+            confidence=0.9,
+            steps=[
+                BusinessTemplateStep(
+                    edge_id="step-3",
+                    source="bridge",
+                    target="target",
+                    selector="#target",
+                    action=ActionType.CLICK,
+                    intent_key="project.target.open",
+                    param_name=None,
+                )
+            ],
+            slots={},
+            evidence={},
+            depends_on=["auth.login"],
+        ).model_dump(mode="json"),
+    ]
+
+    path = get_path_from_intent("project.target.open", G)
+
+    assert [edge.edge_id for edge in path] == ["step-1", "step-2", "step-3"]

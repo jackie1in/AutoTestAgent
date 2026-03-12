@@ -305,29 +305,59 @@ def _prefer_template(current: BusinessTemplate | None, candidate: BusinessTempla
     return current
 
 
-def _choose_direct_dependency_candidate(
+def _choose_dependency_candidate(
     template: BusinessTemplate,
     templates: list[BusinessTemplate],
+    graph: nx.Graph,
 ) -> BusinessTemplate | None:
-    """Select the most plausible immediate predecessor template."""
-    candidate: BusinessTemplate | None = None
+    """Select the most plausible immediate predecessor template.
+
+    Prefers direct connection (other.exit_node == template.entry_node).
+    When no direct match exists, considers templates whose exit_node has a path
+    to template.entry_node in the graph, preferring the one with shortest path.
+    """
+    direct_candidate: BusinessTemplate | None = None
+    path_candidates: list[tuple[int, BusinessTemplate]] = []
+
     for other in templates:
         if other.business_key == template.business_key:
             continue
-        if other.exit_node != template.entry_node:
+        if other.exit_node == template.entry_node:
+            direct_candidate = _prefer_template(direct_candidate, other)
             continue
-        candidate = _prefer_template(candidate, other)
-    return candidate
+        if other.exit_node not in graph or template.entry_node not in graph:
+            continue
+        try:
+            if not nx.has_path(graph, other.exit_node, template.entry_node):
+                continue
+        except Exception:
+            continue
+        try:
+            path_len = len(nx.shortest_path(graph, other.exit_node, template.entry_node)) - 1
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            continue
+        path_candidates.append((path_len, other))
+
+    if direct_candidate is not None:
+        return direct_candidate
+    if not path_candidates:
+        return None
+    path_candidates.sort(key=lambda x: x[0])
+    best: BusinessTemplate | None = None
+    for _path_len, other in path_candidates:
+        best = _prefer_template(best, other)
+    return best
 
 
 def _attach_direct_template_dependencies(
+    graph: nx.Graph,
     templates: list[BusinessTemplate],
 ) -> list[BusinessTemplate]:
-    """Attach one immediate business predecessor when templates touch at a state boundary."""
+    """Attach one immediate business predecessor when templates touch at a state boundary or are reachable via graph path."""
     for template in templates:
         if template.depends_on:
             continue
-        dependency = _choose_direct_dependency_candidate(template, templates)
+        dependency = _choose_dependency_candidate(template, templates, graph)
         if dependency is not None:
             template.depends_on.append(dependency.business_key)
     return templates
@@ -421,7 +451,7 @@ async def generate_business_templates(
                         deduped[dedupe_key] = _prefer_template(deduped.get(dedupe_key), template)
                 stack.append((v, next_path, next_used))
 
-    templates = _attach_direct_template_dependencies(list(deduped.values()))
+    templates = _attach_direct_template_dependencies(graph, list(deduped.values()))
     return _attach_auth_login_dependency(graph, templates)
 
 
