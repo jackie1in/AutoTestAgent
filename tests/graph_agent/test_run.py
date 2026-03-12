@@ -692,6 +692,15 @@ def test_build_mapping_task_with_env_login_hints():
     assert "password=SuperSecretPassword!" in text
 
 
+def test_task_template_includes_derived_exploration_hint():
+    """Task 2: Default task template should encourage exploring derived pages."""
+    from graph_agent.mapping.run import DEFAULT_TASK_TEMPLATE
+    task = DEFAULT_TASK_TEMPLATE.format(start_url="https://example.com/")
+    assert "派生" in task
+    assert "继续探索" in task
+    assert "菜单" in task or "列表" in task or "详情" in task
+
+
 def test_write_acceptance_snapshot_creates_file(tmp_path: Path):
     graph_path = tmp_path / "graph.json"
     inventory_path = tmp_path / "element_inventory.json"

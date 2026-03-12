@@ -11,6 +11,8 @@ from graph_agent.mapping.scout import (
     _normalize_type,
     _parse_elements_from_llm_response,
     _resolve_multi_page_urls,
+    extract_derived_urls,
+    extract_derived_urls_from_elements,
     normalize_elements,
     run_scout_multi,
 )
@@ -108,6 +110,46 @@ def test_aggregate_elements_with_sources_dedup_and_source_urls():
         "https://the-internet.herokuapp.com",
         "https://the-internet.herokuapp.com/login",
     ]
+
+
+def test_extract_derived_urls_excludes_start_and_deduplicates():
+    urls = [
+        "https://example.com/",
+        "https://example.com/login",
+        "https://example.com/dashboard",
+        "https://example.com/login",
+        "",
+        "not-http",
+    ]
+    derived = extract_derived_urls(urls, "https://example.com/", exclude_start=True)
+    assert "https://example.com/" not in derived
+    assert "https://example.com/login" in derived
+    assert "https://example.com/dashboard" in derived
+    assert derived.count("https://example.com/login") == 1
+
+
+def test_extract_derived_urls_resolves_relative_paths():
+    urls = ["/login", "/dashboard"]
+    derived = extract_derived_urls(urls, "https://example.com/", exclude_start=False)
+    assert "https://example.com/login" in derived
+    assert "https://example.com/dashboard" in derived
+
+
+def test_extract_derived_urls_from_elements_parses_href():
+    elements = [
+        {"selector": "a[href='/login']", "type": "link", "label": "Login"},
+        {"selector": 'a[href="/dashboard"]', "type": "link", "label": "Dashboard"},
+        {"selector": "xpath=//a[@href='/settings']", "type": "link", "label": "Settings"},
+        {"selector": "#submit", "type": "button", "label": "Submit"},
+        {"selector": "a[href='#anchor']", "type": "link", "label": "Anchor"},
+    ]
+    derived = extract_derived_urls_from_elements(
+        elements, "https://example.com/"
+    )
+    assert "https://example.com/login" in derived
+    assert "https://example.com/dashboard" in derived
+    assert "https://example.com/settings" in derived
+    assert "#anchor" not in str(derived)
 
 
 @pytest.mark.asyncio

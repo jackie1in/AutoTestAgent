@@ -18,13 +18,14 @@ from graph_agent.graph.templates import generate_business_templates, store_busin
 from graph_agent.graph.io import save_graph, load_graph
 from graph_agent.llm import get_llm
 from graph_agent.mapping.parser import parse_browser_use_step, infer_intent_for_context
-from graph_agent.mapping.scout import run_scout, run_scout_multi
+from graph_agent.mapping.scout import extract_derived_urls, run_scout, run_scout_multi
 from graph_agent.models import ActionType
 
 # Generic task template for site-agnostic mapping.
 DEFAULT_TASK_TEMPLATE = (
     "从起始URL开始探索核心业务流程：{start_url}。"
     "探索阶段优先使用UI交互动作：click/fill/navigate/select。"
+    "在点击菜单、列表项、详情入口、子项目入口、概览入口后，继续探索进入的派生页面，不要停留在入口页。"
     "记录每一步的 selector、业务意图、动作类型及目标状态。"
     "严禁在探索过程中使用 read_file/write_file/replace_file 等文件工具；仅允许在最终 done 时输出结论。"
     "遇到无法完成的表单（缺少必填数据）或潜在破坏性操作（删除、清空、提交不可逆变更）时立即停止，"
@@ -755,6 +756,10 @@ async def run_mapping(
     )
     G.graph["start_url"] = resolved_url
 
+    # Task 2: Record visited URLs for derived URL scout (unique http(s) from history).
+    visited_urls = list(dict.fromkeys(u for u in urls if _is_http_url(u or "")))
+    G.graph["visited_urls"] = visited_urls
+
     # Optionally merge with existing graph on disk.
     path_obj = Path(output_path)
     if merge_existing and path_obj.exists():
@@ -913,12 +918,20 @@ def main() -> None:
             await run_scout(url, output_path=inventory)
         print(f"Inventory saved: {inventory}")
         print("Step 2: Mapping (explore flow, build graph)...")
-        await run_mapping(
+        G = await run_mapping(
             url=url,
             output_path=output,
             inventory_path=inventory,
             merge_existing=merge_existing,
         )
+
+        # Task 2: Scout derived URLs discovered during mapping to enrich inventory.
+        visited_urls = G.graph.get("visited_urls", [])
+        derived = extract_derived_urls(visited_urls, url, exclude_start=True)
+        if derived:
+            print(f"Step 3: Scout derived URLs ({len(derived)} pages)...")
+            await run_scout_multi(start_url=url, page_hints=derived, output_path=inventory)
+            print(f"Inventory enriched with derived pages: {inventory}")
 
     asyncio.run(_run())
 

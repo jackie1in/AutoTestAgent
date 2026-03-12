@@ -288,6 +288,94 @@ async def run_scout(
     return elements
 
 
+def _is_http_url(value: str) -> bool:
+    """Return True if value looks like a stable http(s) URL."""
+    v = (value or "").strip()
+    return v.startswith("http://") or v.startswith("https://")
+
+
+def _clean_url_for_derived(url: str, base_url: str) -> str:
+    """Strip query/fragment and resolve relative URLs to absolute."""
+    if not url or not base_url:
+        return ""
+    raw = (url or "").strip()
+    if not _is_http_url(raw):
+        raw = urljoin(base_url.rstrip("/") + "/", raw)
+    try:
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(raw)
+        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+    except Exception:
+        return raw
+
+
+def extract_derived_urls(
+    urls: list[str],
+    start_url: str,
+    *,
+    exclude_start: bool = True,
+) -> list[str]:
+    """Extract unique derived URLs from a URL list (e.g. mapping history).
+
+    - urls: Raw URL list from history.
+    - start_url: Base URL for resolving relative paths; used to exclude start.
+    - exclude_start: If True, exclude start_url and same-path URLs from result.
+
+    Returns sorted unique http(s) URLs, excluding start when requested.
+    """
+    base_clean = _clean_url_for_derived(start_url, start_url) if start_url else ""
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw in urls or []:
+        cleaned = _clean_url_for_derived(raw, start_url or raw)
+        if not cleaned or not _is_http_url(cleaned):
+            continue
+        if cleaned in seen:
+            continue
+        if exclude_start and base_clean and cleaned == base_clean:
+            continue
+        seen.add(cleaned)
+        result.append(cleaned)
+    result.sort()
+    return result
+
+
+def extract_derived_urls_from_elements(
+    elements: list[dict],
+    base_url: str,
+) -> list[str]:
+    """Extract derived URLs from link elements (selector with href).
+
+    Parses selectors like a[href='/path'], xpath=//a[@href='/foo'] to get paths.
+    Returns absolute unique URLs for use as scout page hints.
+    """
+    import re
+    derived: set[str] = set()
+    for item in elements or []:
+        if not isinstance(item, dict):
+            continue
+        sel = str(item.get("selector", "")).strip()
+        if not sel or str(item.get("type", "other")).lower() != "link":
+            continue
+        # a[href='/path'] or a[href="/path"]
+        m = re.search(r'\[href\s*=\s*["\']([^"\']+)["\']\]', sel, re.IGNORECASE)
+        if m:
+            path = m.group(1).strip()
+            if path and not path.startswith("#") and not path.startswith("javascript:"):
+                abs_url = path if _is_http_url(path) else urljoin(base_url.rstrip("/") + "/", path)
+                if _is_http_url(abs_url):
+                    derived.add(_clean_url_for_derived(abs_url, base_url))
+        # xpath=//a[@href='/path']
+        m2 = re.search(r'@href\s*=\s*["\']([^"\']+)["\']', sel, re.IGNORECASE)
+        if m2:
+            path = m2.group(1).strip()
+            if path and not path.startswith("#") and not path.startswith("javascript:"):
+                abs_url = path if _is_http_url(path) else urljoin(base_url.rstrip("/") + "/", path)
+                if _is_http_url(abs_url):
+                    derived.add(_clean_url_for_derived(abs_url, base_url))
+    return sorted(derived)
+
+
 def _resolve_multi_page_urls(start_url: str, page_hints: list[str] | None = None) -> list[str]:
     """Resolve multi-page scout targets to absolute unique URLs."""
     resolved: list[str] = []
