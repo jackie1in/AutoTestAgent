@@ -1,0 +1,18 @@
+{
+  "default_graph_source": "uv run python -m graph_agent.mapping.run",
+  "default_graph_path": "graph_agent/data/graph.json",
+  "target_chains": [
+    {
+      "chain_id": "login-to-secure",
+      "summary": "首页 -> 登录页 -> 填写用户名/密码 -> 提交 -> 安全页",
+      "start_url": "https://the-internet.herokuapp.com/",
+      "intent_keys": ["go_to_login", "fill_username", "fill_password", "submit_login"],
+      "failure_root_causes": [],
+      "notes": "PRD Task 1 固化验收样本。真实验收默认使用 mapping.run 输出的 graph.json。"
+    }
+  ],
+  "metadata": {
+    "created_for": "PRD Task 1: 固化失败链路",
+    "failure_root_cause_taxonomy": ["dependency", "tab", "iframe", "selector", "async_load"]
+  }
+}
