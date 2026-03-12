@@ -22,7 +22,7 @@ if _root not in sys.path:
     sys.path.insert(0, str(_root))
 
 from graph_agent.graph.io import load_graph  # noqa: E402
-from graph_agent.graph.pathfinding import get_path_from_intent  # noqa: E402
+from graph_agent.graph.pathfinding import get_path_from_query  # noqa: E402
 from graph_agent.mapping.run import re_infer_missing_intents  # noqa: E402
 from graph_agent.playback.engine import run_playback  # noqa: E402
 
@@ -45,9 +45,9 @@ def _compute_stats(graph) -> dict:
 def _find_path_length_ge_2(graph, intent_queries: list[str] | None = None) -> tuple[list, str | None]:
     """查找长度 >= 2 的路径。返回 (path, intent_used) 或 ([], None)。"""
     if intent_queries is None:
-        intent_queries = ["fill_username", "fill_password", "submit_login", "login", "click", "fill"]
+        intent_queries = ["auth.login", "login", "fill_username", "fill_password", "submit_login", "click", "fill"]
     for q in intent_queries:
-        path = get_path_from_intent(q, graph)
+        path = get_path_from_query(q, graph)
         if len(path) >= 2:
             return path, q
     return [], None
@@ -114,9 +114,12 @@ async def run_acceptance(
 
 def _get_start_url_from_graph(graph) -> str | None:
     """从图中推断起始 URL（in_degree=0 的节点）。"""
+    graph_start_url = graph.graph.get("start_url") if hasattr(graph, "graph") else None
+    if isinstance(graph_start_url, str) and graph_start_url.startswith("http"):
+        return graph_start_url
     entries = [n for n in graph if graph.in_degree(n) == 0]
     for n in entries:
-        url = graph.nodes[n].get("url", n) if isinstance(n, str) else n
+        url = graph.nodes[n].get("url") if isinstance(n, str) else None
         if isinstance(url, str) and url.startswith("http"):
             return url
     return None

@@ -1,4 +1,4 @@
-"""FastAPI app: GET /api/graph, GET /api/intents, POST /api/playback (SSE), POST /api/auth/login."""
+"""FastAPI app: GET /api/graph, GET /api/intents, POST /api/playback (SSE)."""
 
 import json
 import asyncio
@@ -7,20 +7,15 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from graph_agent.graph.io import load_graph
-from graph_agent.graph.pathfinding import get_path_from_intent
+from graph_agent.graph.pathfinding import get_path_from_query
 from graph_agent.models import ElementConstraints, GraphEdge, Intent
 from graph_agent.playback.engine import run_playback
-from graph_agent.web.auth import (
-    authenticate_user,
-    create_access_token,
-    get_current_user,
-)
 
 load_dotenv()
 
@@ -40,13 +35,33 @@ class PlaybackRequest(BaseModel):
 
     intent: str
     test_data: dict = {}
+    wait_for_network: bool = True
 
 
-class LoginRequest(BaseModel):
-    """Request body for POST /api/auth/login."""
+def _business_templates_to_json(G: Any) -> list[dict[str, Any]]:
+    """Return frontend-friendly business template summaries with dependencies."""
+    raw_templates = G.graph.get("business_templates", []) if hasattr(G, "graph") else []
+    if not isinstance(raw_templates, list):
+        return []
 
-    username: str
-    password: str
+    templates: list[dict[str, Any]] = []
+    for raw in raw_templates:
+        if not isinstance(raw, dict):
+            continue
+        depends_on = raw.get("depends_on")
+        templates.append(
+            {
+                "template_id": str(raw.get("template_id") or ""),
+                "business_key": str(raw.get("business_key") or ""),
+                "summary": str(raw.get("summary") or ""),
+                "entry_node": str(raw.get("entry_node") or ""),
+                "exit_node": str(raw.get("exit_node") or ""),
+                "path_length": int(raw.get("path_length") or 0),
+                "confidence": float(raw.get("confidence") or 0.0),
+                "depends_on": [str(item) for item in depends_on] if isinstance(depends_on, list) else [],
+            }
+        )
+    return templates
 
 
 def _graph_to_json_dict(G):
@@ -65,7 +80,13 @@ def _graph_to_json_dict(G):
     edges = []
     missing_count = 0
     failure_reasons: set[str] = set()
-    for u, v, data in G.edges(data=True):
+    if hasattr(G, "is_multigraph") and G.is_multigraph():
+        edge_iter = G.edges(keys=True, data=True)
+        tuples = [(u, v, k, data) for u, v, k, data in edge_iter]
+    else:
+        tuples = [(u, v, None, data) for u, v, data in G.edges(data=True)]
+
+    for u, v, key, data in tuples:
         intent = data.get("intent")
         intent_dict = intent.model_dump() if isinstance(intent, Intent) else None
         if intent is None:
@@ -76,53 +97,110 @@ def _graph_to_json_dict(G):
         
         constraints = data.get("constraints")
         constraints_dict = constraints.model_dump() if isinstance(constraints, ElementConstraints) else None
+        element = data.get("element")
+        element_dict = element.model_dump() if hasattr(element, "model_dump") else (element if isinstance(element, dict) else None)
 
         edge = {
+            "edge_id": data.get("edge_id") or (str(key) if key is not None else None),
+            "step_index": data.get("step_index"),
             "source": str(u),
             "target": str(v),
             "selector": data.get("selector", ""),
             "action": data.get("action", ""),
             "intent": intent_dict,
+            "context_level_used": data.get("context_level_used"),
             "intent_failure_reason": data.get("intent_failure_reason"),
-            "data_key": data.get("data_key"),
+            "param_name": data.get("param_name"),
+            "action_value": data.get("action_value"),
+            "element": element_dict,
             "constraints": constraints_dict,
         }
         edges.append(edge)
+    metadata = {
+        "filtered_non_ui_edges": G.graph.get("filtered_non_ui_edges", 0),
+        "intent_missing_count": G.graph.get("intent_missing_count", missing_count),
+        "intent_success_rate": G.graph.get("intent_success_rate"),
+        "business_template_count": G.graph.get("business_template_count", 0),
+        "business_template_generation_failures": G.graph.get("business_template_generation_failures", 0),
+        "semantic_consistency_rate": G.graph.get("semantic_consistency_rate"),
+        "inventory_non_empty_rate": G.graph.get("inventory_non_empty_rate"),
+        "re_infer_success_rate": G.graph.get("re_infer_success_rate"),
+        "runtime_non_ui_action_count": G.graph.get("runtime_non_ui_action_count"),
+        "state_like_node_ratio": G.graph.get("state_like_node_ratio"),
+        "business_intent_edge_ratio": G.graph.get("business_intent_edge_ratio"),
+        "multi_edge_preserved_count": G.graph.get("multi_edge_preserved_count"),
+    }
     return {
         "nodes": nodes,
         "edges": edges,
         "missing_count": missing_count,
         "failure_reasons": sorted(failure_reasons),
+        "business_templates": _business_templates_to_json(G),
+        "metadata": metadata,
     }
 
 
-@app.post("/api/auth/login")
-def post_login(body: LoginRequest):
-    """Authenticate user and return JWT access token."""
-    if not authenticate_user(body.username, body.password):
-        return JSONResponse(
-            status_code=401,
-            content={"error": "Invalid username or password"},
-        )
-    token = create_access_token(data={"sub": body.username})
-    return {"access_token": token, "token_type": "bearer"}
-
-
 @app.get("/api/graph")
-def get_graph(_user: dict = Depends(get_current_user)):
+def get_graph():
     """Load graph from graph_agent/data/graph.json. Return 200 with nodes/edges; if file missing return empty graph."""
     if not GRAPH_PATH.exists():
-        return {"nodes": [], "edges": [], "missing_count": 0, "failure_reasons": []}
+        return {
+            "nodes": [],
+            "edges": [],
+            "missing_count": 0,
+            "failure_reasons": [],
+            "business_templates": [],
+            "metadata": {
+                "filtered_non_ui_edges": 0,
+                "intent_missing_count": 0,
+                "intent_success_rate": 1.0,
+                "business_template_count": 0,
+                "business_template_generation_failures": 0,
+                "semantic_consistency_rate": 1.0,
+                "inventory_non_empty_rate": 0.0,
+                "re_infer_success_rate": None,
+                "runtime_non_ui_action_count": 0,
+                "state_like_node_ratio": 0.0,
+                "business_intent_edge_ratio": 0.0,
+                "multi_edge_preserved_count": 0,
+            },
+        }
     G = load_graph(GRAPH_PATH)
     return _graph_to_json_dict(G)
 
 
 @app.get("/api/intents")
-def get_intents(_user: dict = Depends(get_current_user)):
-    """Return unique intents with key/summary/confidence for UI selection."""
+def get_intents():
+    """Return template-first query options with backward-compatible fields."""
     if not GRAPH_PATH.exists():
         return []
     G = load_graph(GRAPH_PATH)
+    options: list[dict[str, Any]] = []
+
+    templates = G.graph.get("business_templates", [])
+    if isinstance(templates, list):
+        for raw in templates:
+            if not isinstance(raw, dict):
+                continue
+            business_key = str(raw.get("business_key") or "")
+            summary = str(raw.get("summary") or "")
+            if not business_key and not summary:
+                continue
+            confidence = float(raw.get("confidence") or 0.0)
+            value = business_key or summary
+            label = f"{business_key} - {summary}" if business_key and summary and business_key != summary else (summary or business_key)
+            options.append(
+                {
+                    "type": "template",
+                    "value": value,
+                    "key": business_key or None,
+                    "summary": summary,
+                    "confidence": confidence,
+                    "label": label,
+                    "path_length": int(raw.get("path_length") or 0),
+                }
+            )
+
     intents: dict[str, dict[str, Any]] = {}
     for _u, _v, data in G.edges(data=True):
         intent = data.get("intent")
@@ -148,14 +226,26 @@ def get_intents(_user: dict = Depends(get_current_user)):
         existing = intents.get(value)
         if not existing or confidence > existing.get("confidence", 0.0):
             intents[value] = {
+                "type": "intent",
                 "value": value,
                 "key": key or None,
                 "summary": summary,
                 "confidence": confidence,
                 "label": label,
+                "path_length": 1,
             }
-
-    return sorted(intents.values(), key=lambda x: (x.get("key") is None, -(x.get("confidence") or 0.0), x["value"]))
+    options.extend(
+        sorted(
+            intents.values(),
+            key=lambda x: (x.get("key") is None, -(x.get("confidence") or 0.0), x["value"]),
+        )
+    )
+    templates_sorted = [item for item in options if item.get("type") == "template"]
+    intents_sorted = [item for item in options if item.get("type") == "intent"]
+    templates_sorted.sort(key=lambda x: (-(x.get("confidence") or 0.0), -(x.get("path_length") or 0), x["value"]))
+    if templates_sorted:
+        return templates_sorted
+    return intents_sorted
 
 
 def _log_entry_to_sse(entry: dict) -> dict:
@@ -188,7 +278,29 @@ def _log_entry_to_sse(entry: dict) -> dict:
     return out
 
 
-async def _sse_generator(edge_list: list[GraphEdge], test_data: dict, start_url: str, expected_end_url: str | None):
+def _resolve_start_url_for_path(edge_list: list[GraphEdge], graph: Any) -> str:
+    """Resolve playback start URL from first edge source, fallback to default."""
+    graph_start_url = graph.graph.get("start_url") if hasattr(graph, "graph") else None
+    if edge_list:
+        first = edge_list[0]
+        source_id = first.source
+        if source_id in graph:
+            node_data = graph.nodes[source_id]
+            url = node_data.get("url")
+            if isinstance(url, str) and url.startswith("http"):
+                return url
+    if isinstance(graph_start_url, str) and graph_start_url.startswith("http"):
+        return graph_start_url
+    return DEFAULT_START_URL
+
+
+async def _sse_generator(
+    edge_list: list[GraphEdge],
+    test_data: dict,
+    start_url: str,
+    expected_end_url: str | None,
+    wait_for_network: bool,
+):
     """Yield SSE lines: data: {json}\n\n. Runs run_playback as a background task and streams logs."""
     q: asyncio.Queue = asyncio.Queue()
 
@@ -203,6 +315,7 @@ async def _sse_generator(edge_list: list[GraphEdge], test_data: dict, start_url:
                 start_url,
                 expected_end_url,
                 log_callback=log_callback,
+                wait_for_network=wait_for_network,
             )
             if result["success"]:
                 await q.put({"level": "success", "actual_url": result["actual_url"]})
@@ -234,10 +347,10 @@ async def _sse_generator(edge_list: list[GraphEdge], test_data: dict, start_url:
 
 
 @app.get("/api/dashboard")
-def get_dashboard(_user: dict = Depends(get_current_user)):
+def get_dashboard():
     """
     Return dashboard statistics: edge_count, intent_missing_count, intent_success_rate,
-    filtered_non_ui_edges, node_count, mapping_stopped, stop_reason.
+    filtered_non_ui_edges, node_count, mapping_stopped, stop_reason, quality metrics.
     """
     if not GRAPH_PATH.exists():
         return {
@@ -248,6 +361,15 @@ def get_dashboard(_user: dict = Depends(get_current_user)):
             "filtered_non_ui_edges": 0,
             "mapping_stopped": None,
             "stop_reason": None,
+            "semantic_consistency_rate": 1.0,
+            "inventory_non_empty_rate": 0.0,
+            "re_infer_success_rate": None,
+            "business_template_count": 0,
+            "business_template_generation_failures": 0,
+            "runtime_non_ui_action_count": 0,
+            "state_like_node_ratio": 0.0,
+            "business_intent_edge_ratio": 0.0,
+            "multi_edge_preserved_count": 0,
         }
     G = load_graph(GRAPH_PATH)
     node_count = G.number_of_nodes()
@@ -262,6 +384,15 @@ def get_dashboard(_user: dict = Depends(get_current_user)):
     filtered_non_ui_edges = metadata.get("filtered_non_ui_edges", 0)
     mapping_stopped = metadata.get("mapping_stopped")
     stop_reason = metadata.get("stop_reason")
+    semantic_consistency_rate = metadata.get("semantic_consistency_rate")
+    inventory_non_empty_rate = metadata.get("inventory_non_empty_rate")
+    re_infer_success_rate = metadata.get("re_infer_success_rate")
+    business_template_count = metadata.get("business_template_count", 0)
+    business_template_generation_failures = metadata.get("business_template_generation_failures", 0)
+    runtime_non_ui_action_count = metadata.get("runtime_non_ui_action_count")
+    state_like_node_ratio = metadata.get("state_like_node_ratio")
+    business_intent_edge_ratio = metadata.get("business_intent_edge_ratio")
+    multi_edge_preserved_count = metadata.get("multi_edge_preserved_count")
     return {
         "node_count": node_count,
         "edge_count": edge_count,
@@ -270,11 +401,20 @@ def get_dashboard(_user: dict = Depends(get_current_user)):
         "filtered_non_ui_edges": filtered_non_ui_edges,
         "mapping_stopped": mapping_stopped,
         "stop_reason": stop_reason,
+        "semantic_consistency_rate": semantic_consistency_rate,
+        "inventory_non_empty_rate": inventory_non_empty_rate,
+        "re_infer_success_rate": re_infer_success_rate,
+        "business_template_count": business_template_count,
+        "business_template_generation_failures": business_template_generation_failures,
+        "runtime_non_ui_action_count": runtime_non_ui_action_count,
+        "state_like_node_ratio": state_like_node_ratio,
+        "business_intent_edge_ratio": business_intent_edge_ratio,
+        "multi_edge_preserved_count": multi_edge_preserved_count,
     }
 
 
 @app.post("/api/playback")
-def post_playback(body: PlaybackRequest, _user: dict = Depends(get_current_user)):
+def post_playback(body: PlaybackRequest):
     """
     Run playback for the given intent and test_data.
     Loads graph, resolves path from intent, runs playback in a background thread, streams SSE.
@@ -287,7 +427,7 @@ def post_playback(body: PlaybackRequest, _user: dict = Depends(get_current_user)
             content={"error": "Graph file not found"},
         )
     G = load_graph(GRAPH_PATH)
-    edge_list = get_path_from_intent(body.intent, G)
+    edge_list = get_path_from_query(body.intent, G)
     if not edge_list:
         # Stream one SSE event then close
         def no_path_stream():
@@ -308,16 +448,15 @@ def post_playback(body: PlaybackRequest, _user: dict = Depends(get_current_user)
             url = node_data.get("url")
             if url and url.startswith("http"):
                 expected_end_url = url
-        # Fallback: if target_id itself looks like a URL
-        elif target_id.startswith("http"):
-            expected_end_url = target_id
 
+    start_url = _resolve_start_url_for_path(edge_list, G)
     return StreamingResponse(
         _sse_generator(
             edge_list,
             body.test_data,
-            start_url=DEFAULT_START_URL,
+            start_url=start_url,
             expected_end_url=expected_end_url,
+            wait_for_network=body.wait_for_network,
         ),
         media_type="text/event-stream",
     )

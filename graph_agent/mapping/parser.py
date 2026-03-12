@@ -7,14 +7,17 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-from graph_agent.models import ActionType, ElementConstraints, GraphEdge, Intent
-from graph_agent.llm import get_llm
-from langchain_core.messages import HumanMessage
-
-# Map semantic_label keywords (CN/EN) to data_key for fill actions.
-# Deprecated: Logic moved to _infer_data_key
-SEMANTIC_LABEL_TO_DATA_KEY: list[tuple[list[str], str]] = []
-
+from graph_agent.models import (
+    ActionType,
+    ElementConstraints,
+    ElementSnapshot,
+    FrameLocatorSnapshot,
+    GraphEdge,
+    Intent,
+    TabActionType,
+    TabSnapshot,
+)
+from graph_agent.llm import get_llm, ainvoke_prompt
 
 # Map action keys to ActionType
 ACTION_MAPPING = {
@@ -24,6 +27,10 @@ ACTION_MAPPING = {
     "click": ActionType.CLICK,
     "input": ActionType.FILL,
     "navigate": ActionType.NAVIGATE,
+    "go_back": ActionType.NAVIGATE,
+    "select_dropdown": ActionType.FILL,
+    "send_keys": ActionType.FILL,
+    "evaluate": ActionType.UNKNOWN,
     "scroll": ActionType.UNKNOWN,
     "done": ActionType.UNKNOWN,
     "write_file": ActionType.UNKNOWN,
@@ -43,46 +50,17 @@ _NOISE_GOAL_PATTERNS = (
 )
 
 MIN_INTENT_CONFIDENCE = 0.4
-
-
-class DataKeyExtractor:
-    """Uses LLM to infer data_key from semantic label and context."""
-    
-    def __init__(self):
-        self.llm = get_llm()
-        
-    async def extract(self, semantic_label: str) -> str | None:
-        """Infer data_key using LLM. Returns None if no clear data key."""
-        if not semantic_label:
-            return None
-            
-        prompt = f"""
-        Analyze the following user intent/thought and determine if it refers to filling a standard form field.
-        If it does, return the standard data key (e.g., 'username', 'password', 'email', 'phone', 'otp', 'search_query').
-        If it's not a fill action or the field is ambiguous/custom, return 'null'.
-        
-        User Intent: "{semantic_label}"
-        
-        Output ONLY the data key or 'null'. No markdown, no explanation.
-        """
-        
-        try:
-            # Asynchronous invocation for browser-use LLM compatibility
-            response = await self.llm.ainvoke([HumanMessage(content=prompt)])
-            # Handle browser-use ChatInvokeCompletion or standard LangChain AIMessage
-            if hasattr(response, "completion"):
-                content = str(response.completion)
-            else:
-                content = getattr(response, "content", str(response))
-            
-            content = content.strip().lower()
-            
-            if content == "null" or "null" in content:
-                return None
-            return content
-        except Exception as e:
-            print(f"Warning: DataKeyExtractor LLM failed: {e}")
-            return None
+_THOUGHT_NOISE_HINTS = (
+    "write_file",
+    "read_file",
+    "todo",
+    "log",
+    "csv",
+    "report",
+    "final result",
+    "output file",
+    "document",
+)
 
 
 def _get_next_goal(thought: dict | object) -> str:
@@ -136,11 +114,30 @@ async def infer_intent_for_context(
     selector: str,
     source_url: str,
     target_url: str,
-    data_key: str | None,
+    param_name: str | None,
     thought_text: str,
+    neighbor_steps: list[dict[str, str]] | None = None,
+    page_signals: dict[str, str] | None = None,
+    context_level: str = "L0",
 ) -> tuple[Intent | None, str | None]:
     """Infer intent from context using AI only."""
     llm = get_llm()
+    neighbor_section = ""
+    if neighbor_steps:
+        pairs = []
+        for item in neighbor_steps:
+            pairs.append(
+                f"- action:{item.get('action','')} selector:{item.get('selector','')} "
+                f"source:{item.get('source_url','')} target:{item.get('target_url','')} thought:{item.get('thought','')}"
+            )
+        neighbor_section = "Neighbor steps:\n" + "\n".join(pairs) + "\n"
+
+    page_signal_section = ""
+    if page_signals:
+        page_signal_section = "Page signals:\n" + "\n".join(
+            f"- {k}: {v}" for k, v in page_signals.items() if v
+        ) + "\n"
+
     prompt = f"""
 You are an intent normalizer for browser automation steps.
 Given one interaction step context, infer business intent.
@@ -153,19 +150,24 @@ Output STRICT JSON object with fields:
 - object: target object
 
 Context:
+- context_level: {context_level}
 - action: {action.value}
 - selector: {selector}
 - source_url: {source_url}
 - target_url: {target_url}
-- data_key: {data_key or ""}
+- param_name: {param_name or ""}
 - thought: {thought_text or ""}
+{neighbor_section}{page_signal_section}
 
 Rules:
 - Return JSON only.
+- Prefer domain/business keys over generic/navigation when action is click/fill.
+- Avoid broad keys like navigation.click.link unless step is only pure page jump.
+- Use selector/param_name/url/thought cues to produce specific key (e.g., auth.*, form.*, elements.*).
 - If uncertain, still provide best guess with low confidence.
 """
     try:
-        response = await llm.ainvoke([HumanMessage(content=prompt)])
+        response = await ainvoke_prompt(llm, prompt)
     except Exception as exc:  # noqa: BLE001
         return None, f"llm_error:{exc}"
 
@@ -179,7 +181,9 @@ Rules:
     obj = str(payload.get("object", "")).strip() or "Element"
     conf_raw = payload.get("confidence")
     try:
-        confidence = float(conf_raw)
+        if conf_raw is None:
+            return None, "parse_error:invalid_confidence"
+        confidence = float(str(conf_raw))
     except (TypeError, ValueError):
         return None, "parse_error:invalid_confidence"
 
@@ -188,6 +192,18 @@ Rules:
     if confidence < MIN_INTENT_CONFIDENCE:
         return None, f"low_confidence:{confidence:.2f}"
     confidence = max(0.0, min(1.0, confidence))
+
+    key = await _refine_non_business_key_if_needed(
+        llm=llm,
+        action=action,
+        key=key,
+        selector=selector,
+        source_url=source_url,
+        target_url=target_url,
+        param_name=param_name,
+        thought_text=thought_text,
+        summary=summary,
+    )
 
     intent = Intent(
         raw=thought_text or summary,
@@ -200,20 +216,204 @@ Rules:
     return intent, None
 
 
-def _infer_constraints(data_key: str | None) -> ElementConstraints | None:
-    """Infer constraints based on data_key."""
-    if not data_key:
+async def _refine_non_business_key_if_needed(
+    llm: Any,
+    action: ActionType,
+    key: str,
+    selector: str,
+    source_url: str,
+    target_url: str,
+    param_name: str | None,
+    thought_text: str,
+    summary: str,
+) -> str:
+    """AI-only refinement to reduce over-broad navigation keys on click/fill."""
+    raw_key = (key or "").strip()
+    if action not in (ActionType.CLICK, ActionType.FILL):
+        return raw_key
+    if not raw_key.startswith("navigation."):
+        return raw_key
+
+    prompt = f"""
+You refine an existing intent key for browser automation.
+Current key may be too broad.
+
+Return STRICT JSON only:
+{{"key":"dot.separated.intent.key"}}
+
+Constraints:
+- Keep dot-separated lowercase key.
+- If action is click/fill, prefer business/domain key when possible.
+- Avoid navigation.* when there is a concrete business operation.
+- If truly only navigation, keep current key unchanged.
+
+Context:
+- action: {action.value}
+- current_key: {raw_key}
+- selector: {selector}
+- source_url: {source_url}
+- target_url: {target_url}
+- param_name: {param_name or ""}
+- thought: {thought_text or ""}
+- summary: {summary}
+"""
+    try:
+        response = await ainvoke_prompt(llm, prompt)
+    except Exception:
+        return raw_key
+    payload = _extract_json_object(_response_to_text(response))
+    if payload is None:
+        return raw_key
+    refined = str(payload.get("key", "")).strip().lower()
+    if not refined or "." not in refined:
+        return raw_key
+    return refined
+
+
+def _action_intent_conflict(
+    action: ActionType,
+    intent: Intent,
+    selector: str = "",
+    source_url: str = "",
+    target_url: str = "",
+) -> bool:
+    """Heuristic semantic conflict detector for progressive escalation."""
+    key = (intent.key or "").lower()
+    summary = (intent.summary or "").lower()
+    sel = (selector or "").lower()
+    text = f"{key} {summary}"
+    if action == ActionType.FILL:
+        # If selector strongly indicates a fillable control, be tolerant to wording.
+        if any(token in sel for token in ("input", "textarea", "select", "password", "#username", "#email", "#password")):
+            return False
+        return all(token not in text for token in ("fill", "input", "type", "enter", "select", "choose", "toggle"))
+    if action == ActionType.CLICK:
+        # Clicking links/buttons for navigation is valid click intent.
+        if any(token in sel for token in ("a[", "xpath=(//a)", "/a", "href", "link", "button", "btn")):
+            if any(token in text for token in ("navigate", "open", "visit", "go", "redirect", "route")):
+                return False
+        return all(token not in text for token in ("click", "submit", "press", "tap", "toggle", "check", "open", "navigate", "visit", "go"))
+    if action == ActionType.NAVIGATE:
+        src = (source_url or "").strip()
+        tgt = (target_url or "").strip()
+        # Real page transition is acceptable navigate intent even if wording is business-like.
+        if src and tgt and src != tgt:
+            return False
+        return all(token not in text for token in ("navigate", "open", "visit", "go"))
+    return False
+
+
+async def infer_intent_progressive(
+    action: ActionType,
+    selector: str,
+    source_url: str,
+    target_url: str,
+    param_name: str | None,
+    thought_text: str,
+    neighbor_steps: list[dict[str, str]] | None = None,
+    page_signals: dict[str, str] | None = None,
+) -> tuple[Intent | None, str | None, str]:
+    """Progressive disclosure inference: L0 -> L1 -> L2."""
+    attempts: list[tuple[str, list[dict[str, str]] | None, dict[str, str] | None]] = [
+        ("L0", None, None),
+        ("L1", neighbor_steps, None),
+        ("L2", neighbor_steps, page_signals),
+    ]
+    last_reason: str | None = None
+    last_level = "L0"
+    for level, ns, ps in attempts:
+        last_level = level
+        intent, reason = await infer_intent_for_context(
+            action=action,
+            selector=selector,
+            source_url=source_url,
+            target_url=target_url,
+            param_name=param_name,
+            thought_text=thought_text,
+            neighbor_steps=ns,
+            page_signals=ps,
+            context_level=level,
+        )
+        if intent is None:
+            last_reason = reason
+            continue
+        if _action_intent_conflict(
+            action,
+            intent,
+            selector=selector,
+            source_url=source_url,
+            target_url=target_url,
+        ):
+            last_reason = "semantic_conflict:action_intent_mismatch"
+            continue
+        return intent, None, level
+    return None, (last_reason or "intent_inference_failed"), last_level
+
+
+async def distill_ui_thought(
+    thought_text: str,
+    action: ActionType,
+    selector: str,
+    source_url: str,
+    target_url: str,
+) -> str:
+    """Optional intermediate AI step: remove non-UI planning noise from thought.
+
+    Trigger only when raw thought includes file/log/report-like hints, to keep
+    overhead low and avoid unnecessary extra LLM calls.
+    """
+    raw = (thought_text or "").strip()
+    if not raw:
+        return ""
+    lowered = raw.lower()
+    if not any(hint in lowered for hint in _THOUGHT_NOISE_HINTS):
+        return raw
+
+    prompt = f"""
+You clean browser-agent thought text for UI intent inference.
+Keep only user-visible UI interaction intent (click/fill/select/navigate).
+Remove file operations, notes, logs, todo, report, summary, and meta planning.
+
+Return STRICT JSON object: {{"ui_thought":"..."}}
+If no UI intent remains, return {{"ui_thought":""}}.
+
+Context:
+- action: {action.value}
+- selector: {selector}
+- source_url: {source_url}
+- target_url: {target_url}
+- raw_thought: {raw}
+"""
+    try:
+        llm = get_llm()
+        response = await ainvoke_prompt(llm, prompt)
+        payload = _extract_json_object(_response_to_text(response))
+        if not payload:
+            return raw
+        ui_thought = str(payload.get("ui_thought", "")).strip()
+        return ui_thought or raw
+    except Exception:
+        return raw
+
+
+def _infer_constraints(param_name: str | None, element: ElementSnapshot | None = None) -> ElementConstraints | None:
+    """Infer loose constraints from param_name and element metadata."""
+    if not param_name and element is None:
         return None
-    
+
+    key = (param_name or "").lower()
+    input_type = (element.type.lower() if element and element.type else "")
     constraints = ElementConstraints()
-    if data_key == "email":
+    if key == "email" or input_type == "email":
         constraints.format = "email"
-    elif data_key == "password":
+    elif "password" in key or input_type == "password":
         constraints.format = "password"
         constraints.masked = True
-    elif data_key == "phone":
+    elif "phone" in key or input_type == "tel":
         constraints.format = "phone"
-    
+
+    if constraints.format is None and not constraints.masked:
+        return None
     return constraints
 
 
@@ -235,6 +435,9 @@ def _selector_from_element(interacted: dict | list | object) -> str:
         xpath = getattr(element, "xpath", None)
         if xpath:
             return f"xpath={xpath}"
+        x_path = getattr(element, "x_path", None)
+        if x_path:
+            return f"xpath={x_path}"
         
         css = getattr(element, "css_selector", None)
         if css:
@@ -260,6 +463,9 @@ def _selector_from_element(interacted: dict | list | object) -> str:
     xpath = element.get("xpath")
     if xpath:
         return f"xpath={xpath}"
+    x_path = element.get("x_path")
+    if x_path:
+        return f"xpath={x_path}"
     
     # Try CSS selector
     css = element.get("css_selector")
@@ -279,20 +485,162 @@ def _selector_from_element(interacted: dict | list | object) -> str:
     return ""
 
 
-async def _infer_data_key(semantic_label: str, is_fill: bool) -> str | None:
-    """Infer data_key from semantic_label for fill actions."""
-    if not is_fill or not semantic_label:
+def _normalize_interacted_element(interacted: dict | list | object) -> Mapping[str, Any]:
+    """Normalize browser-use interacted element into a mapping."""
+    if not interacted:
+        return {}
+    element = interacted[0] if isinstance(interacted, list) and interacted else interacted
+    if isinstance(element, Mapping):
+        return element
+    if hasattr(element, "to_dict"):
+        element = element.to_dict()
+    elif hasattr(element, "dict"):
+        element = element.dict()
+    elif hasattr(element, "__dict__"):
+        element = element.__dict__
+    return element if isinstance(element, Mapping) else {}
+
+
+def _normalize_mapping(value: Any) -> Mapping[str, Any]:
+    """Normalize dict-like values into a mapping."""
+    if isinstance(value, Mapping):
+        return value
+    if hasattr(value, "model_dump"):
+        value = value.model_dump()
+    elif hasattr(value, "dict"):
+        value = value.dict()
+    elif hasattr(value, "__dict__"):
+        value = value.__dict__
+    return value if isinstance(value, Mapping) else {}
+
+
+def _extract_tab_snapshot(action: Mapping[str, Any]) -> TabSnapshot | None:
+    raw_tab = action.get("tab")
+    tab_data = _normalize_mapping(raw_tab)
+    if not tab_data:
         return None
-    
-    # Use AI inference exclusively
+    tab_id = tab_data.get("tab_id")
+    if not tab_id:
+        return None
+    return TabSnapshot(
+        tab_id=str(tab_id),
+        opener_tab_id=(
+            str(tab_data.get("opener_tab_id"))
+            if tab_data.get("opener_tab_id") is not None
+            else None
+        ),
+        url=str(tab_data.get("url")) if tab_data.get("url") is not None else None,
+        title=str(tab_data.get("title")) if tab_data.get("title") is not None else None,
+    )
+
+
+def _extract_tab_action(action: Mapping[str, Any]) -> TabActionType | None:
+    raw_tab_action = action.get("tab_action")
+    if raw_tab_action is None:
+        return None
+    if isinstance(raw_tab_action, TabActionType):
+        return raw_tab_action
     try:
-        extractor = DataKeyExtractor()
-        return await extractor.extract(semantic_label)
-    except Exception:
+        return TabActionType(str(raw_tab_action))
+    except ValueError:
         return None
 
 
-async def parse_browser_use_step(action: dict, thought: dict | object, source_url: str, target_url: str) -> GraphEdge:
+def _frame_locator_snapshot_from_interacted(interacted: Mapping[str, Any]) -> FrameLocatorSnapshot | None:
+    """Build a frame locator snapshot from one raw iframe mapping."""
+    selector = _selector_from_element(interacted)
+    if not selector:
+        return None
+    attrs_raw = interacted.get("attributes", {})
+    attrs = dict(attrs_raw) if isinstance(attrs_raw, Mapping) else {}
+    return FrameLocatorSnapshot(
+        selector=selector,
+        xpath=str(interacted.get("xpath")) if interacted.get("xpath") else None,
+        x_path=str(interacted.get("x_path")) if interacted.get("x_path") else None,
+        css_selector=str(interacted.get("css_selector")) if interacted.get("css_selector") else None,
+        name=str(attrs.get("name")) if attrs.get("name") is not None else None,
+        id=str(attrs.get("id")) if attrs.get("id") is not None else None,
+        attributes=attrs,
+    )
+
+
+def _extract_frame_path_from_interacted(interacted: dict | list | object) -> list[FrameLocatorSnapshot]:
+    """Extract nested iframe locator chain from interacted element metadata."""
+    element = _normalize_interacted_element(interacted)
+    raw_frame_path = element.get("frame_path", [])
+    if not isinstance(raw_frame_path, list):
+        return []
+
+    frame_path: list[FrameLocatorSnapshot] = []
+    for raw_frame in raw_frame_path:
+        normalized = _normalize_interacted_element(raw_frame)
+        if not normalized:
+            continue
+        snapshot = _frame_locator_snapshot_from_interacted(normalized)
+        if snapshot is not None:
+            frame_path.append(snapshot)
+    return frame_path
+
+
+def _element_snapshot_from_interacted(interacted: dict | list | object) -> ElementSnapshot | None:
+    """Build an element snapshot from browser-use interacted_element."""
+    element = _normalize_interacted_element(interacted)
+    if not element:
+        return None
+
+    attrs_raw = element.get("attributes", {})
+    attrs = dict(attrs_raw) if isinstance(attrs_raw, Mapping) else {}
+    selector = _selector_from_element(element)
+    return ElementSnapshot(
+        selector=selector,
+        xpath=str(element.get("xpath")) if element.get("xpath") else None,
+        x_path=str(element.get("x_path")) if element.get("x_path") else None,
+        css_selector=str(element.get("css_selector")) if element.get("css_selector") else None,
+        name=str(attrs.get("name")) if attrs.get("name") is not None else None,
+        id=str(attrs.get("id")) if attrs.get("id") is not None else None,
+        class_name=str(attrs.get("class")) if attrs.get("class") is not None else None,
+        type=str(attrs.get("type")) if attrs.get("type") is not None else None,
+        attributes=attrs,
+        frame_path=_extract_frame_path_from_interacted(interacted),
+    )
+
+
+async def _infer_param_name(element: ElementSnapshot | None, is_fill: bool) -> str | None:
+    """Infer param_name from real element attributes for fill actions."""
+    if not is_fill or element is None:
+        return None
+    if element.name:
+        return element.name
+    if element.id:
+        return element.id
+    return None
+
+
+async def _extract_action_value(action: Mapping[str, Any], play_action: ActionType) -> str | None:
+    """Extract raw recorded value from browser-use action payload."""
+    if play_action != ActionType.FILL:
+        return None
+
+    for action_key in ("input_text", "input", "send_keys", "select_dropdown"):
+        payload = action.get(action_key)
+        if not isinstance(payload, Mapping):
+            continue
+        for candidate_key in ("text", "value", "selected", "option", "label"):
+            value = payload.get(candidate_key)
+            if value is None:
+                continue
+            return str(value)
+    return None
+
+
+async def parse_browser_use_step(
+    action: dict,
+    thought: dict | object,
+    source_url: str,
+    target_url: str,
+    neighbor_steps: list[dict[str, str]] | None = None,
+    page_signals: dict[str, str] | None = None,
+) -> GraphEdge:
     """Parse one browser-use step to GraphEdge.
     
     Args:
@@ -315,7 +663,8 @@ async def parse_browser_use_step(action: dict, thought: dict | object, source_ur
             action = {}
 
     interacted = action.get("interacted_element") or {}
-    selector = _selector_from_element(interacted)
+    element = _element_snapshot_from_interacted(interacted)
+    selector = element.selector if element is not None else _selector_from_element(interacted)
     
     # Extract action type (click/fill) using mapping
     play_action = ActionType.UNKNOWN
@@ -331,15 +680,25 @@ async def parse_browser_use_step(action: dict, thought: dict | object, source_ur
             print(f"Unknown action: {action} in parse_browser_use_step")
     
     raw_thought = _get_next_goal(thought)
-    is_fill = play_action == ActionType.FILL
-    data_key = await _infer_data_key(raw_thought, is_fill)
-    intent, intent_failure_reason = await infer_intent_for_context(
+    distilled_thought = await distill_ui_thought(
+        thought_text=raw_thought,
         action=play_action,
         selector=selector,
         source_url=source_url,
         target_url=target_url,
-        data_key=data_key,
-        thought_text=raw_thought,
+    )
+    is_fill = play_action == ActionType.FILL
+    param_name = await _infer_param_name(element, is_fill)
+    action_value = await _extract_action_value(action, play_action)
+    intent, intent_failure_reason, context_level_used = await infer_intent_progressive(
+        action=play_action,
+        selector=selector,
+        source_url=source_url,
+        target_url=target_url,
+        param_name=param_name,
+        thought_text=distilled_thought,
+        neighbor_steps=neighbor_steps,
+        page_signals=page_signals,
     )
     if intent is None:
         print(
@@ -352,15 +711,31 @@ async def parse_browser_use_step(action: dict, thought: dict | object, source_ur
                 "reason": intent_failure_reason or "unknown",
             },
         )
-    constraints = _infer_constraints(data_key)
+    constraints = _infer_constraints(param_name, element)
+    tab_id = str(action.get("tab_id") or "tab-0")
+    target_tab_id = (
+        str(action.get("target_tab_id"))
+        if action.get("target_tab_id") is not None
+        else None
+    )
+    tab_action = _extract_tab_action(action)
+    tab = _extract_tab_snapshot(action)
 
     return GraphEdge(
         source=source_url,
         target=target_url,
         selector=selector,
         action=play_action,
+        tab_id=tab_id,
+        target_tab_id=target_tab_id,
+        tab_action=tab_action,
+        tab=tab,
+        frame_path=element.frame_path if element is not None else [],
         intent=intent,
+        context_level_used=context_level_used,
         intent_failure_reason=intent_failure_reason,
-        data_key=data_key,
+        param_name=param_name,
+        action_value=action_value,
+        element=element,
         constraints=constraints,
     )

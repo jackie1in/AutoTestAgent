@@ -1,9 +1,48 @@
 """LLM configuration and factory."""
 
 import os
+from typing import Any
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+async def ainvoke_prompt(llm: Any, prompt: str) -> Any:
+    """Invoke llm with prompt using multi-format fallbacks.
+
+    Different providers/adapters accept different message formats.
+    This helper retries a few common payload shapes.
+    """
+    errors: list[str] = []
+    payloads: list[tuple[str, Any]] = []
+    # browser-use ChatOpenAI expects browser_use BaseMessage objects.
+    try:
+        from browser_use.llm.messages import UserMessage
+
+        payloads.append(("browser_use_user_message", [UserMessage(content=prompt)]))
+    except Exception:
+        pass
+
+    payloads.extend(
+        [
+            ("str", prompt),
+            ("openai_messages", [{"role": "user", "content": prompt}]),
+        ]
+    )
+    try:
+        from langchain_core.messages import HumanMessage
+
+        payloads.append(("langchain_human_message", [HumanMessage(content=prompt)]))
+    except Exception:
+        pass
+
+    for fmt, payload in payloads:
+        try:
+            return await llm.ainvoke(payload)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{fmt}:{exc}")
+
+    raise RuntimeError(f"LLM invoke failed for all formats: {' | '.join(errors)}")
 
 def get_llm():
     """Build LLM from env: OPENAI_API_KEY (ChatOpenAI) or ANTHROPIC_API_KEY.

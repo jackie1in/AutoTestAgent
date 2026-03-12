@@ -92,11 +92,6 @@
       const statusEl = document.getElementById("status");
       const errorEl = document.getElementById("error-msg");
 
-      function getAuthHeaders() {
-        const token = localStorage.getItem("access_token");
-        return token ? { "Authorization": "Bearer " + token } : {};
-      }
-
       function renderMetric(label, value, cssClass) {
         const card = document.createElement("div");
         card.className = "metric-card";
@@ -107,12 +102,8 @@
       }
 
       function loadDashboard() {
-        fetch("/api/dashboard", { headers: getAuthHeaders() })
+        fetch("/api/dashboard")
           .then(function (r) {
-            if (r.status === 401) {
-              window.location.href = "/?login=1";
-              return;
-            }
             return r.json();
           })
           .then(function (data) {

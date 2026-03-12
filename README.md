@@ -29,6 +29,7 @@ uv run python -m graph_agent.mapping.run --url https://the-internet.herokuapp.co
 uv run uvicorn graph_agent.web.app:app --reload
 ```
 访问 http://localhost:8000 使用 Web 界面。
+Web API 默认无需登录即可访问与回放。
 
 [查看详细文档](graph_agent/USAGE.md)
 
@@ -59,6 +60,8 @@ LLM_MODEL=google/gemini-2.5-pro-preview
 
 # 可选：Graph Agent 测绘与回放
 # MAPPING_URL=https://the-internet.herokuapp.com/login
+# MAPPING_USERNAME=tomsmith
+# MAPPING_PASSWORD=SuperSecretPassword!
 # PLAYWRIGHT_CHANNEL=chrome
 # PLAYWRIGHT_HEADLESS=false
 ```

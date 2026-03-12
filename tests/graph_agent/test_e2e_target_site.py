@@ -54,44 +54,44 @@ def _build_target_site_fixture_graph() -> nx.DiGraph:
     流程: 首页 -> 点击 Form Authentication -> 登录页 -> 填写用户名 -> 填写密码 -> 提交 -> 安全页
     使用 pseudo-state 区分同 URL 的中间状态，避免 pathfinding 自环问题。
     """
-    G = nx.DiGraph()
+    G: nx.DiGraph = nx.DiGraph()
     # 节点
-    G.add_node(TARGET_HOME, url=TARGET_HOME, label="Home")
-    G.add_node(TARGET_LOGIN, url=TARGET_LOGIN, label="Login")
-    G.add_node("State 1 [fill username]#a1", url=TARGET_LOGIN, label="Login filled user")
-    G.add_node("State 2 [fill password]#b2", url=TARGET_LOGIN, label="Login filled both")
-    G.add_node(TARGET_SECURE, url=TARGET_SECURE, label="Secure")
+    G.add_node("home", url=TARGET_HOME, label="Home")
+    G.add_node("login-empty", url=TARGET_LOGIN, label="Login")
+    G.add_node("login-user", url=TARGET_LOGIN, label="Login filled user")
+    G.add_node("login-password", url=TARGET_LOGIN, label="Login filled both")
+    G.add_node("secure", url=TARGET_SECURE, label="Secure")
 
     # 边
     G.add_edge(
-        TARGET_HOME,
-        TARGET_LOGIN,
+        "home",
+        "login-empty",
         selector='a[href="/login"]',
         action=ActionType.CLICK,
         intent=_make_intent("Go to login page", key="go_to_login"),
         intent_failure_reason=None,
     )
     G.add_edge(
-        TARGET_LOGIN,
-        "State 1 [fill username]#a1",
+        "login-empty",
+        "login-user",
         selector="#username",
         action=ActionType.FILL,
         intent=_make_intent("Fill username", key="fill_username"),
         intent_failure_reason=None,
-        data_key="username",
+        param_name="username",
     )
     G.add_edge(
-        "State 1 [fill username]#a1",
-        "State 2 [fill password]#b2",
+        "login-user",
+        "login-password",
         selector="#password",
         action=ActionType.FILL,
         intent=_make_intent("Fill password", key="fill_password"),
         intent_failure_reason=None,
-        data_key="password",
+        param_name="password",
     )
     G.add_edge(
-        "State 2 [fill password]#b2",
-        TARGET_SECURE,
+        "login-password",
+        "secure",
         selector='button[type="submit"]',
         action=ActionType.CLICK,
         intent=_make_intent("Submit login", key="submit_login"),
@@ -146,6 +146,14 @@ def test_acceptance_find_path_length_ge_2():
     path, intent = _find_path_length_ge_2(G)
     assert len(path) >= 2
     assert intent in ("fill_username", "fill_password", "submit_login", "login", "click", "fill")
+
+
+def test_acceptance_start_url_uses_node_metadata_for_opaque_state_id():
+    """Acceptance start URL resolution should use node metadata, not state ids."""
+    G = _build_target_site_fixture_graph()
+    from graph_agent.run_e2e_acceptance import _get_start_url_from_graph
+
+    assert _get_start_url_from_graph(G) == TARGET_HOME
 
 
 @pytest.mark.integration

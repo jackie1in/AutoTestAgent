@@ -1,11 +1,18 @@
 """Tests for playback engine (T7: null intent compatibility)."""
 
+import asyncio
 import os
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
-from graph_agent.models import ActionType, GraphEdge, Intent
-from graph_agent.playback.engine import run_playback
+from graph_agent.models import ActionType, FrameLocatorSnapshot, GraphEdge, Intent, TabActionType
+from graph_agent.playback.engine import (
+    _extract_login_error_message,
+    _extract_login_error_message_from_page_text,
+    run_playback,
+)
 
 
 def _make_intent(summary: str, key: str | None = None) -> Intent:
@@ -26,6 +33,187 @@ _DATA_HTML = (
     "<input id='user' type='text' placeholder='username'/>"
     "</body></html>"
 )
+
+
+def test_extract_login_error_message_from_failed_login_payload():
+    """Login error parser should return the first backend error message when login fails."""
+    payload = (
+        '{"code":200,"data":{"passwordDefaultNum":1},'
+        '"errors":[{"errorCode":"401","msg":"用户帐号已过期 "}],'
+        '"serviceSuccess":false}'
+    )
+
+    assert _extract_login_error_message(payload) == "用户帐号已过期"
+
+
+def test_extract_login_error_message_returns_none_for_success_payload():
+    """Login error parser should ignore successful login payloads."""
+    payload = '{"code":200,"data":{"token":"abc"},"errors":[],"serviceSuccess":true}'
+
+    assert _extract_login_error_message(payload) is None
+
+
+def test_extract_login_error_message_from_page_text():
+    """Rendered page messages should expose login failure reason."""
+    page_text = "系统登录\n立即登录\n用户帐号已过期\nTa+3 404开发框架"
+
+    assert _extract_login_error_message_from_page_text(page_text) == "用户帐号已过期"
+
+
+class _FakeRequest:
+    def __init__(self, url: str, resource_type: str = "xhr") -> None:
+        self.url = url
+        self.resource_type = resource_type
+
+
+class _FakeLocator:
+    def __init__(self, page: "_FakePage", selector: str) -> None:
+        self.page = page
+        self.selector = selector
+
+    async def click(self) -> None:
+        self.page.events.append(("click", self.selector))
+        hook = self.page.click_hooks.get(self.selector)
+        if hook is not None:
+            await hook(self.page)
+
+    async def fill(self, value: str) -> None:
+        self.page.events.append(("fill", self.selector, value))
+
+
+class _FakeFrameContext:
+    def __init__(self, page: "_FakePage") -> None:
+        self.page = page
+
+    def frame_locator(self, selector: str) -> "_FakeFrameContext":
+        if selector in self.page.missing_frames:
+            raise RuntimeError(f"missing frame: {selector}")
+        self.page.events.append(("frame", selector))
+        return _FakeFrameContext(self.page)
+
+    def locator(self, selector: str) -> _FakeLocator:
+        return _FakeLocator(self.page, selector)
+
+
+class _FakePage:
+    def __init__(self, missing_frames: set[str] | None = None) -> None:
+        self.url = ""
+        self.events: list[tuple[str, ...]] = []
+        self.goto_hooks: dict[str, object] = {}
+        self.click_hooks: dict[str, object] = {}
+        self.popup_page: _FakePage | None = None
+        self.closed = False
+        self.missing_frames = missing_frames or set()
+        self._handlers: dict[str, list[object]] = {
+            "request": [],
+            "requestfinished": [],
+            "requestfailed": [],
+        }
+
+    def set_default_timeout(self, timeout_ms: int) -> None:
+        self.events.append(("set-timeout", str(timeout_ms)))
+
+    async def goto(self, url: str) -> None:
+        self.url = url
+        self.events.append(("goto", url))
+        hook = self.goto_hooks.get(url)
+        if hook is not None:
+            await hook(self)
+
+    def locator(self, selector: str) -> _FakeLocator:
+        return _FakeLocator(self, selector)
+
+    def frame_locator(self, selector: str) -> _FakeFrameContext:
+        if selector in self.missing_frames:
+            raise RuntimeError(f"missing frame: {selector}")
+        self.events.append(("frame", selector))
+        return _FakeFrameContext(self)
+
+    def on(self, event: str, handler: object) -> None:
+        self._handlers.setdefault(event, []).append(handler)
+
+    def off(self, event: str, handler: object) -> None:
+        handlers = self._handlers.get(event, [])
+        if handler in handlers:
+            handlers.remove(handler)
+
+    def emit(self, event: str, request: _FakeRequest) -> None:
+        for handler in list(self._handlers.get(event, [])):
+            handler(request)
+
+    def expect_popup(self) -> "_FakeExpectPopup":
+        return _FakeExpectPopup(self)
+
+    async def close(self) -> None:
+        self.closed = True
+        self.events.append(("close",))
+
+
+class _FakePopupInfo:
+    def __init__(self, page: _FakePage | None) -> None:
+        self.value = asyncio.Future()
+        if page is not None:
+            self.value.set_result(page)
+        else:
+            self.value.set_exception(RuntimeError("popup was not opened"))
+
+
+class _FakeExpectPopup:
+    def __init__(self, page: _FakePage) -> None:
+        self.page = page
+        self.info: _FakePopupInfo | None = None
+
+    async def __aenter__(self) -> _FakePopupInfo:
+        self.info = _FakePopupInfo(self.page.popup_page)
+        return self.info
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+class _FakeExpectation:
+    def __init__(self, page: _FakePage) -> None:
+        self.page = page
+
+    async def to_have_url(self, expected_url: str) -> None:
+        if self.page.url != expected_url:
+            raise AssertionError(f"expected {expected_url}, got {self.page.url}")
+
+
+class _FakeBrowser:
+    def __init__(self, page: _FakePage) -> None:
+        self.page = page
+
+    async def new_page(self) -> _FakePage:
+        return self.page
+
+    async def close(self) -> None:
+        self.page.events.append(("browser-close",))
+
+
+class _FakeAsyncPlaywright:
+    def __init__(self, page: _FakePage) -> None:
+        self.page = page
+
+    async def __aenter__(self) -> SimpleNamespace:
+        return SimpleNamespace(chromium=SimpleNamespace(launch=AsyncMock(return_value=_FakeBrowser(self.page))))
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+def _install_fake_playwright(monkeypatch: pytest.MonkeyPatch, page: _FakePage) -> None:
+    monkeypatch.setattr(
+        "graph_agent.playback.engine.async_playwright",
+        lambda: _FakeAsyncPlaywright(page),
+    )
+
+
+def _install_fake_expect(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "graph_agent.playback.engine.expect",
+        lambda page: _FakeExpectation(page),
+    )
 
 
 @pytest.mark.asyncio
@@ -86,7 +274,8 @@ async def test_playback_mixed_intents_log_correct():
                 selector="#user",
                 action=ActionType.FILL,
                 intent=intent,
-                data_key="username",
+                param_name="username",
+                action_value="recorded-user",
             ),
         ]
         logs = []
@@ -109,3 +298,740 @@ async def test_playback_mixed_intents_log_correct():
         assert logs[1]["selector"] == "#user"
     finally:
         os.environ.pop("PLAYWRIGHT_HEADLESS", None)
+
+
+@pytest.mark.asyncio
+async def test_playback_falls_back_to_param_name_when_recorded_value_missing():
+    """When action_value is missing, playback should use test_data[param_name]."""
+    os.environ["PLAYWRIGHT_HEADLESS"] = "true"
+    try:
+        edge_list = [
+            GraphEdge(
+                source="a",
+                target="b",
+                selector="#user",
+                action=ActionType.FILL,
+                intent=_make_intent("Fill username", key="fill_username"),
+                param_name="username",
+                action_value=None,
+            ),
+        ]
+
+        result = await run_playback(
+            edge_list,
+            test_data={"username": "testuser"},
+            start_url=_DATA_HTML,
+        )
+
+        assert result["success"] is True
+    finally:
+        os.environ.pop("PLAYWRIGHT_HEADLESS", None)
+
+
+@pytest.mark.asyncio
+async def test_playback_prefers_test_data_over_recorded_action_value(monkeypatch: pytest.MonkeyPatch):
+    """Runtime test_data should override stale recorded action_value for fill steps."""
+    page = _FakePage()
+    _install_fake_playwright(monkeypatch, page)
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#user",
+            action=ActionType.FILL,
+            intent=_make_intent("Fill username", key="auth.fill.username"),
+            param_name="username",
+            action_value="recorded-user",
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={"username": "testuser"},
+        start_url="https://a.com/start",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert ("fill", "#user", "testuser") in page.events
+
+
+@pytest.mark.asyncio
+async def test_playback_click_uses_nested_frame_path(monkeypatch: pytest.MonkeyPatch):
+    """Nested iframe steps should resolve frame context before clicking target element."""
+    page = _FakePage()
+    _install_fake_playwright(monkeypatch, page)
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#submit",
+            action=ActionType.CLICK,
+            frame_path=[
+                FrameLocatorSnapshot(selector="iframe[name='outer']"),
+                FrameLocatorSnapshot(selector="iframe[name='inner']"),
+            ],
+        )
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={},
+        start_url="https://a.com/start",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert page.events == [
+        ("set-timeout", str(60_000)),
+        ("goto", "https://a.com/start"),
+        ("frame", "iframe[name='outer']"),
+        ("frame", "iframe[name='inner']"),
+        ("click", "#submit"),
+        ("browser-close",),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_playback_reports_missing_iframe_level(monkeypatch: pytest.MonkeyPatch):
+    """Missing iframe errors should report the failing nesting level."""
+    page = _FakePage(missing_frames={"iframe[name='inner']"})
+    _install_fake_playwright(monkeypatch, page)
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#submit",
+            action=ActionType.CLICK,
+            frame_path=[
+                FrameLocatorSnapshot(selector="iframe[name='outer']"),
+                FrameLocatorSnapshot(selector="iframe[name='inner']"),
+            ],
+        )
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={},
+        start_url="https://a.com/start",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is False
+    assert "iframe level 2" in (result["error"] or "")
+
+
+@pytest.mark.asyncio
+async def test_playback_open_popup_tab_routes_followup_click_to_new_page(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """OPEN 新标签后，后续普通动作应在 target tab 对应的新 page 上执行。"""
+    page = _FakePage()
+    popup = _FakePage()
+    popup.url = "https://a.com/popup"
+    page.popup_page = popup
+    async def _confirm_click(fake_page: _FakePage) -> None:
+        fake_page.url = "https://a.com/popup/confirmed"
+    popup.click_hooks["#confirm"] = _confirm_click
+    _install_fake_playwright(monkeypatch, page)
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#quality",
+            action=ActionType.CLICK,
+            tab_id="tab-0",
+            target_tab_id="tab-1",
+            tab_action=TabActionType.OPEN,
+        ),
+        GraphEdge(
+            source="b",
+            target="c",
+            selector="#confirm",
+            action=ActionType.CLICK,
+            tab_id="tab-1",
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={},
+        start_url="https://a.com/start",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert ("click", "#quality") in page.events
+    assert ("click", "#confirm") in popup.events
+    assert ("click", "#confirm") not in page.events
+    assert result["actual_url"] == "https://a.com/popup/confirmed"
+
+
+@pytest.mark.asyncio
+async def test_playback_expected_end_url_uses_popup_page_after_open(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """expected_end_url 应对最后实际动作所在的 popup page 做断言。"""
+    page = _FakePage()
+    popup = _FakePage()
+    popup.url = "https://a.com/popup"
+    page.popup_page = popup
+
+    async def _confirm_click(fake_page: _FakePage) -> None:
+        fake_page.url = "https://a.com/popup/confirmed"
+
+    popup.click_hooks["#confirm"] = _confirm_click
+    _install_fake_playwright(monkeypatch, page)
+    _install_fake_expect(monkeypatch)
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#quality",
+            action=ActionType.CLICK,
+            tab_id="tab-0",
+            target_tab_id="tab-1",
+            tab_action=TabActionType.OPEN,
+        ),
+        GraphEdge(
+            source="b",
+            target="c",
+            selector="#confirm",
+            action=ActionType.CLICK,
+            tab_id="tab-1",
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={},
+        start_url="https://a.com/start",
+        expected_end_url="https://a.com/popup/confirmed",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert result["actual_url"] == "https://a.com/popup/confirmed"
+
+
+@pytest.mark.asyncio
+async def test_playback_switch_tab_updates_active_page_for_expected_end_url(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """SWITCH 到已存在标签后，expected_end_url 应对切换后的 page 生效。"""
+    page = _FakePage()
+    popup = _FakePage()
+    popup_url = "https://a.com/popup"
+    popup.url = popup_url
+    page.popup_page = popup
+
+    async def _mutate_homepage(fake_page: _FakePage) -> None:
+        fake_page.url = "https://a.com/home/changed"
+
+    page.click_hooks["#change-home"] = _mutate_homepage
+    _install_fake_playwright(monkeypatch, page)
+    _install_fake_expect(monkeypatch)
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#open-popup",
+            action=ActionType.CLICK,
+            tab_id="tab-0",
+            target_tab_id="tab-1",
+            tab_action=TabActionType.OPEN,
+        ),
+        GraphEdge(
+            source="b",
+            target="c",
+            selector="#change-home",
+            action=ActionType.CLICK,
+            tab_id="tab-0",
+        ),
+        GraphEdge(
+            source="c",
+            target="d",
+            selector="",
+            action=ActionType.UNKNOWN,
+            tab_id="tab-0",
+            target_tab_id="tab-1",
+            tab_action=TabActionType.SWITCH,
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={},
+        start_url="https://a.com/start",
+        expected_end_url=popup_url,
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert ("click", "#open-popup") in page.events
+    assert ("click", "#change-home") in page.events
+    assert result["actual_url"] == popup_url
+
+
+@pytest.mark.asyncio
+async def test_playback_switch_tab_routes_followup_click_to_switched_page(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """SWITCH 后，后续仍带 source tab_id 的动作也应落到切换后的 page。"""
+    page = _FakePage()
+    popup = _FakePage()
+    page.popup_page = popup
+    _install_fake_playwright(monkeypatch, page)
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#open-popup",
+            action=ActionType.CLICK,
+            tab_id="tab-0",
+            target_tab_id="tab-1",
+            tab_action=TabActionType.OPEN,
+        ),
+        GraphEdge(
+            source="b",
+            target="c",
+            selector="",
+            action=ActionType.UNKNOWN,
+            tab_id="tab-0",
+            target_tab_id="tab-1",
+            tab_action=TabActionType.SWITCH,
+        ),
+        GraphEdge(
+            source="c",
+            target="d",
+            selector="#confirm",
+            action=ActionType.CLICK,
+            tab_id="tab-0",
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={},
+        start_url="https://a.com/start",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert ("click", "#confirm") in popup.events
+    assert ("click", "#confirm") not in page.events
+
+
+@pytest.mark.asyncio
+async def test_playback_tab_and_nested_iframe_routes_followup_click_to_popup_page(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """tab + nested iframe 叠加时，frame 解析与点击都应落在 popup page 上。"""
+    page = _FakePage(missing_frames={"iframe[name='popup-outer']", "iframe[name='popup-inner']"})
+    popup = _FakePage()
+    popup.url = "https://a.com/popup"
+    page.popup_page = popup
+
+    async def _confirm_click(fake_page: _FakePage) -> None:
+        fake_page.url = "https://a.com/popup/frame-confirmed"
+
+    popup.click_hooks["#confirm"] = _confirm_click
+    _install_fake_playwright(monkeypatch, page)
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#open-popup",
+            action=ActionType.CLICK,
+            tab_id="tab-0",
+            target_tab_id="tab-1",
+            tab_action=TabActionType.OPEN,
+        ),
+        GraphEdge(
+            source="b",
+            target="c",
+            selector="#confirm",
+            action=ActionType.CLICK,
+            tab_id="tab-1",
+            frame_path=[
+                FrameLocatorSnapshot(selector="iframe[name='popup-outer']"),
+                FrameLocatorSnapshot(selector="iframe[name='popup-inner']"),
+            ],
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={},
+        start_url="https://a.com/start",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert ("click", "#open-popup") in page.events
+    assert ("frame", "iframe[name='popup-outer']") not in page.events
+    assert ("frame", "iframe[name='popup-inner']") not in page.events
+    assert ("click", "#confirm") not in page.events
+    assert popup.events == [
+        ("set-timeout", str(60_000)),
+        ("frame", "iframe[name='popup-outer']"),
+        ("frame", "iframe[name='popup-inner']"),
+        ("click", "#confirm"),
+    ]
+    assert result["actual_url"] == "https://a.com/popup/frame-confirmed"
+
+
+@pytest.mark.asyncio
+async def test_playback_reports_missing_target_tab(monkeypatch: pytest.MonkeyPatch):
+    """引用不存在的 tab_id 时，应返回明确错误而不是裸 KeyError。"""
+    page = _FakePage()
+    _install_fake_playwright(monkeypatch, page)
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#confirm",
+            action=ActionType.CLICK,
+            tab_id="tab-x",
+        )
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={},
+        start_url="https://a.com/start",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "Target tab does not exist: tab-x"
+
+
+@pytest.mark.asyncio
+async def test_playback_close_child_tab_restores_parent_for_followup_click(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """CLOSE 子标签后，后续普通动作应恢复到父标签页执行。"""
+    page = _FakePage()
+    popup = _FakePage()
+    popup.url = "https://a.com/popup"
+    page.popup_page = popup
+
+    async def _parent_after_close(fake_page: _FakePage) -> None:
+        if not popup.closed:
+            raise RuntimeError("popup still open; close/recover logic missing")
+        fake_page.url = "https://a.com/parent/after-close"
+
+    page.click_hooks["#back-on-parent"] = _parent_after_close
+    _install_fake_playwright(monkeypatch, page)
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#open-popup",
+            action=ActionType.CLICK,
+            tab_id="tab-0",
+            target_tab_id="tab-1",
+            tab_action=TabActionType.OPEN,
+        ),
+        GraphEdge(
+            source="b",
+            target="c",
+            selector="#confirm",
+            action=ActionType.CLICK,
+            tab_id="tab-1",
+        ),
+        GraphEdge(
+            source="c",
+            target="d",
+            selector="",
+            action=ActionType.CLICK,
+            tab_id="tab-1",
+            tab_action=TabActionType.CLOSE,
+        ),
+        GraphEdge(
+            source="d",
+            target="e",
+            selector="#back-on-parent",
+            action=ActionType.CLICK,
+            tab_id="tab-0",
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={},
+        start_url="https://a.com/start",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert ("click", "#open-popup") in page.events
+    assert ("click", "#confirm") in popup.events
+    assert ("close",) in popup.events
+    assert ("click", "#back-on-parent") in page.events
+    assert result["actual_url"] == "https://a.com/parent/after-close"
+
+
+@pytest.mark.asyncio
+async def test_playback_close_child_tab_falls_back_to_parent_when_followup_still_uses_child_tab_id(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """CLOSE 子标签后，后续仍写 child tab_id 也应自动回落到父标签页执行。"""
+    page = _FakePage()
+    popup = _FakePage()
+    popup.url = "https://a.com/popup"
+    page.popup_page = popup
+
+    async def _parent_after_close(fake_page: _FakePage) -> None:
+        if not popup.closed:
+            raise RuntimeError("popup still open; close/recover logic missing")
+        fake_page.url = "https://a.com/parent/fallback-after-close"
+
+    page.click_hooks["#back-on-parent"] = _parent_after_close
+    _install_fake_playwright(monkeypatch, page)
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#open-popup",
+            action=ActionType.CLICK,
+            tab_id="tab-0",
+            target_tab_id="tab-1",
+            tab_action=TabActionType.OPEN,
+        ),
+        GraphEdge(
+            source="b",
+            target="c",
+            selector="#confirm",
+            action=ActionType.CLICK,
+            tab_id="tab-1",
+        ),
+        GraphEdge(
+            source="c",
+            target="d",
+            selector="",
+            action=ActionType.CLICK,
+            tab_id="tab-1",
+            tab_action=TabActionType.CLOSE,
+        ),
+        GraphEdge(
+            source="d",
+            target="e",
+            selector="#back-on-parent",
+            action=ActionType.CLICK,
+            tab_id="tab-1",
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={},
+        start_url="https://a.com/start",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert ("click", "#open-popup") in page.events
+    assert ("click", "#confirm") in popup.events
+    assert ("close",) in popup.events
+    assert ("click", "#back-on-parent") in page.events
+    assert ("click", "#back-on-parent") not in popup.events
+    assert result["actual_url"] == "https://a.com/parent/fallback-after-close"
+
+
+@pytest.mark.asyncio
+async def test_playback_fails_fast_when_login_submit_does_not_leave_login_page(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When auth submit keeps user on login page, playback should fail before downstream steps."""
+    page = _FakePage()
+    _install_fake_playwright(monkeypatch, page)
+    edge_list = [
+        GraphEdge(
+            source="login",
+            target="login-user",
+            selector="#username",
+            action=ActionType.FILL,
+            intent=_make_intent("Fill username", key="auth.fill.username"),
+            param_name="username",
+        ),
+        GraphEdge(
+            source="login-user",
+            target="login-pass",
+            selector="#password",
+            action=ActionType.FILL,
+            intent=_make_intent("Fill password", key="auth.fill.password"),
+            param_name="password",
+        ),
+        GraphEdge(
+            source="login-pass",
+            target="secure",
+            selector="#submit",
+            action=ActionType.CLICK,
+            intent=_make_intent("Submit login", key="auth.submit.login"),
+        ),
+        GraphEdge(
+            source="secure",
+            target="dashboard",
+            selector="#dashboard-entry",
+            action=ActionType.CLICK,
+            intent=_make_intent("Open dashboard", key="project.dashboard.open"),
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={"username": "alice", "password": "secret"},
+        start_url="https://example.com/login",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is False
+    assert "login" in (result["error"] or "").lower()
+    # Guard should stop playback before first post-login business click.
+    assert ("click", "#dashboard-entry") not in page.events
+
+
+@pytest.mark.asyncio
+async def test_playback_navigate_waits_for_http_requests_before_next_action(monkeypatch: pytest.MonkeyPatch):
+    """NAVIGATE should wait for spawned HTTP requests before continuing."""
+    page = _FakePage()
+    _install_fake_playwright(monkeypatch, page)
+
+    async def _navigate_hook(fake_page: _FakePage) -> None:
+        req = _FakeRequest("https://a.com/bootstrap")
+        fake_page.events.append(("request-start", req.url))
+        fake_page.emit("request", req)
+
+        async def _finish() -> None:
+            await asyncio.sleep(0.01)
+            fake_page.events.append(("request-finish", req.url))
+            fake_page.emit("requestfinished", req)
+
+        asyncio.create_task(_finish())
+
+    page.goto_hooks["https://a.com/secure"] = _navigate_hook
+
+    edge_list = [
+        GraphEdge(
+            source="state-start",
+            target="https://a.com/secure",
+            selector="",
+            action=ActionType.NAVIGATE,
+            intent=_make_intent("Navigate to secure page", key="navigation.secure"),
+        ),
+        GraphEdge(
+            source="state-secure",
+            target="state-filled",
+            selector="#user",
+            action=ActionType.FILL,
+            intent=_make_intent("Fill username", key="auth.fill.username"),
+            param_name="username",
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={"username": "alice"},
+        start_url="https://a.com/start",
+        wait_for_network=True,
+    )
+
+    assert result["success"] is True
+    assert ("goto", "https://a.com/secure") in page.events
+    assert page.events.index(("request-finish", "https://a.com/bootstrap")) < page.events.index(
+        ("fill", "#user", "alice")
+    )
+
+
+@pytest.mark.asyncio
+async def test_playback_click_waits_for_triggered_http_requests(monkeypatch: pytest.MonkeyPatch):
+    """CLICK should wait for its HTTP request batch before the next step."""
+    page = _FakePage()
+    _install_fake_playwright(monkeypatch, page)
+
+    async def _click_hook(fake_page: _FakePage) -> None:
+        req = _FakeRequest("https://a.com/api/projects")
+        fake_page.events.append(("request-start", req.url))
+        fake_page.emit("request", req)
+
+        async def _finish() -> None:
+            await asyncio.sleep(0.01)
+            fake_page.events.append(("request-finish", req.url))
+            fake_page.emit("requestfinished", req)
+
+        asyncio.create_task(_finish())
+
+    page.click_hooks["#btn"] = _click_hook
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#btn",
+            action=ActionType.CLICK,
+            intent=_make_intent("Open projects", key="project.open"),
+        ),
+        GraphEdge(
+            source="b",
+            target="c",
+            selector="#user",
+            action=ActionType.FILL,
+            intent=_make_intent("Fill username", key="auth.fill.username"),
+            param_name="username",
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={"username": "alice"},
+        start_url="https://a.com/start",
+        wait_for_network=True,
+    )
+
+    assert result["success"] is True
+    assert page.events.index(("request-finish", "https://a.com/api/projects")) < page.events.index(
+        ("fill", "#user", "alice")
+    )
+
+
+@pytest.mark.asyncio
+async def test_playback_no_http_request_continues_without_error(monkeypatch: pytest.MonkeyPatch):
+    """When an action triggers no HTTP request, playback should continue normally."""
+    page = _FakePage()
+    _install_fake_playwright(monkeypatch, page)
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#btn",
+            action=ActionType.CLICK,
+            intent=_make_intent("Open modal", key="modal.open"),
+        ),
+        GraphEdge(
+            source="b",
+            target="c",
+            selector="#user",
+            action=ActionType.FILL,
+            intent=_make_intent("Fill username", key="auth.fill.username"),
+            param_name="username",
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={"username": "alice"},
+        start_url="https://a.com/start",
+        wait_for_network=True,
+    )
+
+    assert result["success"] is True
+    assert page.events.index(("click", "#btn")) < page.events.index(("fill", "#user", "alice"))

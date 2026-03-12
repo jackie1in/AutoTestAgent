@@ -33,6 +33,8 @@ LLM_MODEL=google/gemini-2.5-pro-preview
 # MAPPING_URL=https://the-internet.herokuapp.com/login
 # MAPPING_OUTPUT=graph_agent/data/graph.json
 # MAPPING_INVENTORY=graph_agent/data/element_inventory.json
+# MAPPING_USERNAME=tomsmith
+# MAPPING_PASSWORD=SuperSecretPassword!
 # PLAYWRIGHT_CHANNEL=chrome
 # PLAYWRIGHT_HEADLESS=false
 ```
@@ -66,6 +68,10 @@ uv run uvicorn graph_agent.web.app:app --reload
 2. **选择意图**：在 Intent 下拉框选业务意图（如「点击登录」）。
 3. **填写测试数据**：若路径包含表单，填写用户名、密码等。
 4. **执行回放**：点击 Playback，查看日志与浏览器执行结果。
+
+说明：当前 Web API 与页面默认无需登录即可使用；`/api/auth/login` 已移除。
+
+若目标站点包含登录表单，可在 `.env` 配置 `MAPPING_USERNAME` / `MAPPING_PASSWORD`，Mapping 录制会自动将其作为登录提示词注入。若未配置（或 `.env` 不存在），不会添加任何登录提示词。
 
 ## 进阶
 
