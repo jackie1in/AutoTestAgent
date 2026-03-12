@@ -19,7 +19,16 @@ from graph_agent.mapping.run import (
     _semantic_consistency,
     _write_acceptance_snapshot,
 )
-from graph_agent.models import ActionType, BusinessTemplate, BusinessTemplateStep, FrameLocatorSnapshot, Intent, TabActionType, TabSnapshot
+from graph_agent.models import (
+    ActionType,
+    BusinessTemplate,
+    BusinessTemplateStep,
+    ElementSnapshot,
+    FrameLocatorSnapshot,
+    Intent,
+    TabActionType,
+    TabSnapshot,
+)
 
 
 def _make_mock_history(actions: list[dict], thoughts: list[dict], urls: list[str]):
@@ -699,6 +708,86 @@ def test_task_template_includes_derived_exploration_hint():
     assert "派生" in task
     assert "继续探索" in task
     assert "菜单" in task or "列表" in task or "详情" in task
+
+
+@pytest.mark.asyncio
+async def test_mapping_save_load_preserves_recording_context(tmp_path: Path):
+    """Task 4: mapping -> save -> load preserves tab, frame_path, node URL, selector."""
+    history = _make_mock_history(
+        actions=[{"click": {"element": "button"}, "interacted_element": {"css_selector": "#submit"}}],
+        thoughts=[{"next_goal": "Submit form"}],
+        urls=["https://example.com/form", "https://example.com/done"],
+    )
+    frame_path = [
+        FrameLocatorSnapshot(selector="iframe[name='outer']", name="outer"),
+        FrameLocatorSnapshot(selector="iframe[name='inner']", name="inner"),
+    ]
+    edge_with_full_context = type(
+        "EdgeModel",
+        (),
+        {
+            "source": "https://example.com/form",
+            "target": "https://example.com/done",
+            "selector": "#submit",
+            "action": ActionType.CLICK,
+            "intent": Intent(
+                summary="Submit form",
+                raw="submit",
+                verb="Submit",
+                object="Form",
+            ),
+            "tab_id": "tab-0",
+            "target_tab_id": "tab-1",
+            "tab_action": TabActionType.OPEN,
+            "tab": TabSnapshot(
+                tab_id="tab-1",
+                opener_tab_id="tab-0",
+                url="https://example.com/done",
+                title="Done",
+            ),
+            "frame_path": frame_path,
+            "element": ElementSnapshot(selector="#submit", frame_path=frame_path),
+            "context_level_used": "L0",
+            "intent_failure_reason": None,
+            "param_name": None,
+            "action_value": None,
+            "constraints": None,
+        },
+    )()
+    with patch(
+        "graph_agent.mapping.run.parse_browser_use_step",
+        new_callable=AsyncMock,
+        return_value=edge_with_full_context,
+    ):
+        G = await _build_graph_from_history(history)
+
+    graph_path = tmp_path / "graph.json"
+    save_graph(G, graph_path)
+    loaded = load_graph(graph_path)
+
+    # Node URL preserved
+    for nid, data in loaded.nodes(data=True):
+        assert "url" in data
+        assert data["url"] in ("https://example.com/form", "https://example.com/done") or data["url"]
+
+    # Edge context preserved
+    edges = list(loaded.edges(keys=True, data=True))
+    assert len(edges) >= 1
+    for _u, _v, _k, data in edges:
+        assert data["selector"] == "#submit"
+        assert data["tab_id"] == "tab-0"
+        assert data["target_tab_id"] == "tab-1"
+        assert data["tab_action"] == TabActionType.OPEN
+        assert data["tab"] is not None
+        assert data["tab"].tab_id == "tab-1"
+        assert data["tab"].url == "https://example.com/done"
+        assert [f.selector for f in data["frame_path"]] == [
+            "iframe[name='outer']",
+            "iframe[name='inner']",
+        ]
+        if data.get("element"):
+            assert [f.name for f in data["element"].frame_path] == ["outer", "inner"]
+        break
 
 
 def test_write_acceptance_snapshot_creates_file(tmp_path: Path):

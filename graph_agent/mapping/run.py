@@ -630,7 +630,7 @@ async def re_infer_missing_intents(graph_path: str | Path, inventory_path: str |
             selector=selector,
             source_url=source_url,
             target_url=target_url,
-            data_key=str(param_name) if param_name is not None else None,
+            param_name=str(param_name) if param_name is not None else None,
             thought_text=thought_text,
         )
         if intent is not None:

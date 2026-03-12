@@ -12,6 +12,7 @@ from graph_agent.models import (
     ActionType,
     ElementConstraints,
     ElementSnapshot,
+    FrameLocatorSnapshot,
     GraphData,
     GraphEdge,
     GraphNode,
@@ -72,6 +73,17 @@ def save_graph(G: nx.Graph, path: str | Path) -> None:
         elif isinstance(element_data, ElementSnapshot):
             element = element_data
 
+        # Normalize frame_path: ensure list of FrameLocatorSnapshot for serialization
+        raw_frame_path = data.get("frame_path", [])
+        frame_path: list[FrameLocatorSnapshot] = []
+        for item in raw_frame_path:
+            if isinstance(item, FrameLocatorSnapshot):
+                frame_path.append(item)
+            elif isinstance(item, dict):
+                frame_path.append(FrameLocatorSnapshot(**item))
+            else:
+                continue
+
         edge = GraphEdge(
             edge_id=str(data.get("edge_id") or key) if (data.get("edge_id") or key) is not None else None,
             step_index=data.get("step_index"),
@@ -83,7 +95,7 @@ def save_graph(G: nx.Graph, path: str | Path) -> None:
             target_tab_id=data.get("target_tab_id"),
             tab_action=data.get("tab_action"),
             tab=data.get("tab"),
-            frame_path=data.get("frame_path", []),
+            frame_path=frame_path,
             intent=intent,
             context_level_used=data.get("context_level_used"),
             intent_failure_reason=data.get("intent_failure_reason"),
