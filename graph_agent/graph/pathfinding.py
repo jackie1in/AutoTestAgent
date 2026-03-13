@@ -43,6 +43,12 @@ _KEY_ALIASES: dict[str, tuple[str, ...]] = {
     ),
     "auth.fill.password": ("auth.fill.password", "fill_password", "password", "密码"),
     "auth.logout": ("auth.logout", "logout", "登出", "退出"),
+    "elements.iframe.type": (
+        "elements.iframe.type",
+        "iframe.type",
+        "iframe",
+        "iframe 输入",
+    ),
 }
 
 

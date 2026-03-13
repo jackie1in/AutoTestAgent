@@ -7,6 +7,7 @@ PRD 8.3 / 9.7:
 """
 
 import socket
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import networkx as nx
@@ -17,7 +18,7 @@ from graph_agent.acceptance.playback_acceptance import (
 )
 from graph_agent.graph.io import save_graph
 from graph_agent.graph.pathfinding import get_path_from_query
-from graph_agent.models import ActionType, Intent
+from graph_agent.models import ActionType, FrameLocatorSnapshot, Intent
 
 
 def _target_site_reachable() -> bool:
@@ -40,6 +41,8 @@ TARGET_SITE = "https://the-internet.herokuapp.com"
 TARGET_HOME = f"{TARGET_SITE}/"
 TARGET_LOGIN = f"{TARGET_SITE}/login"
 TARGET_SECURE = f"{TARGET_SITE}/secure"
+TARGET_FRAMES = f"{TARGET_SITE}/frames"
+TARGET_IFRAME = f"{TARGET_SITE}/iframe"
 
 
 def _make_intent(summary: str, key: str | None = None) -> Intent:
@@ -98,6 +101,44 @@ def _build_three_intent_fixture_graph() -> nx.MultiDiGraph:
         selector='button[type="submit"]',
         action=ActionType.CLICK,
         intent=_make_intent("Submit login", key="auth.submit.login"),
+    )
+    return G
+
+
+def _build_fixture_with_iframe_graph() -> nx.MultiDiGraph:
+    """构建含 iframe 场景的 fixture 图（PRD 8.3: 至少 1 个成功意图包含 iframe）。"""
+    G = _build_three_intent_fixture_graph()
+    G.add_node("frames", url=TARGET_FRAMES)
+    G.add_node("iframe-page", url=TARGET_IFRAME)
+
+    def add_edge(u, v, key, **kw):
+        G.add_edge(u, v, key=key, edge_id=key, **kw)
+
+    add_edge(
+        "home",
+        "frames",
+        "e-frames",
+        selector='a[href="/frames"]',
+        action=ActionType.CLICK,
+        intent=_make_intent("Go to frames", key="frames.navigate"),
+    )
+    add_edge(
+        "frames",
+        "iframe-page",
+        "e-iframe",
+        selector='a[href="/iframe"]',
+        action=ActionType.CLICK,
+        intent=_make_intent("Go to iframe page", key="iframe.navigate"),
+    )
+    add_edge(
+        "iframe-page",
+        "iframe-page",
+        "e-iframe-type",
+        selector="#tinymce",
+        action=ActionType.FILL,
+        intent=_make_intent("Type in iframe editor", key="elements.iframe.type"),
+        frame_path=[FrameLocatorSnapshot(selector="#mce_0_ifr")],
+        param_name="iframe_content",
     )
     return G
 
@@ -163,6 +204,104 @@ def test_playback_acceptance_three_intents_resolvable():
     for q in ["auth.login", "auth.fill.username", "auth.fill.password"]:
         path = get_path_from_query(q, G)
         assert len(path) >= 2, f"{q} 应解析为至少 2 条边"
+
+
+def test_playback_acceptance_iframe_intent_resolvable():
+    """Fixture 图中 elements.iframe.type 可解析为含 frame_path 的路径。"""
+    G = _build_fixture_with_iframe_graph()
+    path = get_path_from_query("elements.iframe.type", G)
+    assert len(path) >= 2, "elements.iframe.type 应解析为至少 2 条边"
+    has_frame = any(
+        getattr(e, "frame_path", None) and len(e.frame_path) > 0 for e in path
+    )
+    assert has_frame, "路径应包含 frame_path（iframe 场景）"
+
+
+@pytest.mark.asyncio
+async def test_playback_acceptance_with_iframe_mock_success(tmp_path):
+    """
+    PRD 8.3: 验收逻辑在至少 1 个成功意图含 iframe 时通过。
+    使用 mock 的 run_playback 验证，不依赖真实网络。
+    """
+    G = _build_fixture_with_iframe_graph()
+    graph_path = tmp_path / "graph.json"
+    save_graph(G, graph_path)
+
+    async def _mock_run_playback(path, **kwargs):
+        has_iframe = any(
+            getattr(e, "frame_path", None) and len(e.frame_path) > 0 for e in path
+        )
+        return {
+            "success": True,
+            "actual_url": TARGET_IFRAME if has_iframe else TARGET_SECURE,
+        }
+
+    with patch(
+        "graph_agent.acceptance.playback_acceptance.run_playback",
+        new_callable=AsyncMock,
+        side_effect=_mock_run_playback,
+    ):
+        result = await run_playback_acceptance(
+            str(graph_path),
+            start_url=TARGET_HOME,
+            test_data={
+                "username": "tomsmith",
+                "password": "SuperSecretPassword!",
+                "iframe_content": "test",
+            },
+            intent_queries=[
+                "auth.login",
+                "auth.fill.username",
+                "elements.iframe.type",
+            ],
+            min_success=3,
+            min_with_iframe_or_tab=1,
+        )
+    assert result.total_succeeded >= 3
+    assert result.with_iframe_or_tab_succeeded >= 1
+    assert result.meets_minimum
+
+
+@pytest.mark.integration
+@requires_network
+@pytest.mark.asyncio
+async def test_playback_acceptance_at_least_one_intent_with_iframe(tmp_path):
+    """
+    PRD 8.3: 至少 1 个成功意图包含 iframe 场景。
+    使用含 iframe 的 fixture 图验证验收逻辑。
+    """
+    G = _build_fixture_with_iframe_graph()
+    graph_path = tmp_path / "graph.json"
+    save_graph(G, graph_path)
+
+    test_data = {
+        "username": "tomsmith",
+        "password": "SuperSecretPassword!",
+        "iframe_content": "test",
+    }
+    result = await run_playback_acceptance(
+        str(graph_path),
+        start_url=TARGET_HOME,
+        test_data=test_data,
+        intent_queries=[
+            "auth.login",
+            "auth.fill.username",
+            "elements.iframe.type",
+        ],
+        min_success=3,
+        min_with_iframe_or_tab=1,
+    )
+    assert result.total_attempted >= 3, "应尝试至少 3 个意图"
+    assert result.total_succeeded >= 3, (
+        f"PRD 8.3: 至少 3 个成功回放。"
+        f"实际: succeeded={result.total_succeeded}, "
+        f"results={[(r.intent_query, r.success, r.error) for r in result.results]}"
+    )
+    assert result.with_iframe_or_tab_succeeded >= 1, (
+        f"PRD 8.3: 至少 1 个成功意图包含 iframe 场景。"
+        f"实际: with_iframe_or_tab_succeeded={result.with_iframe_or_tab_succeeded}, "
+        f"results={[(r.intent_query, r.success, r.has_iframe_or_tab) for r in result.results]}"
+    )
 
 
 def test_playback_acceptance_result_meets_minimum_logic():
