@@ -9,8 +9,10 @@ from graph_agent.models import (
     BusinessTemplate,
     ElementConstraints,
     ElementSnapshot,
+    FrameLocatorSnapshot,
     GraphEdge,
     Intent,
+    TabActionType,
 )
 
 LOW_CONFIDENCE_THRESHOLD = 0.4
@@ -107,26 +109,45 @@ def _template_match_score(template: BusinessTemplate, user_query: str) -> float:
     return 0.0
 
 
+def _parse_frame_path(raw: object) -> list[FrameLocatorSnapshot]:
+    """Parse frame_path from graph data for playback context."""
+    if not raw:
+        return []
+    result: list[FrameLocatorSnapshot] = []
+    for item in raw if isinstance(raw, list) else []:
+        if isinstance(item, FrameLocatorSnapshot):
+            result.append(item)
+        elif isinstance(item, dict):
+            result.append(FrameLocatorSnapshot(**item))
+    return result
+
+
 def _edge_to_model(u: str, v: str, data: dict) -> GraphEdge:
-    """Build GraphEdge model from graph data."""
+    """Build GraphEdge model from graph data (preserves tab/frame context for playback)."""
     intent = data.get("intent")
     if not isinstance(intent, Intent):
         intent = None
-        
+
     constraints = data.get("constraints")
     if not isinstance(constraints, ElementConstraints) and constraints is not None:
-         # Should not happen if loaded correctly, but safe fallback
-         if isinstance(constraints, dict):
-             constraints = ElementConstraints(**constraints)
-         else:
-             constraints = None
+        if isinstance(constraints, dict):
+            constraints = ElementConstraints(**constraints)
+        else:
+            constraints = None
 
     element = data.get("element")
     if not isinstance(element, ElementSnapshot) and element is not None:
-         if isinstance(element, dict):
-             element = ElementSnapshot(**element)
-         else:
-             element = None
+        if isinstance(element, dict):
+            element = ElementSnapshot(**element)
+        else:
+            element = None
+
+    tab_action_raw = data.get("tab_action")
+    tab_action = (
+        TabActionType(tab_action_raw)
+        if isinstance(tab_action_raw, str) and tab_action_raw
+        else None
+    )
 
     return GraphEdge(
         edge_id=data.get("edge_id"),
@@ -135,12 +156,16 @@ def _edge_to_model(u: str, v: str, data: dict) -> GraphEdge:
         target=v,
         selector=data.get("selector", ""),
         action=data.get("action", ActionType.UNKNOWN),
+        tab_id=data.get("tab_id", "tab-0"),
+        target_tab_id=data.get("target_tab_id"),
+        tab_action=tab_action,
+        frame_path=_parse_frame_path(data.get("frame_path")),
         intent=intent,
         intent_failure_reason=data.get("intent_failure_reason"),
         param_name=data.get("param_name"),
         action_value=data.get("action_value"),
         element=element,
-        constraints=constraints
+        constraints=constraints,
     )
 
 
@@ -199,8 +224,12 @@ def _template_lookup(templates: list[BusinessTemplate]) -> dict[str, BusinessTem
 
 
 def _expand_template_steps(template: BusinessTemplate, graph: nx.Graph) -> list[GraphEdge]:
-    """Expand stored template steps back into GraphEdge models."""
-    edge_lookup: dict[str, GraphEdge] = {}
+    """Expand stored template steps back into GraphEdge models.
+
+    Uses (edge_id, source, target) as lookup key to handle graphs with duplicate
+    edge_ids across different node pairs (e.g. merged mapping runs).
+    """
+    edge_lookup: dict[tuple[str, str, str], GraphEdge] = {}
     if isinstance(graph, nx.MultiDiGraph):
         rows = [(u, v, data) for u, v, _k, data in graph.edges(keys=True, data=True)]
     else:
@@ -208,12 +237,16 @@ def _expand_template_steps(template: BusinessTemplate, graph: nx.Graph) -> list[
     for u, v, data in rows:
         edge = _edge_to_model(str(u), str(v), data)
         if edge.edge_id:
-            edge_lookup[edge.edge_id] = edge
+            key = (edge.edge_id, str(u), str(v))
+            edge_lookup[key] = edge
     expanded: list[GraphEdge] = []
     for step in template.steps:
-        if not step.edge_id or step.edge_id not in edge_lookup:
+        if not step.edge_id:
             return []
-        expanded.append(edge_lookup[step.edge_id])
+        key = (step.edge_id, step.source, step.target)
+        if key not in edge_lookup:
+            return []
+        expanded.append(edge_lookup[key])
     return expanded
 
 
