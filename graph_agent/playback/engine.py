@@ -22,6 +22,8 @@ from graph_agent.models import (
 DEFAULT_TIMEOUT_MS = 60_000
 NETWORK_OBSERVE_MS = 150
 NETWORK_POLL_MS = 25
+PLAYBACK_RETRY_COUNT = 2
+PLAYBACK_RETRY_DELAY_S = 0.3
 
 
 def _is_login_like_url(url: str) -> bool:
@@ -111,23 +113,111 @@ def _remove_listener(page: Any, event: str, handler: Callable[[Any], None]) -> N
         page.remove_listener(event, handler)
 
 
+def _is_transient_error(exc: BaseException) -> bool:
+    """Detect transient failures (async load, timing) that may succeed on retry."""
+    msg = str(exc).lower()
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return True
+    return any(
+        token in msg
+        for token in ("timed out", "timeout", "waiting for selector", "locator")
+    )
+
+
+async def _retry_action(
+    action: Callable[[], Awaitable[None]],
+    *,
+    max_retries: int = PLAYBACK_RETRY_COUNT,
+    retry_delay_s: float = PLAYBACK_RETRY_DELAY_S,
+) -> None:
+    """Retry an action on transient failures to improve playback stability."""
+    last_exc: BaseException | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            await action()
+            return
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max_retries and _is_transient_error(exc):
+                await asyncio.sleep(retry_delay_s)
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
+
+
+def _frame_selector_candidates(frame: FrameLocatorSnapshot, index: int) -> list[str]:
+    """Return ordered list of selector candidates for a frame (stability fallback)."""
+    candidates: list[str] = []
+    primary = str(frame.selector or "").strip()
+    if primary:
+        candidates.append(primary)
+    css = str(frame.css_selector or "").strip()
+    if css and css != primary:
+        candidates.append(css)
+    xp = frame.xpath or frame.x_path
+    xp_str = str(xp or "").strip()
+    if xp_str and xp_str != primary:
+        candidates.append(f"xpath={xp_str}" if not xp_str.startswith("xpath=") else xp_str)
+    if not candidates:
+        raise ValueError(f"Missing selector for iframe level {index}")
+    return candidates
+
+
 def _resolve_playback_context(page: Any, frame_path: list[FrameLocatorSnapshot]) -> Any:
     """Resolve the page or nested frame context for an edge."""
     context = page
     for index, frame in enumerate(frame_path, start=1):
-        frame_selector = str(frame.selector or "").strip()
-        if not frame_selector:
-            raise ValueError(f"Missing selector for iframe level {index}")
-        try:
-            context = context.frame_locator(frame_selector)
-        except Exception as exc:
-            raise ValueError(f"Failed to locate iframe level {index}: {frame_selector}") from exc
+        candidates = _frame_selector_candidates(frame, index)
+        last_exc: Exception | None = None
+        for frame_selector in candidates:
+            try:
+                context = context.frame_locator(frame_selector)
+                break
+            except Exception as exc:
+                last_exc = exc
+                continue
+        else:
+            raise ValueError(
+                f"Failed to locate iframe level {index}: {candidates[0]}"
+            ) from last_exc
     return context
 
 
 def _locator_in_context(page: Any, selector: str, frame_path: list[FrameLocatorSnapshot]) -> Any:
     """Build a locator in the target page/frame context."""
     return _resolve_playback_context(page, frame_path).locator(selector)
+
+
+def _format_replay_error(
+    step_error: Exception,
+    edge: GraphEdge,
+    tab_id: str,
+) -> str:
+    """Format playback error with context for diagnosis (tab/iframe/selector/async_load)."""
+    orig = str(step_error)
+    # Tab errors already have clear message from _page_for_tab
+    if "Target tab does not exist" in orig:
+        return f"tab: {orig}"
+    # Iframe errors from _resolve_playback_context
+    if "iframe" in orig.lower() or "Failed to locate iframe" in orig:
+        return f"iframe: {orig}"
+    # Async load / timing: element or frame not ready yet
+    if _is_transient_error(step_error):
+        prefix = "async_load: "
+    else:
+        prefix = ""
+    # Selector/element errors: add context for diagnosis
+    parts = [f"tab={tab_id}"]
+    if edge.frame_path:
+        frame_summary = " > ".join(
+            f"level{i}={f.selector}" for i, f in enumerate(edge.frame_path, 1)
+        )
+        parts.append(f"frame_path={frame_summary}")
+    if edge.selector:
+        parts.append(f"selector={edge.selector}")
+    ctx = ", ".join(parts)
+    return f"{prefix}selector: {orig} (context: {ctx})"
 
 
 def _page_for_tab(
@@ -424,6 +514,8 @@ async def run_playback(
                                         await loc.click()
                                 popup_page = await popup_info.value
                                 popup_page.set_default_timeout(timeout_ms)
+                                if hasattr(popup_page, "wait_for_load_state"):
+                                    await popup_page.wait_for_load_state("domcontentloaded")
                                 popup_tab_id = edge.target_tab_id or edge.tab_id
                                 pages_by_tab_id[popup_tab_id] = popup_page
                                 opener_by_tab_id[popup_tab_id] = edge.tab_id
@@ -453,7 +545,10 @@ async def run_playback(
                                 else:
                                     value = "test_value"
                                 
-                                await loc.fill(value)
+                                async def _do_fill() -> None:
+                                    await loc.fill(value)
+
+                                await _retry_action(_do_fill)
                                 actual_url = page_for_edge.url
                                 last_action_page = page_for_edge
                                 param_name = (edge.param_name or "").lower() if edge.param_name else ""
@@ -462,14 +557,17 @@ async def run_playback(
                                     saw_auth_credentials = True
                                 
                             elif action == ActionType.CLICK:
-                                if wait_for_network:
-                                    await _run_with_http_wait(
-                                        page_for_edge,
-                                        loc.click,
-                                        timeout_ms=timeout_ms,
-                                    )
-                                else:
-                                    await loc.click()
+                                async def _do_click() -> None:
+                                    if wait_for_network:
+                                        await _run_with_http_wait(
+                                            page_for_edge,
+                                            loc.click,
+                                            timeout_ms=timeout_ms,
+                                        )
+                                    else:
+                                        await loc.click()
+
+                                await _retry_action(_do_click)
                                 actual_url = page_for_edge.url
                                 last_action_page = page_for_edge
                                 if (
@@ -515,8 +613,11 @@ async def run_playback(
                                     await res
                                 
                         except Exception as step_error:  # noqa: BLE001
+                            formatted_error = _format_replay_error(
+                                step_error, edge, edge.tab_id
+                            )
                             log_entry["success"] = False
-                            log_entry["error"] = str(step_error)
+                            log_entry["error"] = formatted_error
                             if log_callback:
                                 res = log_callback(log_entry)
                                 if res and hasattr(res, "__await__"):
@@ -525,7 +626,7 @@ async def run_playback(
                             return {
                                 "success": False,
                                 "actual_url": actual_url,
-                                "error": str(step_error),
+                                "error": formatted_error,
                             }
                 finally:
                     _remove_listener(page, "response", _on_response)

@@ -11,6 +11,8 @@ from graph_agent.models import ActionType, FrameLocatorSnapshot, GraphEdge, Inte
 from graph_agent.playback.engine import (
     _extract_login_error_message,
     _extract_login_error_message_from_page_text,
+    _format_replay_error,
+    _is_transient_error,
     run_playback,
 )
 
@@ -685,6 +687,47 @@ async def test_playback_tab_and_nested_iframe_routes_followup_click_to_popup_pag
     assert result["actual_url"] == "https://a.com/popup/frame-confirmed"
 
 
+def test_format_replay_error_tab():
+    """Tab errors should be prefixed with 'tab:'."""
+    err = ValueError("Target tab does not exist: tab-x")
+    edge = GraphEdge(source="a", target="b", selector="#btn", action=ActionType.CLICK)
+    assert _format_replay_error(err, edge, "tab-x") == "tab: Target tab does not exist: tab-x"
+
+
+def test_format_replay_error_iframe():
+    """Iframe errors should be prefixed with 'iframe:'."""
+    err = ValueError("Failed to locate iframe level 2: iframe[name='inner']")
+    edge = GraphEdge(
+        source="a",
+        target="b",
+        selector="#submit",
+        action=ActionType.CLICK,
+        frame_path=[
+            FrameLocatorSnapshot(selector="iframe[name='outer']"),
+            FrameLocatorSnapshot(selector="iframe[name='inner']"),
+        ],
+    )
+    assert "iframe:" in _format_replay_error(err, edge, "tab-0")
+
+
+def test_format_replay_error_selector_with_context():
+    """Selector errors should include tab, frame_path, selector context."""
+    err = RuntimeError("Locator timed out: waiting for selector '#missing'")
+    edge = GraphEdge(
+        source="a",
+        target="b",
+        selector="#missing",
+        action=ActionType.CLICK,
+        tab_id="tab-1",
+        frame_path=[FrameLocatorSnapshot(selector="iframe#f1")],
+    )
+    msg = _format_replay_error(err, edge, "tab-1")
+    assert "selector:" in msg
+    assert "tab=tab-1" in msg
+    assert "frame_path=level1=iframe#f1" in msg
+    assert "selector=#missing" in msg
+
+
 @pytest.mark.asyncio
 async def test_playback_reports_missing_target_tab(monkeypatch: pytest.MonkeyPatch):
     """引用不存在的 tab_id 时，应返回明确错误而不是裸 KeyError。"""
@@ -708,7 +751,43 @@ async def test_playback_reports_missing_target_tab(monkeypatch: pytest.MonkeyPat
     )
 
     assert result["success"] is False
-    assert result["error"] == "Target tab does not exist: tab-x"
+    assert result["error"] == "tab: Target tab does not exist: tab-x"
+
+
+@pytest.mark.asyncio
+async def test_playback_reports_selector_not_found_with_context(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Selector not found should return error with tab/frame_path/selector context."""
+    page = _FakePage()
+    _install_fake_playwright(monkeypatch, page)
+
+    async def _raise_selector_error(fake_page: _FakePage) -> None:
+        raise RuntimeError("Locator timed out: waiting for selector '#nonexistent'")
+
+    page.click_hooks["#nonexistent"] = _raise_selector_error
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#nonexistent",
+            action=ActionType.CLICK,
+            tab_id="tab-0",
+        )
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={},
+        start_url="https://a.com/start",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is False
+    assert "selector:" in result["error"]
+    assert "tab=tab-0" in result["error"]
+    assert "selector=#nonexistent" in result["error"]
 
 
 @pytest.mark.asyncio
@@ -1035,3 +1114,190 @@ async def test_playback_no_http_request_continues_without_error(monkeypatch: pyt
 
     assert result["success"] is True
     assert page.events.index(("click", "#btn")) < page.events.index(("fill", "#user", "alice"))
+
+
+def test_is_transient_error_timeout():
+    """TimeoutError should be classified as transient."""
+    assert _is_transient_error(TimeoutError("timed out")) is True
+    assert _is_transient_error(asyncio.TimeoutError()) is True
+
+
+def test_is_transient_error_locator_message():
+    """Locator timeout messages should be classified as transient."""
+    assert _is_transient_error(RuntimeError("Locator timed out: waiting for selector")) is True
+    assert _is_transient_error(RuntimeError("Timeout 30000ms exceeded")) is True
+
+
+def test_is_transient_error_non_transient():
+    """Non-timeout errors should not be classified as transient."""
+    assert _is_transient_error(ValueError("Target tab does not exist")) is False
+    assert _is_transient_error(RuntimeError("missing frame: iframe#x")) is False
+
+
+def test_format_replay_error_async_load_prefix():
+    """Timeout/async errors should be prefixed with async_load."""
+    err = RuntimeError("Locator timed out: waiting for selector '#btn'")
+    edge = GraphEdge(source="a", target="b", selector="#btn", action=ActionType.CLICK)
+    msg = _format_replay_error(err, edge, "tab-0")
+    assert msg.startswith("async_load: ")
+    assert "selector:" in msg
+    assert "tab=tab-0" in msg
+
+
+@pytest.mark.asyncio
+async def test_playback_retries_on_transient_click_failure(monkeypatch: pytest.MonkeyPatch):
+    """Click should succeed on retry after transient TimeoutError."""
+    page = _FakePage()
+    attempt = [0]
+
+    async def _flaky_click(fake_page: _FakePage) -> None:
+        attempt[0] += 1
+        if attempt[0] < 2:
+            raise TimeoutError("Locator timed out")
+        fake_page.events.append(("click", "#btn"))
+
+    page.click_hooks["#btn"] = _flaky_click
+    _install_fake_playwright(monkeypatch, page)
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#btn",
+            action=ActionType.CLICK,
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={},
+        start_url="https://a.com/start",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert attempt[0] == 2
+
+
+@pytest.mark.asyncio
+async def test_playback_retries_on_transient_fill_failure(monkeypatch: pytest.MonkeyPatch):
+    """Fill should succeed on retry after transient failure."""
+    page = _FakePage()
+    attempt = [0]
+
+    class _FakeLocatorWithFlakyFill(_FakeLocator):
+        async def fill(self, value: str) -> None:
+            attempt[0] += 1
+            if attempt[0] < 2:
+                raise RuntimeError("Locator timed out: waiting for selector")
+            self.page.events.append(("fill", self.selector, value))
+
+    def _locator_with_flaky_fill(selector: str):
+        return _FakeLocatorWithFlakyFill(page, selector)
+
+    page.locator = _locator_with_flaky_fill
+    _install_fake_playwright(monkeypatch, page)
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#user",
+            action=ActionType.FILL,
+            param_name="username",
+            action_value="alice",
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={"username": "alice"},
+        start_url="https://a.com/start",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert attempt[0] == 2
+    assert ("fill", "#user", "alice") in page.events
+
+
+@pytest.mark.asyncio
+async def test_playback_frame_selector_fallback_uses_css_when_primary_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When primary frame selector fails, fall back to css_selector."""
+    page = _FakePage(missing_frames={"iframe[name='outer']"})
+    _install_fake_playwright(monkeypatch, page)
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#submit",
+            action=ActionType.CLICK,
+            frame_path=[
+                FrameLocatorSnapshot(
+                    selector="iframe[name='outer']",
+                    css_selector="iframe#frame-outer",
+                ),
+            ],
+        )
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={},
+        start_url="https://a.com/start",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert ("frame", "iframe#frame-outer") in page.events
+    assert ("frame", "iframe[name='outer']") not in page.events
+
+
+@pytest.mark.asyncio
+async def test_playback_popup_waits_for_load_state(monkeypatch: pytest.MonkeyPatch):
+    """After OPEN, playback should wait for popup domcontentloaded when available."""
+    page = _FakePage()
+    popup = _FakePage()
+    popup.url = "https://a.com/popup"
+    page.popup_page = popup
+
+    load_state_called = [False]
+
+    async def _fake_wait_for_load_state(state: str) -> None:
+        load_state_called[0] = True
+        assert state == "domcontentloaded"
+
+    popup.wait_for_load_state = _fake_wait_for_load_state
+    _install_fake_playwright(monkeypatch, page)
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#open",
+            action=ActionType.CLICK,
+            tab_id="tab-0",
+            target_tab_id="tab-1",
+            tab_action=TabActionType.OPEN,
+        ),
+        GraphEdge(
+            source="b",
+            target="c",
+            selector="#confirm",
+            action=ActionType.CLICK,
+            tab_id="tab-1",
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={},
+        start_url="https://a.com/start",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert load_state_called[0] is True
