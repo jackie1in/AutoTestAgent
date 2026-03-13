@@ -186,11 +186,72 @@ def _resolve_playback_context(page: Any, frame_path: list[FrameLocatorSnapshot])
     return context
 
 
+def _element_selector_candidates(edge: GraphEdge) -> list[str]:
+    """Return ordered selector candidates for element (PRD: id > css > semantic > xpath)."""
+    candidates: list[str] = []
+    primary = str(edge.selector or "").strip()
+    elem = edge.element
+
+    # 1. Prefer id (most stable)
+    if elem and elem.id:
+        id_sel = f"#{elem.id}"
+        if id_sel not in candidates:
+            candidates.append(id_sel)
+
+    # 2. Semantic selectors from attributes
+    if elem and elem.attributes:
+        attrs = elem.attributes
+        if attrs.get("href"):
+            href = str(attrs["href"])
+            candidates.append(f'a[href="{href}"]')
+        if attrs.get("type") == "submit":
+            candidates.append('button[type="submit"]')
+        if attrs.get("name") and attrs.get("type"):
+            candidates.append(
+                f'input[type="{attrs["type"]}"][name="{attrs["name"]}"]'
+            )
+        elif attrs.get("name"):
+            candidates.append(f'[name="{attrs["name"]}"]')
+
+    # 3. Stable css_selector from element snapshot
+    if elem and elem.css_selector and elem.css_selector != primary:
+        candidates.append(elem.css_selector)
+
+    # 4. Primary selector (may be xpath)
+    if primary and primary not in candidates:
+        candidates.append(primary)
+
+    return candidates if candidates else [primary] if primary else []
+
+
 def _locator_in_context(
     page: Any, selector: str, frame_path: list[FrameLocatorSnapshot]
 ) -> Any:
     """Build a locator in the target page/frame context."""
     return _resolve_playback_context(page, frame_path).locator(selector)
+
+
+async def _try_action_with_selector_fallback(
+    page_for_edge: Any,
+    edge: GraphEdge,
+    action_fn: Callable[[Any], Awaitable[None]],
+) -> None:
+    """Try action with each selector candidate until one succeeds (PRD: id > css > xpath)."""
+    candidates = _element_selector_candidates(edge)
+    last_exc: Exception | None = None
+    for sel in candidates:
+        try:
+            loc = _locator_in_context(
+                page_for_edge, sel, edge.frame_path or []
+            )
+            await action_fn(loc)
+            return
+        except Exception as exc:
+            last_exc = exc
+            continue
+    if last_exc is not None:
+        raise last_exc
+    raise ValueError("No selector candidates for edge")
 
 
 def _format_replay_error(
@@ -520,12 +581,8 @@ async def run_playback(
                                 # Skip if no selector (e.g. pure navigation or wait)
                                 continue
 
-                            loc = _locator_in_context(
-                                page_for_edge, selector, edge.frame_path
-                            )
-
                             if edge.tab_action == TabActionType.OPEN:
-                                async with page_for_edge.expect_popup() as popup_info:
+                                async def _do_open_click(loc: Any) -> None:
                                     if wait_for_network:
                                         await _run_with_http_wait(
                                             page_for_edge,
@@ -534,6 +591,11 @@ async def run_playback(
                                         )
                                     else:
                                         await loc.click()
+
+                                async with page_for_edge.expect_popup() as popup_info:
+                                    await _try_action_with_selector_fallback(
+                                        page_for_edge, edge, _do_open_click
+                                    )
                                 popup_page = await popup_info.value
                                 popup_page.set_default_timeout(timeout_ms)
                                 if hasattr(popup_page, "wait_for_load_state"):
@@ -571,10 +633,14 @@ async def run_playback(
                                 else:
                                     value = "test_value"
 
-                                async def _do_fill() -> None:
+                                async def _do_fill(loc: Any) -> None:
                                     await loc.fill(value)
 
-                                await _retry_action(_do_fill)
+                                await _retry_action(
+                                    lambda: _try_action_with_selector_fallback(
+                                        page_for_edge, edge, _do_fill
+                                    )
+                                )
                                 actual_url = page_for_edge.url
                                 last_action_page = page_for_edge
                                 param_name = (
@@ -595,7 +661,7 @@ async def run_playback(
 
                             elif action == ActionType.CLICK:
 
-                                async def _do_click() -> None:
+                                async def _do_click(loc: Any) -> None:
                                     if wait_for_network:
                                         await _run_with_http_wait(
                                             page_for_edge,
@@ -605,7 +671,11 @@ async def run_playback(
                                     else:
                                         await loc.click()
 
-                                await _retry_action(_do_click)
+                                await _retry_action(
+                                    lambda: _try_action_with_selector_fallback(
+                                        page_for_edge, edge, _do_click
+                                    )
+                                )
                                 actual_url = page_for_edge.url
                                 last_action_page = page_for_edge
                                 if (

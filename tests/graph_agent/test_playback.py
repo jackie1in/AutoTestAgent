@@ -1256,6 +1256,44 @@ async def test_playback_retries_on_transient_fill_failure(
 
 
 @pytest.mark.asyncio
+async def test_playback_element_selector_fallback_prefers_id_over_xpath(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When element has id, prefer #id over xpath (PRD selector stability)."""
+    page = _FakePage()
+    _install_fake_playwright(monkeypatch, page)
+
+    from graph_agent.models import ElementSnapshot
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="xpath=html/body/div/form/input",
+            action=ActionType.FILL,
+            intent=_make_intent("Fill username", key="auth.fill.username"),
+            param_name="username",
+            element=ElementSnapshot(
+                selector="xpath=html/body/div/form/input",
+                id="user",
+                name="username",
+                attributes={"id": "user", "name": "username"},
+            ),
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={"username": "testuser"},
+        start_url=_DATA_HTML,
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert ("fill", "#user", "testuser") in page.events
+
+
+@pytest.mark.asyncio
 async def test_playback_frame_selector_fallback_uses_css_when_primary_fails(
     monkeypatch: pytest.MonkeyPatch,
 ):

@@ -132,10 +132,10 @@ async def test_playback_acceptance_at_least_three_intents(tmp_path):
 @pytest.mark.integration
 @requires_network
 @pytest.mark.asyncio
-async def test_playback_acceptance_real_graph_when_available():
+async def test_playback_acceptance_real_graph_at_least_three_intents():
     """
     Task 7: 基于 mapping.run 产出的 graph.json 做真实回放。
-    当图谱存在且至少 1 个意图可回放时验证。数据来源：graph_agent/data/graph.json
+    PRD 8.3: 至少 3 个真实业务意图回放成功。数据来源：graph_agent/data/graph.json
     """
     from pathlib import Path
 
@@ -146,12 +146,13 @@ async def test_playback_acceptance_real_graph_when_available():
     result = await run_playback_acceptance(
         DEFAULT_GRAPH,
         start_url=TARGET_HOME,
-        min_success=1,
+        min_success=3,
         min_with_iframe_or_tab=0,
     )
-    assert result.total_attempted >= 1
-    assert result.total_succeeded >= 1, (
-        f"真实图谱应至少 1 个意图回放成功。"
+    assert result.total_attempted >= 3, "应尝试至少 3 个意图"
+    assert result.total_succeeded >= 3, (
+        f"PRD 8.3: 至少 3 个真实业务意图回放成功。"
+        f"实际: succeeded={result.total_succeeded}, "
         f"results={[(r.intent_query, r.success, r.error) for r in result.results]}"
     )
 
