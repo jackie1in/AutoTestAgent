@@ -110,6 +110,26 @@ def _has_iframe_or_tab(edges: list[Any]) -> bool:
     return False
 
 
+def _prioritize_iframe_intents(
+    queries: list[str], graph: Any
+) -> list[tuple[str, list[Any]]]:
+    """意图 A: 优先选择包含 iframe 的业务动作。
+
+    解析每个 query 的路径，将含 iframe/tab 的意图排在前面，
+    以便验收时优先尝试 iframe 场景。
+    """
+    resolved: list[tuple[str, list[Any], bool]] = []
+    for q in queries:
+        path = get_path_from_query(q, graph)
+        if len(path) < 2:
+            continue
+        has_iframe_tab = _has_iframe_or_tab(path)
+        resolved.append((q, path, has_iframe_tab))
+    # 含 iframe/tab 的排前面（意图 A 优先）
+    resolved.sort(key=lambda x: (not x[2], x[0]))
+    return [(q, path) for q, path, _ in resolved]
+
+
 async def run_playback_acceptance(
     graph_path: str | Path,
     start_url: str | None = None,
@@ -161,16 +181,16 @@ async def run_playback_acceptance(
     data = test_data or THE_INTERNET_CREDENTIALS
     queries = intent_queries or PRIORITY_INTENTS
 
+    # 意图 A: 优先选择包含 iframe 的业务动作
+    prioritized = _prioritize_iframe_intents(queries, graph)
+
     results: list[PlaybackResult] = []
     succeeded = 0
     with_iframe_tab_succeeded = 0
 
     os.environ["PLAYWRIGHT_HEADLESS"] = "true"
     try:
-        for q in queries:
-            path = get_path_from_query(q, graph)
-            if len(path) < 2:
-                continue
+        for q, path in prioritized:
             has_iframe_tab = _has_iframe_or_tab(path)
             result = await run_playback(
                 path,

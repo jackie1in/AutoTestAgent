@@ -14,6 +14,7 @@ import networkx as nx
 
 from graph_agent.acceptance.playback_acceptance import (
     PlaybackAcceptanceResult,
+    _prioritize_iframe_intents,
     is_graph_from_mapping_run,
     run_playback_acceptance,
 )
@@ -214,6 +215,73 @@ def test_playback_acceptance_iframe_intent_resolvable():
         getattr(e, "frame_path", None) and len(e.frame_path) > 0 for e in path
     )
     assert has_frame, "路径应包含 frame_path（iframe 场景）"
+
+
+def test_prioritize_iframe_intents_puts_iframe_first():
+    """意图 A: 包含 iframe 的业务动作应优先于其他意图。"""
+    G = _build_fixture_with_iframe_graph()
+    queries = [
+        "auth.login",
+        "auth.fill.username",
+        "elements.iframe.type",
+    ]
+    prioritized = _prioritize_iframe_intents(queries, G)
+    queries_ordered = [q for q, _ in prioritized]
+    iframe_idx = queries_ordered.index("elements.iframe.type")
+    auth_login_idx = queries_ordered.index("auth.login")
+    auth_username_idx = queries_ordered.index("auth.fill.username")
+    assert iframe_idx < auth_login_idx, (
+        f"意图 A: elements.iframe.type 应排在 auth.login 前面, "
+        f"实际顺序: {queries_ordered}"
+    )
+    assert iframe_idx < auth_username_idx, (
+        f"意图 A: elements.iframe.type 应排在 auth.fill.username 前面, "
+        f"实际顺序: {queries_ordered}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_playback_acceptance_iframe_intent_attempted_first(tmp_path):
+    """
+    意图 A: 优先选择包含 iframe 的业务动作。
+    验证 run_playback_acceptance 会先尝试 iframe 意图。
+    """
+    G = _build_fixture_with_iframe_graph()
+    graph_path = tmp_path / "graph.json"
+    save_graph(G, graph_path)
+
+    async def _mock_run_playback(path, **kwargs):
+        has_iframe = any(
+            getattr(e, "frame_path", None) and len(e.frame_path) > 0 for e in path
+        )
+        return {"success": True, "actual_url": TARGET_IFRAME if has_iframe else TARGET_SECURE}
+
+    with patch(
+        "graph_agent.acceptance.playback_acceptance.run_playback",
+        new_callable=AsyncMock,
+        side_effect=_mock_run_playback,
+    ):
+        result = await run_playback_acceptance(
+            str(graph_path),
+            start_url=TARGET_HOME,
+            test_data={"username": "tomsmith", "password": "x", "iframe_content": "t"},
+            intent_queries=[
+                "auth.login",
+                "auth.fill.username",
+                "elements.iframe.type",
+            ],
+            min_success=3,
+            min_with_iframe_or_tab=1,
+        )
+
+    # 意图 A: iframe 意图应排在前面尝试，故 results 中首个含 iframe 的应在首个不含 iframe 的之前
+    iframe_indices = [i for i, r in enumerate(result.results) if r.has_iframe_or_tab]
+    non_iframe_indices = [i for i, r in enumerate(result.results) if not r.has_iframe_or_tab]
+    if iframe_indices and non_iframe_indices:
+        assert min(iframe_indices) < min(non_iframe_indices), (
+            f"意图 A: iframe 意图应优先尝试。"
+            f"results 顺序: {[(r.intent_query, r.has_iframe_or_tab) for r in result.results]}"
+        )
 
 
 @pytest.mark.asyncio
