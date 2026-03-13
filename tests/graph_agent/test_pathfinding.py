@@ -612,6 +612,150 @@ def test_pathfinding_intent_b_login_then_enter_module_resolvable():
         assert path[-1].target == "module"
 
 
+def test_pathfinding_intent_c_project_list_enter_subproject_open_overview():
+    """意图 C: 项目列表进入子项目并打开概览 - 应解析为 auth.login + elements.management.add 路径。"""
+    G = nx.MultiDiGraph()
+    G.add_node("login", url="https://a.com/login")
+    G.add_node("user", url="https://a.com/login")
+    G.add_node("pass", url="https://a.com/login")
+    G.add_node("secure", url="https://a.com/secure")
+    G.add_node("add_remove", url="https://a.com/add_remove_elements/")
+    G.add_node("overview", url="https://a.com/add_remove_elements/")
+    G.add_edge(
+        "login",
+        "user",
+        key="step-1",
+        edge_id="step-1",
+        step_index=1,
+        selector="#username",
+        action=ActionType.FILL,
+        intent=_make_intent("Fill username", key="auth.fill.username"),
+        param_name="username",
+    )
+    G.add_edge(
+        "user",
+        "pass",
+        key="step-2",
+        edge_id="step-2",
+        step_index=2,
+        selector="#password",
+        action=ActionType.FILL,
+        intent=_make_intent("Fill password", key="auth.fill.password"),
+        param_name="password",
+    )
+    G.add_edge(
+        "pass",
+        "secure",
+        key="step-3",
+        edge_id="step-3",
+        step_index=3,
+        selector="button[type='submit']",
+        action=ActionType.CLICK,
+        intent=_make_intent("Submit login", key="auth.submit.login"),
+    )
+    G.add_edge(
+        "secure",
+        "add_remove",
+        key="step-4",
+        edge_id="step-4",
+        step_index=4,
+        selector='a[href="/add_remove_elements/"]',
+        action=ActionType.CLICK,
+        intent=_make_intent("Navigate to Add/Remove", key="elements.navigation.select"),
+    )
+    G.add_edge(
+        "add_remove",
+        "overview",
+        key="step-5",
+        edge_id="step-5",
+        step_index=5,
+        selector='button[onclick="addElement()"]',
+        action=ActionType.CLICK,
+        intent=_make_intent("Click Add Element", key="elements.add.click"),
+    )
+    G.graph["business_templates"] = [
+        BusinessTemplate(
+            template_id="tpl-auth",
+            business_key="auth.login",
+            summary="用户登录",
+            entry_node="login",
+            exit_node="secure",
+            path_length=3,
+            confidence=0.95,
+            steps=[
+                BusinessTemplateStep(
+                    edge_id="step-1",
+                    source="login",
+                    target="user",
+                    selector="#username",
+                    action=ActionType.FILL,
+                    intent_key="auth.fill.username",
+                    param_name="username",
+                ),
+                BusinessTemplateStep(
+                    edge_id="step-2",
+                    source="user",
+                    target="pass",
+                    selector="#password",
+                    action=ActionType.FILL,
+                    intent_key="auth.fill.password",
+                    param_name="password",
+                ),
+                BusinessTemplateStep(
+                    edge_id="step-3",
+                    source="pass",
+                    target="secure",
+                    selector="button[type='submit']",
+                    action=ActionType.CLICK,
+                    intent_key="auth.submit.login",
+                    param_name=None,
+                ),
+            ],
+            slots={},
+            evidence={},
+        ).model_dump(mode="json"),
+        BusinessTemplate(
+            template_id="tpl-management-add",
+            business_key="elements.management.add",
+            summary="项目列表进入子项目并打开概览",
+            entry_node="secure",
+            exit_node="overview",
+            path_length=2,
+            confidence=0.9,
+            steps=[
+                BusinessTemplateStep(
+                    edge_id="step-4",
+                    source="secure",
+                    target="add_remove",
+                    selector='a[href="/add_remove_elements/"]',
+                    action=ActionType.CLICK,
+                    intent_key="elements.navigation.select",
+                    param_name=None,
+                ),
+                BusinessTemplateStep(
+                    edge_id="step-5",
+                    source="add_remove",
+                    target="overview",
+                    selector='button[onclick="addElement()"]',
+                    action=ActionType.CLICK,
+                    intent_key="elements.add.click",
+                    param_name=None,
+                ),
+            ],
+            slots={},
+            evidence={},
+            depends_on=["auth.login"],
+        ).model_dump(mode="json"),
+    ]
+
+    for query in ["项目列表进入子项目并打开概览", "elements.management.add", "项目列表进入子项目"]:
+        path = get_path_from_intent(query, G)
+        assert len(path) >= 5, (
+            f"意图 C: query={query!r} 应解析为至少 5 条边 (auth.login 3 + 进入子项目 1 + 打开概览 1)"
+        )
+        assert path[-1].target == "overview"
+
+
 def test_pathfinding_inserts_connecting_path_when_dependency_exit_differs_from_template_entry():
     """When dependency exit_node != template entry_node, pathfinding should insert connecting graph edges."""
     G = nx.MultiDiGraph()

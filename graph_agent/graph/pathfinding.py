@@ -58,6 +58,15 @@ _KEY_ALIASES: dict[str, tuple[str, ...]] = {
         "elements.navigation.select",
         "module.select",
     ),
+    # 意图 C: 项目列表进入子项目并打开概览 (PRD 8.3)
+    "elements.management.add": (
+        "elements.management.add",
+        "项目列表进入子项目并打开概览",
+        "项目列表进入子项目",
+        "项目进入子项目打开概览",
+        "elements.navigation.select",
+        "elements.add",
+    ),
 }
 
 

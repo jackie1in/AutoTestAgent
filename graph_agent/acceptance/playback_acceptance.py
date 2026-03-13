@@ -64,7 +64,8 @@ PRIORITY_INTENTS = [
     "navigation.module.select",  # 意图 B: 登录后进入目标模块（依赖 auth.login）
     "登录后进入目标模块",  # 意图 B 中文别名
     "elements.navigation.select",  # 进入 Add/Remove 模块（依赖 auth.login）
-    "elements.management.add",  # 意图 C: 项目 -> 子项目
+    "项目列表进入子项目并打开概览",  # 意图 C: 项目列表 -> 子项目 -> 概览
+    "elements.management.add",  # 意图 C 英文 key
     "elements.add",
 ]
 

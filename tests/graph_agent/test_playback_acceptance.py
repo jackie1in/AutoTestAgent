@@ -271,6 +271,81 @@ def test_playback_acceptance_intent_b_resolvable():
         )
 
 
+def _build_intent_c_fixture_graph() -> nx.MultiDiGraph:
+    """构建含意图 C（项目列表进入子项目并打开概览）的 fixture 图。"""
+    G = _build_three_intent_fixture_graph()
+    G.add_node("add_remove", url=f"{TARGET_SITE}/add_remove_elements/")
+    G.add_node("add_remove_overview", url=f"{TARGET_SITE}/add_remove_elements/")
+
+    def add_edge(u, v, key, **kw):
+        G.add_edge(u, v, key=key, edge_id=key, **kw)
+
+    add_edge(
+        "secure",
+        "add_remove",
+        "e5",
+        selector='a[href="/add_remove_elements/"]',
+        action=ActionType.CLICK,
+        intent=_make_intent("Navigate to Add/Remove subproject", key="elements.navigation.select"),
+    )
+    add_edge(
+        "add_remove",
+        "add_remove_overview",
+        "e6",
+        selector='button[onclick="addElement()"]',
+        action=ActionType.CLICK,
+        intent=_make_intent("Click Add Element to open overview", key="elements.add.click"),
+    )
+
+    G.graph["business_templates"] = [
+        {
+            "template_id": "tpl-auth",
+            "business_key": "auth.login",
+            "summary": "用户登录流程",
+            "entry_node": "home",
+            "exit_node": "secure",
+            "path_length": 4,
+            "confidence": 0.95,
+            "steps": [
+                {"edge_id": "e1", "source": "home", "target": "login-empty", "selector": 'a[href="/login"]', "action": "click", "intent_key": "go_to_login", "param_name": None},
+                {"edge_id": "e2", "source": "login-empty", "target": "login-user", "selector": "#username", "action": "fill", "intent_key": "auth.fill.username", "param_name": "username"},
+                {"edge_id": "e3", "source": "login-user", "target": "login-password", "selector": "#password", "action": "fill", "intent_key": "auth.fill.password", "param_name": "password"},
+                {"edge_id": "e4", "source": "login-password", "target": "secure", "selector": 'button[type="submit"]', "action": "click", "intent_key": "auth.submit.login", "param_name": None},
+            ],
+            "slots": {},
+            "evidence": {},
+            "depends_on": [],
+        },
+        {
+            "template_id": "tpl-management-add",
+            "business_key": "elements.management.add",
+            "summary": "项目列表进入子项目并打开概览",
+            "entry_node": "secure",
+            "exit_node": "add_remove_overview",
+            "path_length": 2,
+            "confidence": 0.9,
+            "steps": [
+                {"edge_id": "e5", "source": "secure", "target": "add_remove", "selector": 'a[href="/add_remove_elements/"]', "action": "click", "intent_key": "elements.navigation.select", "param_name": None},
+                {"edge_id": "e6", "source": "add_remove", "target": "add_remove_overview", "selector": 'button[onclick="addElement()"]', "action": "click", "intent_key": "elements.add.click", "param_name": None},
+            ],
+            "slots": {},
+            "evidence": {},
+            "depends_on": ["auth.login"],
+        },
+    ]
+    return G
+
+
+def test_playback_acceptance_intent_c_resolvable():
+    """意图 C: 项目列表进入子项目并打开概览 应可解析为路径。"""
+    G = _build_intent_c_fixture_graph()
+    for q in ["项目列表进入子项目并打开概览", "elements.management.add", "项目列表进入子项目"]:
+        path = get_path_from_query(q, G)
+        assert len(path) >= 6, (
+            f"意图 C: {q!r} 应解析为至少 6 条边 (auth.login 4 + 进入子项目 1 + 打开概览 1)"
+        )
+
+
 def test_playback_acceptance_iframe_intent_resolvable():
     """Fixture 图中 elements.iframe.type 可解析为含 frame_path 的路径。"""
     G = _build_fixture_with_iframe_graph()
