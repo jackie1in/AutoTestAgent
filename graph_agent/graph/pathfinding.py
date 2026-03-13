@@ -49,6 +49,15 @@ _KEY_ALIASES: dict[str, tuple[str, ...]] = {
         "iframe",
         "iframe 输入",
     ),
+    # 意图 B: 登录后进入目标模块 (PRD 8.3)
+    "navigation.module.select": (
+        "navigation.module.select",
+        "登录后进入目标模块",
+        "进入目标模块",
+        "进入一级业务模块",
+        "elements.navigation.select",
+        "module.select",
+    ),
 }
 
 
@@ -58,6 +67,13 @@ def _key_matches(intent_key: str | None, user_query: str) -> bool:
         return False
     key = intent_key.lower()
     query = (user_query or "").lower()
+    # 意图 B: "登录后进入目标模块" 应匹配 navigation.module.select，不匹配仅 auth.login
+    module_flow_terms = ("进入", "目标模块", "一级业务模块")
+    if any(term in query for term in module_flow_terms):
+        if "login" in key or "auth" in key:
+            return False
+        if "module" in key:
+            return True
     aliases = _KEY_ALIASES.get(key, (key,))
     if any(alias in query or query in alias for alias in aliases if alias):
         return True

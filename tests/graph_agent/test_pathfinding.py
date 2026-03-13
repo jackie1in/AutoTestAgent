@@ -488,6 +488,130 @@ def test_pathfinding_submit_login_query_prefers_submit_edge_over_go_to_login():
     assert path[-1].intent.key == "submit_login"
 
 
+def test_pathfinding_intent_b_login_then_enter_module_resolvable():
+    """意图 B: 登录后进入目标模块 - 应解析为 auth.login + navigation.module.select 路径。"""
+    G = nx.MultiDiGraph()
+    G.add_node("login", url="https://a.com/login")
+    G.add_node("user", url="https://a.com/login")
+    G.add_node("pass", url="https://a.com/login")
+    G.add_node("secure", url="https://a.com/secure")
+    G.add_node("module", url="https://a.com/add_remove_elements/")
+    G.add_edge(
+        "login",
+        "user",
+        key="step-1",
+        edge_id="step-1",
+        step_index=1,
+        selector="#username",
+        action=ActionType.FILL,
+        intent=_make_intent("Fill username", key="auth.fill.username"),
+        param_name="username",
+    )
+    G.add_edge(
+        "user",
+        "pass",
+        key="step-2",
+        edge_id="step-2",
+        step_index=2,
+        selector="#password",
+        action=ActionType.FILL,
+        intent=_make_intent("Fill password", key="auth.fill.password"),
+        param_name="password",
+    )
+    G.add_edge(
+        "pass",
+        "secure",
+        key="step-3",
+        edge_id="step-3",
+        step_index=3,
+        selector="button[type='submit']",
+        action=ActionType.CLICK,
+        intent=_make_intent("Submit login", key="auth.submit.login"),
+    )
+    G.add_edge(
+        "secure",
+        "module",
+        key="step-4",
+        edge_id="step-4",
+        step_index=4,
+        selector='a[href="/add_remove_elements/"]',
+        action=ActionType.CLICK,
+        intent=_make_intent("Navigate to Add/Remove module", key="elements.navigation.select"),
+    )
+    G.graph["business_templates"] = [
+        BusinessTemplate(
+            template_id="tpl-auth",
+            business_key="auth.login",
+            summary="用户登录流程",
+            entry_node="login",
+            exit_node="secure",
+            path_length=3,
+            confidence=0.95,
+            steps=[
+                BusinessTemplateStep(
+                    edge_id="step-1",
+                    source="login",
+                    target="user",
+                    selector="#username",
+                    action=ActionType.FILL,
+                    intent_key="auth.fill.username",
+                    param_name="username",
+                ),
+                BusinessTemplateStep(
+                    edge_id="step-2",
+                    source="user",
+                    target="pass",
+                    selector="#password",
+                    action=ActionType.FILL,
+                    intent_key="auth.fill.password",
+                    param_name="password",
+                ),
+                BusinessTemplateStep(
+                    edge_id="step-3",
+                    source="pass",
+                    target="secure",
+                    selector="button[type='submit']",
+                    action=ActionType.CLICK,
+                    intent_key="auth.submit.login",
+                    param_name=None,
+                ),
+            ],
+            slots={"username": 0, "password": 1, "submit": 2},
+            evidence={},
+        ).model_dump(mode="json"),
+        BusinessTemplate(
+            template_id="tpl-nav-module",
+            business_key="navigation.module.select",
+            summary="登录后进入目标模块",
+            entry_node="secure",
+            exit_node="module",
+            path_length=1,
+            confidence=0.9,
+            steps=[
+                BusinessTemplateStep(
+                    edge_id="step-4",
+                    source="secure",
+                    target="module",
+                    selector='a[href="/add_remove_elements/"]',
+                    action=ActionType.CLICK,
+                    intent_key="elements.navigation.select",
+                    param_name=None,
+                )
+            ],
+            slots={},
+            evidence={},
+            depends_on=["auth.login"],
+        ).model_dump(mode="json"),
+    ]
+
+    for query in ["登录后进入目标模块", "navigation.module.select", "进入目标模块"]:
+        path = get_path_from_intent(query, G)
+        assert len(path) >= 4, (
+            f"意图 B: query={query!r} 应解析为至少 4 条边 (auth.login 3 + 进入模块 1)"
+        )
+        assert path[-1].target == "module"
+
+
 def test_pathfinding_inserts_connecting_path_when_dependency_exit_differs_from_template_entry():
     """When dependency exit_node != template entry_node, pathfinding should insert connecting graph edges."""
     G = nx.MultiDiGraph()

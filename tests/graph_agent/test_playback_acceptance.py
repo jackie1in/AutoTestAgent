@@ -206,6 +206,71 @@ def test_playback_acceptance_three_intents_resolvable():
         assert len(path) >= 2, f"{q} 应解析为至少 2 条边"
 
 
+def _build_intent_b_fixture_graph() -> nx.MultiDiGraph:
+    """构建含意图 B（登录后进入目标模块）的 fixture 图。"""
+    G = _build_three_intent_fixture_graph()
+    G.add_node("add_remove", url=f"{TARGET_SITE}/add_remove_elements/")
+
+    def add_edge(u, v, key, **kw):
+        G.add_edge(u, v, key=key, edge_id=key, **kw)
+
+    add_edge(
+        "secure",
+        "add_remove",
+        "e5",
+        selector='a[href="/add_remove_elements/"]',
+        action=ActionType.CLICK,
+        intent=_make_intent("Navigate to Add/Remove module", key="elements.navigation.select"),
+    )
+
+    G.graph["business_templates"] = [
+        {
+            "template_id": "tpl-auth",
+            "business_key": "auth.login",
+            "summary": "用户登录流程",
+            "entry_node": "home",
+            "exit_node": "secure",
+            "path_length": 4,
+            "confidence": 0.95,
+            "steps": [
+                {"edge_id": "e1", "source": "home", "target": "login-empty", "selector": 'a[href="/login"]', "action": "click", "intent_key": "go_to_login", "param_name": None},
+                {"edge_id": "e2", "source": "login-empty", "target": "login-user", "selector": "#username", "action": "fill", "intent_key": "auth.fill.username", "param_name": "username"},
+                {"edge_id": "e3", "source": "login-user", "target": "login-password", "selector": "#password", "action": "fill", "intent_key": "auth.fill.password", "param_name": "password"},
+                {"edge_id": "e4", "source": "login-password", "target": "secure", "selector": 'button[type="submit"]', "action": "click", "intent_key": "auth.submit.login", "param_name": None},
+            ],
+            "slots": {},
+            "evidence": {},
+            "depends_on": [],
+        },
+        {
+            "template_id": "tpl-nav-module",
+            "business_key": "navigation.module.select",
+            "summary": "登录后进入目标模块",
+            "entry_node": "secure",
+            "exit_node": "add_remove",
+            "path_length": 1,
+            "confidence": 0.9,
+            "steps": [
+                {"edge_id": "e5", "source": "secure", "target": "add_remove", "selector": 'a[href="/add_remove_elements/"]', "action": "click", "intent_key": "elements.navigation.select", "param_name": None},
+            ],
+            "slots": {},
+            "evidence": {},
+            "depends_on": ["auth.login"],
+        },
+    ]
+    return G
+
+
+def test_playback_acceptance_intent_b_resolvable():
+    """意图 B: 登录后进入目标模块 应可解析为路径。"""
+    G = _build_intent_b_fixture_graph()
+    for q in ["登录后进入目标模块", "navigation.module.select", "进入目标模块"]:
+        path = get_path_from_query(q, G)
+        assert len(path) >= 5, (
+            f"意图 B: {q!r} 应解析为至少 5 条边 (auth.login 4 + 进入模块 1)"
+        )
+
+
 def test_playback_acceptance_iframe_intent_resolvable():
     """Fixture 图中 elements.iframe.type 可解析为含 frame_path 的路径。"""
     G = _build_fixture_with_iframe_graph()

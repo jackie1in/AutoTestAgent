@@ -56,13 +56,14 @@ class PlaybackAcceptanceResult:
 # 优先回放的意图（PRD 9.7 建议）- 按成功概率排序
 # 真实图谱 (the-internet.herokuapp.com) 中可解析的意图
 PRIORITY_INTENTS = [
-    "auth.login",  # 意图 B: 登录后进入目标模块
+    "auth.login",
     "登录",
     "auth.fill.username",  # 原子意图，可单独回放
     "auth.fill.password",
     "elements.iframe.type",  # 意图 A: 包含 iframe 的业务动作
+    "navigation.module.select",  # 意图 B: 登录后进入目标模块（依赖 auth.login）
+    "登录后进入目标模块",  # 意图 B 中文别名
     "elements.navigation.select",  # 进入 Add/Remove 模块（依赖 auth.login）
-    "navigation.module.select",
     "elements.management.add",  # 意图 C: 项目 -> 子项目
     "elements.add",
 ]
