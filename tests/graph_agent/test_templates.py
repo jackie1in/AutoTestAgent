@@ -361,6 +361,144 @@ async def test_generate_business_templates_rejects_navigation_only_click_noise()
 
 
 @pytest.mark.asyncio
+async def test_generate_business_templates_normalizes_generic_module_navigation_key():
+    """Post-login generic menu selection should normalize to navigation.module.select."""
+    G = _build_login_graph()
+    G.add_node("project-home", url="https://example.com/app")
+    G.add_node("project-list", url="https://example.com/app")
+    G.add_edge(
+        "secure",
+        "project-home",
+        key="step-4",
+        edge_id="step-4",
+        step_index=4,
+        selector="a[data-menu='project']",
+        action=ActionType.CLICK,
+        intent=_intent("Open project menu", "project.navigation.menu_item"),
+    )
+    G.add_edge(
+        "project-home",
+        "project-list",
+        key="step-5",
+        edge_id="step-5",
+        step_index=5,
+        selector="a[data-menu='project-list']",
+        action=ActionType.CLICK,
+        intent=_intent("Select project list", "project.select.menu_item"),
+    )
+
+    async def classifier(payload: dict[str, object]) -> dict[str, object] | None:
+        edge_ids = [step.get("edge_id") for step in payload["steps"]]  # type: ignore[index]
+        if edge_ids == ["step-1", "step-2", "step-3"]:
+            return {
+                "is_business_flow": True,
+                "business_key": "auth.login",
+                "summary": "用户登录流程",
+                "slots": {"username": 0, "password": 1, "submit": 2},
+                "confidence": 0.95,
+                "evidence": {},
+            }
+        if edge_ids == ["step-4", "step-5"]:
+            return {
+                "is_business_flow": True,
+                "business_key": "navigation.menu_selection",
+                "summary": "打开导航菜单并选择目标项",
+                "slots": {},
+                "confidence": 0.88,
+                "evidence": {
+                    "intent_keys": [
+                        "project.navigation.menu_item",
+                        "project.select.menu_item",
+                    ]
+                },
+            }
+        return {
+            "is_business_flow": False,
+            "business_key": "",
+            "summary": "",
+            "slots": {},
+            "confidence": 0.0,
+            "evidence": {},
+        }
+
+    templates = await generate_business_templates(
+        G,
+        classifier=classifier,
+        max_path_length=5,
+    )
+    by_key = {template.business_key: template for template in templates}
+
+    assert "navigation.module.select" in by_key
+    assert by_key["navigation.module.select"].depends_on == ["auth.login"]
+    assert [step.edge_id for step in by_key["navigation.module.select"].steps] == [
+        "step-4",
+        "step-5",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_business_templates_synthesizes_module_navigation_after_auth_login():
+    """When post-login menu clicks are not classified well, synthesize navigation.module.select."""
+    G = _build_login_graph()
+    G.add_node("project-home", url="https://example.com/app")
+    G.add_node("project-list", url="https://example.com/app")
+    G.add_edge(
+        "secure",
+        "project-home",
+        key="step-4",
+        edge_id="step-4",
+        step_index=4,
+        selector="a[data-menu='project']",
+        action=ActionType.CLICK,
+        intent=_intent("Open project menu", "project.navigation.menu_item"),
+    )
+    G.add_edge(
+        "project-home",
+        "project-list",
+        key="step-5",
+        edge_id="step-5",
+        step_index=5,
+        selector="a[data-menu='project-list']",
+        action=ActionType.CLICK,
+        intent=_intent("Select project list", "project.select.menu_item"),
+    )
+
+    async def classifier(payload: dict[str, object]) -> dict[str, object] | None:
+        edge_ids = [step.get("edge_id") for step in payload["steps"]]  # type: ignore[index]
+        if edge_ids == ["step-1", "step-2", "step-3"]:
+            return {
+                "is_business_flow": True,
+                "business_key": "auth.login",
+                "summary": "用户登录流程",
+                "slots": {"username": 0, "password": 1, "submit": 2},
+                "confidence": 0.95,
+                "evidence": {},
+            }
+        return {
+            "is_business_flow": False,
+            "business_key": "",
+            "summary": "",
+            "slots": {},
+            "confidence": 0.0,
+            "evidence": {},
+        }
+
+    templates = await generate_business_templates(
+        G,
+        classifier=classifier,
+        max_path_length=5,
+    )
+    by_key = {template.business_key: template for template in templates}
+
+    assert "navigation.module.select" in by_key
+    assert by_key["navigation.module.select"].depends_on == ["auth.login"]
+    assert [step.edge_id for step in by_key["navigation.module.select"].steps] == [
+        "step-4",
+        "step-5",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_generate_business_templates_attaches_auth_login_dependency():
     """Post-login business templates should depend on auth.login when reachable from login exit."""
     G = _build_login_graph()

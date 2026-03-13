@@ -604,7 +604,13 @@ def test_pathfinding_intent_b_login_then_enter_module_resolvable():
         ).model_dump(mode="json"),
     ]
 
-    for query in ["登录后进入目标模块", "navigation.module.select", "进入目标模块"]:
+    for query in [
+        "登录后进入目标模块",
+        "navigation.module.select",
+        "进入目标模块",
+        "project.navigation.report_access",
+        "项目管理",
+    ]:
         path = get_path_from_intent(query, G)
         assert len(path) >= 4, (
             f"意图 B: query={query!r} 应解析为至少 4 条边 (auth.login 3 + 进入模块 1)"
