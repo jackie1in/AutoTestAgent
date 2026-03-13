@@ -96,7 +96,9 @@ def _parse_elements_from_llm_response(response_text: str) -> list[dict]:
                 {
                     "selector": str(sel).strip(),
                     "type": str(item.get("type", "other")).strip() or "other",
-                    "label": item.get("label") if item.get("label") is None else str(item.get("label")).strip() or None,
+                    "label": item.get("label")
+                    if item.get("label") is None
+                    else str(item.get("label")).strip() or None,
                 }
             )
         return elements
@@ -108,11 +110,26 @@ def _parse_elements_from_llm_response(response_text: str) -> list[dict]:
 def _infer_type_from_selector_or_label(selector: str, label: str | None) -> str:
     """Infer element type from selector and label when model type is weak."""
     s = (selector or "").lower()
-    l = (label or "").lower()
-    text = f"{s} {l}"
-    if any(token in text for token in ("#btn", ".btn", "button", "submit", "login", "logout")):
+    label_lower = (label or "").lower()
+    text = f"{s} {label_lower}"
+    if any(
+        token in text
+        for token in ("#btn", ".btn", "button", "submit", "login", "logout")
+    ):
         return "button"
-    if any(token in text for token in ("input", "name=", "username", "password", "email", "search", "select", "dropdown")):
+    if any(
+        token in text
+        for token in (
+            "input",
+            "name=",
+            "username",
+            "password",
+            "email",
+            "search",
+            "select",
+            "dropdown",
+        )
+    ):
         return "input"
     if any(token in text for token in ("text=", "xpath=(//a)", "/a", "href", "link")):
         return "link"
@@ -154,7 +171,9 @@ def normalize_elements(elements: list[dict]) -> list[dict]:
         normalized.append(
             {
                 "selector": selector,
-                "type": _normalize_type(str(item.get("type", "other")), selector, label),
+                "type": _normalize_type(
+                    str(item.get("type", "other")), selector, label
+                ),
                 "label": label,
             }
         )
@@ -182,7 +201,9 @@ def _heuristic_extract_elements_from_text(text: str) -> list[dict]:
     """Best-effort selector extraction when JSON parsing fails."""
     if not text.strip():
         return []
-    candidates = set(re.findall(r"(#[-_a-zA-Z0-9]+|\[name=['\"][^'\"]+['\"]\]|xpath=[^\s,;]+)", text))
+    candidates = set(
+        re.findall(r"(#[-_a-zA-Z0-9]+|\[name=['\"][^'\"]+['\"]\]|xpath=[^\s,;]+)", text)
+    )
     out: list[dict] = []
     for sel in sorted(candidates):
         kind = "other"
@@ -262,7 +283,10 @@ async def run_scout(
                     heuristic = _heuristic_extract_elements_from_text(raw_report)
                     elements = heuristic
                     extraction_path = "heuristic_fallback"
-                    LOG.warning("Scout extraction empty; used heuristic fallback with %s elements", len(elements))
+                    LOG.warning(
+                        "Scout extraction empty; used heuristic fallback with %s elements",
+                        len(elements),
+                    )
             except Exception as e:
                 LOG.warning("Scout LLM extraction failed: %s", e)
                 elements = _heuristic_extract_elements_from_text(raw_report)
@@ -303,6 +327,7 @@ def _clean_url_for_derived(url: str, base_url: str) -> str:
         raw = urljoin(base_url.rstrip("/") + "/", raw)
     try:
         from urllib.parse import urlparse, urlunparse
+
         parsed = urlparse(raw)
         return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
     except Exception:
@@ -350,6 +375,7 @@ def extract_derived_urls_from_elements(
     Returns absolute unique URLs for use as scout page hints.
     """
     import re
+
     derived: set[str] = set()
     for item in elements or []:
         if not isinstance(item, dict):
@@ -362,7 +388,11 @@ def extract_derived_urls_from_elements(
         if m:
             path = m.group(1).strip()
             if path and not path.startswith("#") and not path.startswith("javascript:"):
-                abs_url = path if _is_http_url(path) else urljoin(base_url.rstrip("/") + "/", path)
+                abs_url = (
+                    path
+                    if _is_http_url(path)
+                    else urljoin(base_url.rstrip("/") + "/", path)
+                )
                 if _is_http_url(abs_url):
                     derived.add(_clean_url_for_derived(abs_url, base_url))
         # xpath=//a[@href='/path']
@@ -370,13 +400,19 @@ def extract_derived_urls_from_elements(
         if m2:
             path = m2.group(1).strip()
             if path and not path.startswith("#") and not path.startswith("javascript:"):
-                abs_url = path if _is_http_url(path) else urljoin(base_url.rstrip("/") + "/", path)
+                abs_url = (
+                    path
+                    if _is_http_url(path)
+                    else urljoin(base_url.rstrip("/") + "/", path)
+                )
                 if _is_http_url(abs_url):
                     derived.add(_clean_url_for_derived(abs_url, base_url))
     return sorted(derived)
 
 
-def _resolve_multi_page_urls(start_url: str, page_hints: list[str] | None = None) -> list[str]:
+def _resolve_multi_page_urls(
+    start_url: str, page_hints: list[str] | None = None
+) -> list[str]:
     """Resolve multi-page scout targets to absolute unique URLs."""
     resolved: list[str] = []
     seen: set[str] = set()
@@ -385,7 +421,11 @@ def _resolve_multi_page_urls(start_url: str, page_hints: list[str] | None = None
         raw = (candidate or "").strip()
         if not raw:
             continue
-        absolute = raw if raw.startswith(("http://", "https://")) else urljoin(start_url.rstrip("/") + "/", raw)
+        absolute = (
+            raw
+            if raw.startswith(("http://", "https://"))
+            else urljoin(start_url.rstrip("/") + "/", raw)
+        )
         if absolute in seen:
             continue
         seen.add(absolute)
@@ -393,7 +433,9 @@ def _resolve_multi_page_urls(start_url: str, page_hints: list[str] | None = None
     return resolved
 
 
-def _aggregate_elements_with_sources(per_page_elements: dict[str, list[dict]]) -> list[dict]:
+def _aggregate_elements_with_sources(
+    per_page_elements: dict[str, list[dict]],
+) -> list[dict]:
     """Merge per-page elements and keep source URL trace for each selector/type/label."""
     merged: dict[tuple[str, str, str | None], dict[str, Any]] = {}
     for page_url, elements in per_page_elements.items():
@@ -440,7 +482,9 @@ async def run_scout_multi(
             {
                 "url": target_url,
                 "element_count": len(elements),
-                "type_counts": dict(Counter(item.get("type", "other") for item in elements)),
+                "type_counts": dict(
+                    Counter(item.get("type", "other") for item in elements)
+                ),
             }
         )
 
@@ -457,7 +501,9 @@ async def run_scout_multi(
             "metadata": {
                 "page_count": len(target_urls),
                 "aggregated_element_count": len(aggregated),
-                "type_counts": dict(Counter(item.get("type", "other") for item in aggregated)),
+                "type_counts": dict(
+                    Counter(item.get("type", "other") for item in aggregated)
+                ),
             },
         }
         path.write_text(

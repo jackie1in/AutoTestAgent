@@ -160,7 +160,10 @@ async def run_playback_acceptance(
                 succeeded += 1
                 if has_iframe_tab:
                     with_iframe_tab_succeeded += 1
-            if succeeded >= min_success and with_iframe_tab_succeeded >= min_with_iframe_or_tab:
+            if (
+                succeeded >= min_success
+                and with_iframe_tab_succeeded >= min_with_iframe_or_tab
+            ):
                 break
     finally:
         os.environ.pop("PLAYWRIGHT_HEADLESS", None)

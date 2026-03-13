@@ -42,9 +42,15 @@ def _iter_out_edges(graph: nx.Graph, node: str) -> list[EdgeRow]:
     """Return deterministic outgoing edges ordered by step_index then selector."""
     rows: list[EdgeRow]
     if isinstance(graph, nx.MultiDiGraph):
-        rows = [(str(u), str(v), key, data) for u, v, key, data in graph.out_edges(node, keys=True, data=True)]
+        rows = [
+            (str(u), str(v), key, data)
+            for u, v, key, data in graph.out_edges(node, keys=True, data=True)
+        ]
     else:
-        rows = [(str(u), str(v), None, data) for u, v, data in graph.out_edges(node, data=True)]
+        rows = [
+            (str(u), str(v), None, data)
+            for u, v, data in graph.out_edges(node, data=True)
+        ]
 
     def _sort_key(row: EdgeRow) -> tuple[int, str]:
         _u, _v, _k, data = row
@@ -101,7 +107,9 @@ def _edge_id_for_row(key: Any | None, data: dict[str, Any]) -> str:
     step_index = data.get("step_index")
     if step_index is not None:
         return f"step-{step_index}"
-    payload = f"{data.get('selector','')}|{data.get('action','')}|{data.get('intent')}"
+    payload = (
+        f"{data.get('selector', '')}|{data.get('action', '')}|{data.get('intent')}"
+    )
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
 
@@ -133,7 +141,11 @@ def _path_to_payload(graph: nx.Graph, path: list[EdgeRow]) -> dict[str, Any]:
             if _is_navigation_like_intent_key(intent_key):
                 navigation_like_count += 1
         action_value = data.get("action")
-        action = action_value.value if isinstance(action_value, ActionType) else str(action_value or "")
+        action = (
+            action_value.value
+            if isinstance(action_value, ActionType)
+            else str(action_value or "")
+        )
         steps.append(
             {
                 "edge_id": _edge_id_for_row(key, data),
@@ -156,14 +168,15 @@ def _path_to_payload(graph: nx.Graph, path: list[EdgeRow]) -> dict[str, Any]:
             "selectors": selectors,
             "intent_keys": intent_keys,
             "has_fill": any(step["action"] == ActionType.FILL.value for step in steps),
-            "has_click": any(step["action"] == ActionType.CLICK.value for step in steps),
+            "has_click": any(
+                step["action"] == ActionType.CLICK.value for step in steps
+            ),
             "has_non_navigation_intent": any(
-                intent_key and not _is_navigation_like_intent_key(intent_key) for intent_key in intent_keys
+                intent_key and not _is_navigation_like_intent_key(intent_key)
+                for intent_key in intent_keys
             ),
             "navigation_like_ratio": (
-                navigation_like_count / len(intent_keys)
-                if intent_keys
-                else 0.0
+                navigation_like_count / len(intent_keys) if intent_keys else 0.0
             ),
         },
     }
@@ -199,7 +212,10 @@ def _response_to_text(response: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return " ".join(str(getattr(item, "text", getattr(item, "content", item))) for item in content)
+        return " ".join(
+            str(getattr(item, "text", getattr(item, "content", item)))
+            for item in content
+        )
     return str(response)
 
 
@@ -218,7 +234,9 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-async def _classify_candidate_with_llm(payload: dict[str, Any]) -> dict[str, Any] | None:
+async def _classify_candidate_with_llm(
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
     """Use the configured LLM to decide whether a path is a business flow."""
     prompt = f"""
 You classify atomic browser interaction paths into higher-level business flows.
@@ -250,7 +268,9 @@ Path JSON:
     return _extract_json_object(_response_to_text(response))
 
 
-def _make_template(payload: dict[str, Any], classification: dict[str, Any]) -> BusinessTemplate:
+def _make_template(
+    payload: dict[str, Any], classification: dict[str, Any]
+) -> BusinessTemplate:
     """Build the final BusinessTemplate model."""
     steps = [
         BusinessTemplateStep(
@@ -259,14 +279,20 @@ def _make_template(payload: dict[str, Any], classification: dict[str, Any]) -> B
             target=str(step.get("target") or ""),
             selector=str(step.get("selector") or ""),
             action=ActionType(str(step.get("action") or ActionType.UNKNOWN.value)),
-            intent_key=str(step.get("intent_key")) if step.get("intent_key") is not None else None,
-            param_name=str(step.get("param_name")) if step.get("param_name") is not None else None,
+            intent_key=str(step.get("intent_key"))
+            if step.get("intent_key") is not None
+            else None,
+            param_name=str(step.get("param_name"))
+            if step.get("param_name") is not None
+            else None,
         )
         for step in payload["steps"]
     ]
     business_key = str(classification.get("business_key") or "").strip()
     edge_ids = ",".join(step.edge_id or "" for step in steps)
-    template_id = hashlib.sha1(f"{business_key}|{edge_ids}".encode("utf-8")).hexdigest()[:16]
+    template_id = hashlib.sha1(
+        f"{business_key}|{edge_ids}".encode("utf-8")
+    ).hexdigest()[:16]
     confidence_raw = classification.get("confidence")
     try:
         confidence = float(confidence_raw) if confidence_raw is not None else None
@@ -290,7 +316,9 @@ def _make_template(payload: dict[str, Any], classification: dict[str, Any]) -> B
     )
 
 
-def _prefer_template(current: BusinessTemplate | None, candidate: BusinessTemplate) -> BusinessTemplate:
+def _prefer_template(
+    current: BusinessTemplate | None, candidate: BusinessTemplate
+) -> BusinessTemplate:
     """Choose the better template for the same business/terminal flow."""
     if current is None:
         return candidate
@@ -333,7 +361,9 @@ def _choose_dependency_candidate(
         except Exception:
             continue
         try:
-            path_len = len(nx.shortest_path(graph, other.exit_node, template.entry_node)) - 1
+            path_len = (
+                len(nx.shortest_path(graph, other.exit_node, template.entry_node)) - 1
+            )
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             continue
         path_candidates.append((path_len, other))
@@ -374,7 +404,9 @@ def _attach_auth_login_dependency(
     templates: list[BusinessTemplate],
 ) -> list[BusinessTemplate]:
     """Attach auth.login as a root prerequisite for non-auth templates missing one."""
-    auth_templates = [template for template in templates if template.business_key == "auth.login"]
+    auth_templates = [
+        template for template in templates if template.business_key == "auth.login"
+    ]
     if not auth_templates:
         return templates
 
@@ -394,16 +426,27 @@ def _attach_auth_login_dependency(
             continue
         if template.business_key.startswith("auth."):
             continue
-        entry_url = _node_url(graph, template.entry_node) if template.entry_node in graph else ""
+        entry_url = (
+            _node_url(graph, template.entry_node)
+            if template.entry_node in graph
+            else ""
+        )
         if entry_url and _is_login_like_url(entry_url):
             continue
         reachable = False
         if auth_template.exit_node in graph and template.entry_node in graph:
             try:
-                reachable = nx.has_path(graph, auth_template.exit_node, template.entry_node)
+                reachable = nx.has_path(
+                    graph, auth_template.exit_node, template.entry_node
+                )
             except Exception:
                 reachable = False
-        if reachable or not auth_exit_url or not entry_url or not _is_login_like_url(entry_url):
+        if (
+            reachable
+            or not auth_exit_url
+            or not entry_url
+            or not _is_login_like_url(entry_url)
+        ):
             template.depends_on.append("auth.login")
     return templates
 
@@ -422,7 +465,9 @@ async def generate_business_templates(
     deduped: dict[tuple[str, str], BusinessTemplate] = {}
 
     for start_node in graph.nodes():
-        stack: list[tuple[str, list[EdgeRow], set[str]]] = [(str(start_node), [], set())]
+        stack: list[tuple[str, list[EdgeRow], set[str]]] = [
+            (str(start_node), [], set())
+        ]
         while stack:
             node, path, used_edge_ids = stack.pop()
             if len(path) >= max_path_length:
@@ -445,21 +490,35 @@ async def generate_business_templates(
                         classified = await classify(payload)
                     except Exception:
                         classified = None
-                    if classified and classified.get("is_business_flow") is True and classified.get("business_key"):
+                    if (
+                        classified
+                        and classified.get("is_business_flow") is True
+                        and classified.get("business_key")
+                    ):
                         template = _make_template(payload, classified)
-                        dedupe_key = (template.business_key, template.steps[-1].edge_id or "")
-                        deduped[dedupe_key] = _prefer_template(deduped.get(dedupe_key), template)
+                        dedupe_key = (
+                            template.business_key,
+                            template.steps[-1].edge_id or "",
+                        )
+                        deduped[dedupe_key] = _prefer_template(
+                            deduped.get(dedupe_key), template
+                        )
                 stack.append((v, next_path, next_used))
 
     templates = _attach_direct_template_dependencies(graph, list(deduped.values()))
     return _attach_auth_login_dependency(graph, templates)
 
 
-def store_business_templates(graph: nx.Graph, templates: list[BusinessTemplate]) -> None:
+def store_business_templates(
+    graph: nx.Graph, templates: list[BusinessTemplate]
+) -> None:
     """Persist generated templates into graph metadata as plain JSON-ready dicts."""
-    graph.graph["business_templates"] = [template.model_dump(mode="json") for template in templates]
+    graph.graph["business_templates"] = [
+        template.model_dump(mode="json") for template in templates
+    ]
     graph.graph["business_template_count"] = len(templates)
     graph.graph["business_template_generation_failures"] = 0
-    graph.graph["business_templates_generated_at"] = datetime.now(timezone.utc).isoformat()
+    graph.graph["business_templates_generated_at"] = datetime.now(
+        timezone.utc
+    ).isoformat()
     graph.graph["business_template_stats"] = {"count": len(templates)}
-

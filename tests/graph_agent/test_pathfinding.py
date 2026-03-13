@@ -3,7 +3,12 @@
 import networkx as nx
 
 from graph_agent.graph.pathfinding import get_path_from_intent
-from graph_agent.models import ActionType, BusinessTemplate, BusinessTemplateStep, Intent
+from graph_agent.models import (
+    ActionType,
+    BusinessTemplate,
+    BusinessTemplateStep,
+    Intent,
+)
 
 
 def _make_intent(summary: str, key: str | None = None) -> Intent:
@@ -25,14 +30,16 @@ def test_pathfinding_skips_null_intent_for_matching():
     G.add_node("c", url="https://c.com")
     # a -> b has null intent, b -> c has submit_login
     G.add_edge(
-        "a", "b",
+        "a",
+        "b",
         selector="#nav",
         action=ActionType.CLICK,
         intent=None,
         intent_failure_reason="parse failed",
     )
     G.add_edge(
-        "b", "c",
+        "b",
+        "c",
         selector="#login",
         action=ActionType.CLICK,
         intent=intent,
@@ -55,7 +62,8 @@ def test_pathfinding_all_null_intent_returns_empty():
     G.add_node("a", url="https://a.com")
     G.add_node("b", url="https://b.com")
     G.add_edge(
-        "a", "b",
+        "a",
+        "b",
         selector="#btn",
         action=ActionType.CLICK,
         intent=None,
@@ -73,8 +81,22 @@ def test_pathfinding_mixed_intents_returns_valid_path():
     G.add_node("a", url="https://a.com")
     G.add_node("b", url="https://b.com")
     G.add_node("c", url="https://c.com")
-    G.add_edge("a", "b", selector="#x", action=ActionType.CLICK, intent=None, intent_failure_reason="x")
-    G.add_edge("b", "c", selector="#user", action=ActionType.FILL, intent=intent, intent_failure_reason=None)
+    G.add_edge(
+        "a",
+        "b",
+        selector="#x",
+        action=ActionType.CLICK,
+        intent=None,
+        intent_failure_reason="x",
+    )
+    G.add_edge(
+        "b",
+        "c",
+        selector="#user",
+        action=ActionType.FILL,
+        intent=intent,
+        intent_failure_reason=None,
+    )
 
     path = get_path_from_intent("fill_username", G)
     assert len(path) == 2
@@ -108,7 +130,9 @@ def test_pathfinding_skips_low_confidence_for_matching():
     G = nx.DiGraph()
     G.add_node("a", url="https://a.com")
     G.add_node("b", url="https://b.com")
-    G.add_edge("a", "b", selector="#login", action=ActionType.CLICK, intent=low_conf_intent)
+    G.add_edge(
+        "a", "b", selector="#login", action=ActionType.CLICK, intent=low_conf_intent
+    )
     path = get_path_from_intent("submit_login", G)
     assert path == []
 
@@ -160,8 +184,22 @@ def test_pathfinding_keeps_self_loop_prerequisite_before_target():
     G = nx.DiGraph()
     G.add_node("a", url="https://a.com")
     G.add_node("b", url="https://b.com")
-    G.add_edge("a", "a", selector="#agree", action=ActionType.CLICK, intent=prereq, step_index=1)
-    G.add_edge("a", "b", selector="#enter", action=ActionType.CLICK, intent=target, step_index=2)
+    G.add_edge(
+        "a",
+        "a",
+        selector="#agree",
+        action=ActionType.CLICK,
+        intent=prereq,
+        step_index=1,
+    )
+    G.add_edge(
+        "a",
+        "b",
+        selector="#enter",
+        action=ActionType.CLICK,
+        intent=target,
+        step_index=2,
+    )
 
     path = get_path_from_intent("workflow.start.blind_rating", G)
     assert len(path) == 2
@@ -179,10 +217,48 @@ def test_pathfinding_prefers_business_template_over_atomic_intent():
     G.add_node("pass", url="https://a.com/login")
     G.add_node("secure", url="https://a.com/secure")
     G.add_node("shortcut", url="https://a.com/secure")
-    G.add_edge("login", "user", key="step-1", edge_id="step-1", step_index=1, selector="#username", action=ActionType.FILL, intent=_make_intent("Fill username", key="auth.fill.username"), param_name="username")
-    G.add_edge("user", "pass", key="step-2", edge_id="step-2", step_index=2, selector="#password", action=ActionType.FILL, intent=_make_intent("Fill password", key="auth.fill.password"), param_name="password")
-    G.add_edge("pass", "secure", key="step-3", edge_id="step-3", step_index=3, selector="button[type='submit']", action=ActionType.CLICK, intent=_make_intent("Submit login form", key="auth.submit.login"))
-    G.add_edge("login", "shortcut", key="step-direct", edge_id="step-direct", step_index=4, selector="#submit-shortcut", action=ActionType.CLICK, intent=_make_intent("Submit login form", key="auth.submit.login"))
+    G.add_edge(
+        "login",
+        "user",
+        key="step-1",
+        edge_id="step-1",
+        step_index=1,
+        selector="#username",
+        action=ActionType.FILL,
+        intent=_make_intent("Fill username", key="auth.fill.username"),
+        param_name="username",
+    )
+    G.add_edge(
+        "user",
+        "pass",
+        key="step-2",
+        edge_id="step-2",
+        step_index=2,
+        selector="#password",
+        action=ActionType.FILL,
+        intent=_make_intent("Fill password", key="auth.fill.password"),
+        param_name="password",
+    )
+    G.add_edge(
+        "pass",
+        "secure",
+        key="step-3",
+        edge_id="step-3",
+        step_index=3,
+        selector="button[type='submit']",
+        action=ActionType.CLICK,
+        intent=_make_intent("Submit login form", key="auth.submit.login"),
+    )
+    G.add_edge(
+        "login",
+        "shortcut",
+        key="step-direct",
+        edge_id="step-direct",
+        step_index=4,
+        selector="#submit-shortcut",
+        action=ActionType.CLICK,
+        intent=_make_intent("Submit login form", key="auth.submit.login"),
+    )
     template = BusinessTemplate(
         template_id="tpl-auth-login",
         business_key="auth.login",
@@ -192,12 +268,42 @@ def test_pathfinding_prefers_business_template_over_atomic_intent():
         path_length=3,
         confidence=0.95,
         steps=[
-            BusinessTemplateStep(edge_id="step-1", source="login", target="user", selector="#username", action=ActionType.FILL, intent_key="auth.fill.username", param_name="username"),
-            BusinessTemplateStep(edge_id="step-2", source="user", target="pass", selector="#password", action=ActionType.FILL, intent_key="auth.fill.password", param_name="password"),
-            BusinessTemplateStep(edge_id="step-3", source="pass", target="secure", selector="button[type='submit']", action=ActionType.CLICK, intent_key="auth.submit.login", param_name=None),
+            BusinessTemplateStep(
+                edge_id="step-1",
+                source="login",
+                target="user",
+                selector="#username",
+                action=ActionType.FILL,
+                intent_key="auth.fill.username",
+                param_name="username",
+            ),
+            BusinessTemplateStep(
+                edge_id="step-2",
+                source="user",
+                target="pass",
+                selector="#password",
+                action=ActionType.FILL,
+                intent_key="auth.fill.password",
+                param_name="password",
+            ),
+            BusinessTemplateStep(
+                edge_id="step-3",
+                source="pass",
+                target="secure",
+                selector="button[type='submit']",
+                action=ActionType.CLICK,
+                intent_key="auth.submit.login",
+                param_name=None,
+            ),
         ],
         slots={"username": 0, "password": 1, "submit": 2},
-        evidence={"intent_keys": ["auth.fill.username", "auth.fill.password", "auth.submit.login"]},
+        evidence={
+            "intent_keys": [
+                "auth.fill.username",
+                "auth.fill.password",
+                "auth.submit.login",
+            ]
+        },
     )
     G.graph["business_templates"] = [template.model_dump(mode="json")]
 
@@ -212,7 +318,16 @@ def test_pathfinding_falls_back_to_atomic_intent_when_template_misses():
     G = nx.MultiDiGraph()
     G.add_node("a", url="https://a.com")
     G.add_node("b", url="https://a.com/secure")
-    G.add_edge("a", "b", key="step-1", edge_id="step-1", step_index=1, selector="#logout", action=ActionType.CLICK, intent=_make_intent("Logout", key="auth.logout"))
+    G.add_edge(
+        "a",
+        "b",
+        key="step-1",
+        edge_id="step-1",
+        step_index=1,
+        selector="#logout",
+        action=ActionType.CLICK,
+        intent=_make_intent("Logout", key="auth.logout"),
+    )
     G.graph["business_templates"] = [
         BusinessTemplate(
             template_id="tpl-auth-login",
@@ -223,7 +338,15 @@ def test_pathfinding_falls_back_to_atomic_intent_when_template_misses():
             path_length=1,
             confidence=0.9,
             steps=[
-                BusinessTemplateStep(edge_id="step-x", source="a", target="b", selector="#submit", action=ActionType.CLICK, intent_key="auth.submit.login", param_name=None)
+                BusinessTemplateStep(
+                    edge_id="step-x",
+                    source="a",
+                    target="b",
+                    selector="#submit",
+                    action=ActionType.CLICK,
+                    intent_key="auth.submit.login",
+                    param_name=None,
+                )
             ],
             slots={"submit": 0},
             evidence={},
@@ -325,10 +448,37 @@ def test_pathfinding_submit_login_query_prefers_submit_edge_over_go_to_login():
     G.add_node("user", url="https://a.com/login")
     G.add_node("pass", url="https://a.com/login")
     G.add_node("secure", url="https://a.com/secure")
-    G.add_edge("home", "login", selector='a[href="/login"]', action=ActionType.CLICK, intent=_make_intent("Go to login page", key="go_to_login"))
-    G.add_edge("login", "user", selector="#username", action=ActionType.FILL, intent=_make_intent("Fill username", key="fill_username"), step_index=1)
-    G.add_edge("user", "pass", selector="#password", action=ActionType.FILL, intent=_make_intent("Fill password", key="fill_password"), step_index=2)
-    G.add_edge("pass", "secure", selector='button[type="submit"]', action=ActionType.CLICK, intent=_make_intent("Submit login form", key="submit_login"), step_index=3)
+    G.add_edge(
+        "home",
+        "login",
+        selector='a[href="/login"]',
+        action=ActionType.CLICK,
+        intent=_make_intent("Go to login page", key="go_to_login"),
+    )
+    G.add_edge(
+        "login",
+        "user",
+        selector="#username",
+        action=ActionType.FILL,
+        intent=_make_intent("Fill username", key="fill_username"),
+        step_index=1,
+    )
+    G.add_edge(
+        "user",
+        "pass",
+        selector="#password",
+        action=ActionType.FILL,
+        intent=_make_intent("Fill password", key="fill_password"),
+        step_index=2,
+    )
+    G.add_edge(
+        "pass",
+        "secure",
+        selector='button[type="submit"]',
+        action=ActionType.CLICK,
+        intent=_make_intent("Submit login form", key="submit_login"),
+        step_index=3,
+    )
 
     path = get_path_from_intent("submit_login", G)
 

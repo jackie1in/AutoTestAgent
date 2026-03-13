@@ -6,7 +6,12 @@ import pytest
 import networkx as nx
 
 from graph_agent.graph.pathfinding import get_path_from_intent
-from graph_agent.models import ActionType, BusinessTemplate, BusinessTemplateStep, Intent
+from graph_agent.models import (
+    ActionType,
+    BusinessTemplate,
+    BusinessTemplateStep,
+    Intent,
+)
 from graph_agent.playback.engine import run_playback
 
 # data URL with inline HTML - loads without network, has #btn and #user elements
@@ -44,14 +49,16 @@ async def test_pathfinding_to_playback_e2e():
         G.add_node("b", url="https://b.com")
         G.add_node("c", url="https://c.com")
         G.add_edge(
-            "a", "b",
+            "a",
+            "b",
             selector="#btn",
             action=ActionType.CLICK,
             intent=None,
             intent_failure_reason="parse failed",
         )
         G.add_edge(
-            "b", "c",
+            "b",
+            "c",
             selector="#user",
             action=ActionType.FILL,
             intent=intent,
@@ -90,7 +97,8 @@ async def test_template_query_to_playback_e2e():
         G.add_node("login-user", url="https://example.com/login")
         G.add_node("login-password", url="https://example.com/login")
         G.add_edge(
-            "login-empty", "login-user",
+            "login-empty",
+            "login-user",
             key="step-1",
             edge_id="step-1",
             selector="#btn",
@@ -99,7 +107,8 @@ async def test_template_query_to_playback_e2e():
             intent_failure_reason="parse failed",
         )
         G.add_edge(
-            "login-user", "login-password",
+            "login-user",
+            "login-password",
             key="step-2",
             edge_id="step-2",
             selector="#user",
@@ -118,8 +127,24 @@ async def test_template_query_to_playback_e2e():
                 path_length=2,
                 confidence=0.9,
                 steps=[
-                    BusinessTemplateStep(edge_id="step-1", source="login-empty", target="login-user", selector="#btn", action=ActionType.CLICK, intent_key=None, param_name=None),
-                    BusinessTemplateStep(edge_id="step-2", source="login-user", target="login-password", selector="#user", action=ActionType.FILL, intent_key="auth.fill.username", param_name="username"),
+                    BusinessTemplateStep(
+                        edge_id="step-1",
+                        source="login-empty",
+                        target="login-user",
+                        selector="#btn",
+                        action=ActionType.CLICK,
+                        intent_key=None,
+                        param_name=None,
+                    ),
+                    BusinessTemplateStep(
+                        edge_id="step-2",
+                        source="login-user",
+                        target="login-password",
+                        selector="#user",
+                        action=ActionType.FILL,
+                        intent_key="auth.fill.username",
+                        param_name="username",
+                    ),
                 ],
                 slots={"username": 1},
                 evidence={"intent_keys": ["auth.fill.username"]},

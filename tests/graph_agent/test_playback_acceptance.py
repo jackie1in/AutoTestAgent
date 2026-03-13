@@ -23,9 +23,7 @@ from graph_agent.models import ActionType, Intent
 def _target_site_reachable() -> bool:
     """检查目标站点是否可达（用于跳过无网络环境）。"""
     try:
-        sock = socket.create_connection(
-            ("the-internet.herokuapp.com", 443), timeout=5
-        )
+        sock = socket.create_connection(("the-internet.herokuapp.com", 443), timeout=5)
         sock.close()
         return True
     except (socket.timeout, OSError):
@@ -68,27 +66,35 @@ def _build_three_intent_fixture_graph() -> nx.MultiDiGraph:
         G.add_edge(u, v, key=key, edge_id=key, **kw)
 
     add_edge(
-        "home", "login-empty", "e1",
+        "home",
+        "login-empty",
+        "e1",
         selector='a[href="/login"]',
         action=ActionType.CLICK,
         intent=_make_intent("Go to login", key="go_to_login"),
     )
     add_edge(
-        "login-empty", "login-user", "e2",
+        "login-empty",
+        "login-user",
+        "e2",
         selector="#username",
         action=ActionType.FILL,
         intent=_make_intent("Fill username", key="auth.fill.username"),
         param_name="username",
     )
     add_edge(
-        "login-user", "login-password", "e3",
+        "login-user",
+        "login-password",
+        "e3",
         selector="#password",
         action=ActionType.FILL,
         intent=_make_intent("Fill password", key="auth.fill.password"),
         param_name="password",
     )
     add_edge(
-        "login-password", "secure", "e4",
+        "login-password",
+        "secure",
+        "e4",
         selector='button[type="submit"]',
         action=ActionType.CLICK,
         intent=_make_intent("Submit login", key="auth.submit.login"),
@@ -132,8 +138,11 @@ async def test_playback_acceptance_real_graph_when_available():
     当图谱存在且至少 1 个意图可回放时验证。数据来源：graph_agent/data/graph.json
     """
     from pathlib import Path
+
     if not Path(DEFAULT_GRAPH).exists():
-        pytest.skip("graph.json 不存在，请先运行 uv run python -m graph_agent.mapping.run")
+        pytest.skip(
+            "graph.json 不存在，请先运行 uv run python -m graph_agent.mapping.run"
+        )
     result = await run_playback_acceptance(
         DEFAULT_GRAPH,
         start_url=TARGET_HOME,

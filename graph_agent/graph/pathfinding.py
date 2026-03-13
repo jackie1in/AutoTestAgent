@@ -27,8 +27,20 @@ _KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "fill": ("fill", "输入", "填写"),
     "navigate": ("navigate", "跳转", "访问"),
     "auth.login": ("auth.login", "submit_login", "login", "登录", "提交登录"),
-    "auth.submit.login": ("auth.submit.login", "submit_login", "login", "登录", "提交登录"),
-    "auth.fill.username": ("auth.fill.username", "fill_username", "username", "用户名", "账号"),
+    "auth.submit.login": (
+        "auth.submit.login",
+        "submit_login",
+        "login",
+        "登录",
+        "提交登录",
+    ),
+    "auth.fill.username": (
+        "auth.fill.username",
+        "fill_username",
+        "username",
+        "用户名",
+        "账号",
+    ),
     "auth.fill.password": ("auth.fill.password", "fill_password", "password", "密码"),
     "auth.logout": ("auth.logout", "logout", "登出", "退出"),
 }
@@ -45,12 +57,16 @@ def _key_matches(intent_key: str | None, user_query: str) -> bool:
         return True
 
     submit_terms = ("submit", "提交")
-    if any(term in query for term in submit_terms) and not any(term in key for term in submit_terms):
+    if any(term in query for term in submit_terms) and not any(
+        term in key for term in submit_terms
+    ):
         return False
 
     # Concept-level fallback for modern dot-keys.
     login_terms = ("登录", "login", "signin", "sign in", "auth")
-    if any(term in query for term in login_terms) and any(term in key for term in ("login", "auth")):
+    if any(term in query for term in login_terms) and any(
+        term in key for term in ("login", "auth")
+    ):
         return True
     password_terms = ("密码", "password", "passwd")
     if any(term in query for term in password_terms) and "password" in key:
@@ -223,7 +239,9 @@ def _template_lookup(templates: list[BusinessTemplate]) -> dict[str, BusinessTem
     return lookup
 
 
-def _expand_template_steps(template: BusinessTemplate, graph: nx.Graph) -> list[GraphEdge]:
+def _expand_template_steps(
+    template: BusinessTemplate, graph: nx.Graph
+) -> list[GraphEdge]:
     """Expand stored template steps back into GraphEdge models.
 
     Uses (edge_id, source, target) as lookup key to handle graphs with duplicate
@@ -277,7 +295,9 @@ def _expand_template_to_path(
             if dependency is None:
                 return []
             if last_exit_node is not None and last_exit_node != dependency.entry_node:
-                connecting = _get_connecting_path(graph, last_exit_node, dependency.entry_node)
+                connecting = _get_connecting_path(
+                    graph, last_exit_node, dependency.entry_node
+                )
                 for edge in connecting:
                     edge_id = edge.edge_id
                     if edge_id and edge_id in seen:
@@ -303,7 +323,9 @@ def _expand_template_to_path(
             last_exit_node = dependency.exit_node
 
         if last_exit_node is not None and last_exit_node != template.entry_node:
-            connecting = _get_connecting_path(graph, last_exit_node, template.entry_node)
+            connecting = _get_connecting_path(
+                graph, last_exit_node, template.entry_node
+            )
             for edge in connecting:
                 edge_id = edge.edge_id
                 if edge_id and edge_id in seen:
@@ -324,7 +346,9 @@ def _expand_template_to_path(
     return expanded
 
 
-def _get_connecting_path(graph: nx.Graph, from_node: str, to_node: str) -> list[GraphEdge]:
+def _get_connecting_path(
+    graph: nx.Graph, from_node: str, to_node: str
+) -> list[GraphEdge]:
     """Return GraphEdges along shortest path from from_node to to_node, or [] if no path or same node."""
     if from_node == to_node:
         return []
@@ -347,9 +371,13 @@ def _get_connecting_path(graph: nx.Graph, from_node: str, to_node: str) -> list[
 def _iter_out_edges(graph: nx.Graph, node: str) -> list[tuple[str, str, dict]]:
     """Unified out-edge iterator for DiGraph and MultiDiGraph."""
     if isinstance(graph, nx.MultiDiGraph):
-        rows = [(u, v, data) for u, v, _k, data in graph.out_edges(node, keys=True, data=True)]
+        rows = [
+            (u, v, data)
+            for u, v, _k, data in graph.out_edges(node, keys=True, data=True)
+        ]
     else:
         rows = [(u, v, data) for u, v, data in graph.out_edges(node, data=True)]
+
     def _step_order(item: tuple[str, str, dict]) -> int:
         raw = item[2].get("step_index")
         if raw is None:

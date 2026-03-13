@@ -25,7 +25,9 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # MVP: fixed start/end URL for the-internet login flow
 DEFAULT_START_URL = os.getenv("MAPPING_URL", "https://the-internet.herokuapp.com/login")
-DEFAULT_EXPECTED_END_URL = "https://the-internet.herokuapp.com/secure"  # or None to skip assertion
+DEFAULT_EXPECTED_END_URL = (
+    "https://the-internet.herokuapp.com/secure"  # or None to skip assertion
+)
 
 app = FastAPI(title="Graph Agent API")
 
@@ -58,7 +60,9 @@ def _business_templates_to_json(G: Any) -> list[dict[str, Any]]:
                 "exit_node": str(raw.get("exit_node") or ""),
                 "path_length": int(raw.get("path_length") or 0),
                 "confidence": float(raw.get("confidence") or 0.0),
-                "depends_on": [str(item) for item in depends_on] if isinstance(depends_on, list) else [],
+                "depends_on": [str(item) for item in depends_on]
+                if isinstance(depends_on, list)
+                else [],
             }
         )
     return templates
@@ -76,7 +80,7 @@ def _graph_to_json_dict(G):
         if "title" in data:
             node["title"] = data["title"]
         nodes.append(node)
-        
+
     edges = []
     missing_count = 0
     failure_reasons: set[str] = set()
@@ -94,11 +98,19 @@ def _graph_to_json_dict(G):
             reason = data.get("intent_failure_reason")
             if reason:
                 failure_reasons.add(reason)
-        
+
         constraints = data.get("constraints")
-        constraints_dict = constraints.model_dump() if isinstance(constraints, ElementConstraints) else None
+        constraints_dict = (
+            constraints.model_dump()
+            if isinstance(constraints, ElementConstraints)
+            else None
+        )
         element = data.get("element")
-        element_dict = element.model_dump() if hasattr(element, "model_dump") else (element if isinstance(element, dict) else None)
+        element_dict = (
+            element.model_dump()
+            if hasattr(element, "model_dump")
+            else (element if isinstance(element, dict) else None)
+        )
 
         edge = {
             "edge_id": data.get("edge_id") or (str(key) if key is not None else None),
@@ -121,7 +133,9 @@ def _graph_to_json_dict(G):
         "intent_missing_count": G.graph.get("intent_missing_count", missing_count),
         "intent_success_rate": G.graph.get("intent_success_rate"),
         "business_template_count": G.graph.get("business_template_count", 0),
-        "business_template_generation_failures": G.graph.get("business_template_generation_failures", 0),
+        "business_template_generation_failures": G.graph.get(
+            "business_template_generation_failures", 0
+        ),
         "semantic_consistency_rate": G.graph.get("semantic_consistency_rate"),
         "inventory_non_empty_rate": G.graph.get("inventory_non_empty_rate"),
         "re_infer_success_rate": G.graph.get("re_infer_success_rate"),
@@ -188,7 +202,11 @@ def get_intents():
                 continue
             confidence = float(raw.get("confidence") or 0.0)
             value = business_key or summary
-            label = f"{business_key} - {summary}" if business_key and summary and business_key != summary else (summary or business_key)
+            label = (
+                f"{business_key} - {summary}"
+                if business_key and summary and business_key != summary
+                else (summary or business_key)
+            )
             options.append(
                 {
                     "type": "template",
@@ -222,7 +240,11 @@ def get_intents():
         value = key or summary
         if not value:
             continue
-        label = f"{key} - {summary}" if key and summary and key != summary else (summary or key)
+        label = (
+            f"{key} - {summary}"
+            if key and summary and key != summary
+            else (summary or key)
+        )
         existing = intents.get(value)
         if not existing or confidence > existing.get("confidence", 0.0):
             intents[value] = {
@@ -237,12 +259,22 @@ def get_intents():
     options.extend(
         sorted(
             intents.values(),
-            key=lambda x: (x.get("key") is None, -(x.get("confidence") or 0.0), x["value"]),
+            key=lambda x: (
+                x.get("key") is None,
+                -(x.get("confidence") or 0.0),
+                x["value"],
+            ),
         )
     )
     templates_sorted = [item for item in options if item.get("type") == "template"]
     intents_sorted = [item for item in options if item.get("type") == "intent"]
-    templates_sorted.sort(key=lambda x: (-(x.get("confidence") or 0.0), -(x.get("path_length") or 0), x["value"]))
+    templates_sorted.sort(
+        key=lambda x: (
+            -(x.get("confidence") or 0.0),
+            -(x.get("path_length") or 0),
+            x["value"],
+        )
+    )
     if templates_sorted:
         return templates_sorted
     return intents_sorted
@@ -256,11 +288,11 @@ def _log_entry_to_sse(entry: dict) -> dict:
     success = entry.get("success", False)
     error = entry.get("error")
     intent_summary = entry.get("intent", "")
-    
+
     message = f"Step {step_index}: {action} {selector}"
     if intent_summary:
         message += f" ({intent_summary})"
-        
+
     if error:
         message += f" — {error}"
     level = "error" if not success else "info"
@@ -320,11 +352,13 @@ async def _sse_generator(
             if result["success"]:
                 await q.put({"level": "success", "actual_url": result["actual_url"]})
             else:
-                await q.put({
-                    "level": "error",
-                    "error": result.get("error") or "Playback failed",
-                    "actual_url": result.get("actual_url", ""),
-                })
+                await q.put(
+                    {
+                        "level": "error",
+                        "error": result.get("error") or "Playback failed",
+                        "actual_url": result.get("actual_url", ""),
+                    }
+                )
         except Exception as e:
             await q.put({"level": "error", "error": str(e), "actual_url": ""})
         finally:
@@ -342,7 +376,7 @@ async def _sse_generator(
         if item.get("level") in ("success", "error"):
             # Wait for worker to finish (it should be done or close to done)
             break
-    
+
     await task
 
 
@@ -377,9 +411,7 @@ def get_dashboard():
     missing_count = sum(
         1 for _u, _v, data in G.edges(data=True) if data.get("intent") is None
     )
-    intent_success_rate = (
-        1.0 - (missing_count / edge_count) if edge_count > 0 else 1.0
-    )
+    intent_success_rate = 1.0 - (missing_count / edge_count) if edge_count > 0 else 1.0
     metadata = dict(G.graph)
     filtered_non_ui_edges = metadata.get("filtered_non_ui_edges", 0)
     mapping_stopped = metadata.get("mapping_stopped")
@@ -388,7 +420,9 @@ def get_dashboard():
     inventory_non_empty_rate = metadata.get("inventory_non_empty_rate")
     re_infer_success_rate = metadata.get("re_infer_success_rate")
     business_template_count = metadata.get("business_template_count", 0)
-    business_template_generation_failures = metadata.get("business_template_generation_failures", 0)
+    business_template_generation_failures = metadata.get(
+        "business_template_generation_failures", 0
+    )
     runtime_non_ui_action_count = metadata.get("runtime_non_ui_action_count")
     state_like_node_ratio = metadata.get("state_like_node_ratio")
     business_intent_edge_ratio = metadata.get("business_intent_edge_ratio")

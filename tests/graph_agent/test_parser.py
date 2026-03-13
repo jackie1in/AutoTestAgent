@@ -199,18 +199,22 @@ async def test_parse_browser_use_step_ai_failure_no_fake_intent():
     }
     thought = {"next_goal": "Click login button"}
 
-    with patch(
-        "graph_agent.mapping.parser.infer_intent_for_context",
-        new_callable=AsyncMock,
-        return_value=(None, "parse_error:invalid_json"),
-    ), patch(
-        "graph_agent.mapping.parser._infer_param_name",
-        new_callable=AsyncMock,
-        return_value=None,
-    ), patch(
-        "graph_agent.mapping.parser._extract_action_value",
-        new_callable=AsyncMock,
-        return_value=None,
+    with (
+        patch(
+            "graph_agent.mapping.parser.infer_intent_for_context",
+            new_callable=AsyncMock,
+            return_value=(None, "parse_error:invalid_json"),
+        ),
+        patch(
+            "graph_agent.mapping.parser._infer_param_name",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "graph_agent.mapping.parser._extract_action_value",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
     ):
         edge = await parse_browser_use_step(
             action=action,
@@ -245,18 +249,22 @@ async def test_parse_browser_use_step_ai_success():
         confidence=0.85,
     )
 
-    with patch(
-        "graph_agent.mapping.parser.infer_intent_for_context",
-        new_callable=AsyncMock,
-        return_value=(expected_intent, None),
-    ), patch(
-        "graph_agent.mapping.parser._infer_param_name",
-        new_callable=AsyncMock,
-        return_value=None,
-    ), patch(
-        "graph_agent.mapping.parser._extract_action_value",
-        new_callable=AsyncMock,
-        return_value=None,
+    with (
+        patch(
+            "graph_agent.mapping.parser.infer_intent_for_context",
+            new_callable=AsyncMock,
+            return_value=(expected_intent, None),
+        ),
+        patch(
+            "graph_agent.mapping.parser._infer_param_name",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "graph_agent.mapping.parser._extract_action_value",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
     ):
         edge = await parse_browser_use_step(
             action=action,
@@ -318,7 +326,10 @@ def test_action_intent_conflict_allows_click_navigation_link():
         key="auth.navigate.login",
         confidence=0.91,
     )
-    assert _action_intent_conflict(ActionType.CLICK, intent, selector="a[href='/login']") is False
+    assert (
+        _action_intent_conflict(ActionType.CLICK, intent, selector="a[href='/login']")
+        is False
+    )
 
 
 def test_action_intent_conflict_allows_fill_on_input_selector():
@@ -330,7 +341,10 @@ def test_action_intent_conflict_allows_fill_on_input_selector():
         key="auth.credentials.password",
         confidence=0.82,
     )
-    assert _action_intent_conflict(ActionType.FILL, intent, selector="input#password") is False
+    assert (
+        _action_intent_conflict(ActionType.FILL, intent, selector="input#password")
+        is False
+    )
 
 
 def test_action_intent_conflict_allows_navigate_when_url_changes():
@@ -342,13 +356,16 @@ def test_action_intent_conflict_allows_navigate_when_url_changes():
         key="auth.submit.login",
         confidence=0.87,
     )
-    assert _action_intent_conflict(
-        ActionType.NAVIGATE,
-        intent,
-        selector="",
-        source_url="https://a.com/login",
-        target_url="https://a.com/secure",
-    ) is False
+    assert (
+        _action_intent_conflict(
+            ActionType.NAVIGATE,
+            intent,
+            selector="",
+            source_url="https://a.com/login",
+            target_url="https://a.com/secure",
+        )
+        is False
+    )
 
 
 def test_action_intent_conflict_keeps_navigate_conflict_without_transition():
@@ -360,13 +377,16 @@ def test_action_intent_conflict_keeps_navigate_conflict_without_transition():
         key="form.toggle.checkbox",
         confidence=0.87,
     )
-    assert _action_intent_conflict(
-        ActionType.NAVIGATE,
-        intent,
-        selector="",
-        source_url="https://a.com/checkboxes",
-        target_url="https://a.com/checkboxes",
-    ) is True
+    assert (
+        _action_intent_conflict(
+            ActionType.NAVIGATE,
+            intent,
+            selector="",
+            source_url="https://a.com/checkboxes",
+            target_url="https://a.com/checkboxes",
+        )
+        is True
+    )
 
 
 @pytest.mark.asyncio

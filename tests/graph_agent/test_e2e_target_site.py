@@ -14,7 +14,11 @@ from graph_agent.graph.io import save_graph
 from graph_agent.graph.pathfinding import get_path_from_intent
 from graph_agent.models import ActionType, Intent
 from graph_agent.playback.engine import run_playback
-from graph_agent.run_e2e_acceptance import _compute_stats, _find_path_length_ge_2, run_acceptance
+from graph_agent.run_e2e_acceptance import (
+    _compute_stats,
+    _find_path_length_ge_2,
+    run_acceptance,
+)
 
 
 def _target_site_reachable() -> bool:
@@ -145,7 +149,14 @@ def test_acceptance_find_path_length_ge_2():
     G = _build_target_site_fixture_graph()
     path, intent = _find_path_length_ge_2(G)
     assert len(path) >= 2
-    assert intent in ("fill_username", "fill_password", "submit_login", "login", "click", "fill")
+    assert intent in (
+        "fill_username",
+        "fill_password",
+        "submit_login",
+        "login",
+        "click",
+        "fill",
+    )
 
 
 def test_acceptance_start_url_uses_node_metadata_for_opaque_state_id():

@@ -2,6 +2,7 @@ from enum import Enum
 from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
+
 class ActionType(str, Enum):
     CLICK = "click"
     FILL = "fill"
@@ -56,12 +57,18 @@ class TabSnapshot(BaseModel):
 
 class Intent(BaseModel):
     """Structured business intent."""
+
     raw: str = Field(..., description="Original thought from agent")
     verb: str = Field(..., description="Action verb (e.g. Login, Submit, Search)")
     object: str = Field(..., description="Target object (e.g. Form, Button, Item)")
     summary: str = Field(..., description="Human-readable summary")
-    key: str | None = Field(default=None, description="Normalized intent key (e.g. fill_username, submit_login)")
-    confidence: float | None = Field(default=None, description="Intent confidence score in [0, 1]")
+    key: str | None = Field(
+        default=None,
+        description="Normalized intent key (e.g. fill_username, submit_login)",
+    )
+    confidence: float | None = Field(
+        default=None, description="Intent confidence score in [0, 1]"
+    )
 
 
 class BusinessTemplateStep(BaseModel):
@@ -94,6 +101,7 @@ class BusinessTemplate(BaseModel):
 
 class GraphEdge(BaseModel):
     """Edge data representing an interaction."""
+
     edge_id: str | None = None
     step_index: int | None = None
     source: str
@@ -115,24 +123,41 @@ class GraphEdge(BaseModel):
 
     @model_validator(mode="after")
     def _validate_frame_path_consistency(self) -> "GraphEdge":
-        if self.tab_action in {TabActionType.OPEN, TabActionType.SWITCH} and self.target_tab_id is None:
-            raise ValueError("target_tab_id is required when tab_action is OPEN or SWITCH")
-        if self.tab is not None and self.target_tab_id is not None and self.tab.tab_id != self.target_tab_id:
-            raise ValueError("tab.tab_id must match target_tab_id when both are provided")
+        if (
+            self.tab_action in {TabActionType.OPEN, TabActionType.SWITCH}
+            and self.target_tab_id is None
+        ):
+            raise ValueError(
+                "target_tab_id is required when tab_action is OPEN or SWITCH"
+            )
+        if (
+            self.tab is not None
+            and self.target_tab_id is not None
+            and self.tab.tab_id != self.target_tab_id
+        ):
+            raise ValueError(
+                "tab.tab_id must match target_tab_id when both are provided"
+            )
         if self.element is None or not self.element.frame_path or not self.frame_path:
             return self
         if self.frame_path != self.element.frame_path:
-            raise ValueError("frame_path must match element.frame_path when both are provided")
+            raise ValueError(
+                "frame_path must match element.frame_path when both are provided"
+            )
         return self
+
 
 class GraphNode(BaseModel):
     """Node data representing a page state."""
+
     id: str
     url: str
     title: str | None = None
 
+
 class GraphData(BaseModel):
     """Full graph structure for serialization."""
+
     nodes: list[GraphNode]
     edges: list[GraphEdge]
     metadata: dict[str, Any] = {}

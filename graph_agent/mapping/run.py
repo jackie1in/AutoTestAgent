@@ -6,7 +6,6 @@ import json
 import os
 import asyncio
 import hashlib
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,7 +13,10 @@ from typing import Any
 import networkx as nx
 from networkx import MultiDiGraph
 
-from graph_agent.graph.templates import generate_business_templates, store_business_templates
+from graph_agent.graph.templates import (
+    generate_business_templates,
+    store_business_templates,
+)
 from graph_agent.graph.io import save_graph, load_graph
 from graph_agent.llm import get_llm
 from graph_agent.mapping.parser import parse_browser_use_step, infer_intent_for_context
@@ -42,6 +44,7 @@ def _clean_url(url: str) -> str:
         return ""
     try:
         from urllib.parse import urlparse, urlunparse
+
         parsed = urlparse(url)
         # Keep scheme, netloc, path. Drop params, query, fragment.
         return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
@@ -97,7 +100,9 @@ def _extract_action_key(action: dict | object) -> str:
     return next(iter(data.keys()), "unknown")
 
 
-def _collect_history_snapshots(history: Any) -> tuple[list[dict[str, Any]], list[dict | object], list[str]]:
+def _collect_history_snapshots(
+    history: Any,
+) -> tuple[list[dict[str, Any]], list[dict | object], list[str]]:
     """Collect action/thought/url snapshots from history as plain lists."""
     raw_actions = list(history.model_actions()) if history else []
     actions = [_action_to_dict(a) for a in raw_actions]
@@ -213,14 +218,14 @@ def _build_mapping_task_with_env_hints(task: str | None, start_url: str) -> str:
     return f"{base}\n{hint}"
 
 
-def _state_from_snapshot(step: int, raw_url: str, thought: dict | object, action: dict | object) -> tuple[str, str]:
+def _state_from_snapshot(
+    step: int, raw_url: str, thought: dict | object, action: dict | object
+) -> tuple[str, str]:
     """Build opaque state id and normalized page URL from a snapshot."""
     cleaned = _clean_url(raw_url or "")
 
     goal = _extract_next_goal(thought)
     action_key = _extract_action_key(action).replace("_", " ")
-    goal_brief = re.sub(r"\s+", " ", goal).strip()[:40]
-    descriptor = f"{action_key} {goal_brief}".strip() or "unknown"
     fingerprint_src = f"{cleaned}|{step}|{action_key}|{goal}"
     fingerprint = hashlib.md5(fingerprint_src.encode("utf-8")).hexdigest()[:6]
     state_id = f"state-{step}-{fingerprint}"
@@ -276,7 +281,9 @@ def _build_neighbor_steps(
     return neighbors
 
 
-def _build_page_signals(source_url: str, target_url: str, action_key: str) -> dict[str, str]:
+def _build_page_signals(
+    source_url: str, target_url: str, action_key: str
+) -> dict[str, str]:
     """Build compact page-level signals for L2 inference."""
     from urllib.parse import urlparse
 
@@ -341,19 +348,82 @@ def _semantic_consistency(action: ActionType, intent: Any, selector: str = "") -
     text = f"{key} {summary} {verb} {obj}"
 
     if action == ActionType.FILL:
-        if any(token in sel for token in ("input", "textarea", "select", "password", "username", "email", "search")):
+        if any(
+            token in sel
+            for token in (
+                "input",
+                "textarea",
+                "select",
+                "password",
+                "username",
+                "email",
+                "search",
+            )
+        ):
             return True
-        return any(k in text for k in ("fill", "input", "enter", "type", "select", "choose", "set", "credentials"))
+        return any(
+            k in text
+            for k in (
+                "fill",
+                "input",
+                "enter",
+                "type",
+                "select",
+                "choose",
+                "set",
+                "credentials",
+            )
+        )
 
     if action == ActionType.CLICK:
-        if any(token in key for token in (".click", "click.", ".navigate", "navigate.", ".submit", "submit.", ".logout", "logout.")):
+        if any(
+            token in key
+            for token in (
+                ".click",
+                "click.",
+                ".navigate",
+                "navigate.",
+                ".submit",
+                "submit.",
+                ".logout",
+                "logout.",
+            )
+        ):
             return True
-        return any(k in text for k in ("click", "submit", "press", "tap", "toggle", "check", "open", "navigate", "visit", "go", "logout", "login"))
+        return any(
+            k in text
+            for k in (
+                "click",
+                "submit",
+                "press",
+                "tap",
+                "toggle",
+                "check",
+                "open",
+                "navigate",
+                "visit",
+                "go",
+                "logout",
+                "login",
+            )
+        )
 
     if action == ActionType.NAVIGATE:
         if any(token in key for token in ("navigation.", ".navigate", "navigate.")):
             return True
-        return any(k in text for k in ("navigate", "open", "visit", "go", "redirect", "return", "route", "page"))
+        return any(
+            k in text
+            for k in (
+                "navigate",
+                "open",
+                "visit",
+                "go",
+                "redirect",
+                "return",
+                "route",
+                "page",
+            )
+        )
 
     return False
 
@@ -367,15 +437,23 @@ async def _build_graph_from_history(
     runtime_non_ui_action_count: int = 0,
 ) -> MultiDiGraph:
     """Build DiGraph from agent history.
-    
+
     - Node IDs are cleaned URLs (no query params).
     - Edges are added for all valid click/fill actions.
     - Inventory is optional (deprecated constraint).
     """
     G: MultiDiGraph = MultiDiGraph()
-    actions = actions if actions is not None else (list(history.model_actions()) if history else [])
+    actions = (
+        actions
+        if actions is not None
+        else (list(history.model_actions()) if history else [])
+    )
     actions = [_action_to_dict(a) for a in actions]
-    thoughts = thoughts if thoughts is not None else (list(history.model_thoughts()) if history else [])
+    thoughts = (
+        thoughts
+        if thoughts is not None
+        else (list(history.model_thoughts()) if history else [])
+    )
     if urls is None:
         try:
             urls = list(history.urls()) if history else []
@@ -387,8 +465,10 @@ async def _build_graph_from_history(
     first_url = urls[0] if urls else ""
     first_thought = thoughts[0] if thoughts else {}
     first_action = actions[0] if actions else {}
-    start_node, start_url = _state_from_snapshot(0, first_url, first_thought, first_action)
-    
+    start_node, start_url = _state_from_snapshot(
+        0, first_url, first_thought, first_action
+    )
+
     # Try to find title for start node
     start_label = start_url or start_node
     # We can't easily get the title for the very first state from history actions/thoughts
@@ -402,12 +482,12 @@ async def _build_graph_from_history(
         action = _action_to_dict(action)
 
         thought = thoughts[i] if i < len(thoughts) else {}
-        
+
         # Determine From/To Nodes
         # from_node is the URL before action i
         raw_from = urls[i] if i < len(urls) else ""
         from_node, from_url = _state_from_snapshot(i, raw_from, thought, action)
-        
+
         # to_node: best-effort concrete URL resolution to reduce pseudo-state noise.
         to_node, to_url = _resolve_target_state(i, urls, thoughts, actions)
 
@@ -422,7 +502,7 @@ async def _build_graph_from_history(
             neighbor_steps=neighbor_steps,
             page_signals=page_signals,
         )
-        
+
         if from_node not in G:
             G.add_node(from_node, label=from_url or from_node, url=from_url)
         if to_node not in G:
@@ -438,7 +518,10 @@ async def _build_graph_from_history(
             continue
         if edge_model.action == ActionType.NAVIGATE:
             continue
-        if edge_model.action in (ActionType.CLICK, ActionType.FILL) and edge_model.selector:
+        if (
+            edge_model.action in (ActionType.CLICK, ActionType.FILL)
+            and edge_model.selector
+        ):
             # Add edge regardless of inventory (dynamic discovery)
             edge_id = f"step-{i}"
             G.add_edge(
@@ -505,10 +588,23 @@ def _extract_inventory_snapshot(inventory_path: str | Path | None) -> dict[str, 
     return {
         "exists": True,
         "path": str(path),
-        "mode": payload.get("mode", "single_page") if isinstance(payload, dict) else "single_page",
-        "page_count": int(metadata.get("page_count", 1)) if isinstance(metadata, dict) else 1,
-        "aggregated_element_count": int(metadata.get("aggregated_element_count", payload.get("elements", []) and len(payload.get("elements", [])) or 0)) if isinstance(payload, dict) else 0,
-        "type_counts": metadata.get("type_counts", {}) if isinstance(metadata, dict) else {},
+        "mode": payload.get("mode", "single_page")
+        if isinstance(payload, dict)
+        else "single_page",
+        "page_count": int(metadata.get("page_count", 1))
+        if isinstance(metadata, dict)
+        else 1,
+        "aggregated_element_count": int(
+            metadata.get(
+                "aggregated_element_count",
+                payload.get("elements", []) and len(payload.get("elements", [])) or 0,
+            )
+        )
+        if isinstance(payload, dict)
+        else 0,
+        "type_counts": metadata.get("type_counts", {})
+        if isinstance(metadata, dict)
+        else {},
     }
 
 
@@ -520,15 +616,23 @@ def _build_snapshot_metric_map(graph: nx.Graph) -> dict[str, float]:
         "intent_missing_count": float(graph.graph.get("intent_missing_count", 0)),
         "intent_success_rate": float(graph.graph.get("intent_success_rate", 0.0)),
         "business_template_count": float(graph.graph.get("business_template_count", 0)),
-        "semantic_consistency_rate": float(graph.graph.get("semantic_consistency_rate", 0.0)),
-        "business_intent_edge_ratio": float(graph.graph.get("business_intent_edge_ratio", 0.0)),
-        "runtime_non_ui_action_count": float(graph.graph.get("runtime_non_ui_action_count", 0)),
+        "semantic_consistency_rate": float(
+            graph.graph.get("semantic_consistency_rate", 0.0)
+        ),
+        "business_intent_edge_ratio": float(
+            graph.graph.get("business_intent_edge_ratio", 0.0)
+        ),
+        "runtime_non_ui_action_count": float(
+            graph.graph.get("runtime_non_ui_action_count", 0)
+        ),
         "state_like_node_ratio": float(graph.graph.get("state_like_node_ratio", 0.0)),
         "re_infer_success_rate": float(graph.graph.get("re_infer_success_rate", 0.0)),
     }
 
 
-def _compute_snapshot_delta(previous: dict[str, Any] | None, current_metrics: dict[str, float]) -> dict[str, float]:
+def _compute_snapshot_delta(
+    previous: dict[str, Any] | None, current_metrics: dict[str, float]
+) -> dict[str, float]:
     """Compute metric deltas (current - previous)."""
     if not previous:
         return {}
@@ -573,7 +677,9 @@ def _write_acceptance_snapshot(
             "delta": _compute_snapshot_delta(previous, metrics),
         },
     }
-    snapshot_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    snapshot_path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     return snapshot_path
 
 
@@ -585,13 +691,17 @@ async def _refresh_business_templates(graph: nx.Graph) -> None:
         graph.graph["business_templates"] = []
         graph.graph["business_template_count"] = 0
         graph.graph["business_template_generation_failures"] = 1
-        graph.graph["business_templates_generated_at"] = datetime.now(timezone.utc).isoformat()
+        graph.graph["business_templates_generated_at"] = datetime.now(
+            timezone.utc
+        ).isoformat()
         graph.graph["business_template_stats"] = {"count": 0}
         return
     store_business_templates(graph, templates)
 
 
-async def re_infer_missing_intents(graph_path: str | Path, inventory_path: str | Path | None = None) -> dict[str, int]:
+async def re_infer_missing_intents(
+    graph_path: str | Path, inventory_path: str | Path | None = None
+) -> dict[str, int]:
     """Re-infer missing intents for edges in an existing graph file."""
     path = Path(graph_path)
     if not path.exists():
@@ -602,7 +712,9 @@ async def re_infer_missing_intents(graph_path: str | Path, inventory_path: str |
     failed = 0
     edge_iter: list[tuple[str, str, Any, dict[str, Any]]]
     if isinstance(graph, nx.MultiDiGraph):
-        edge_iter = [(u, v, k, data) for u, v, k, data in graph.edges(keys=True, data=True)]
+        edge_iter = [
+            (u, v, k, data) for u, v, k, data in graph.edges(keys=True, data=True)
+        ]
     else:
         edge_iter = [(u, v, None, data) for u, v, data in graph.edges(data=True)]
 
@@ -650,9 +762,13 @@ async def re_infer_missing_intents(graph_path: str | Path, inventory_path: str |
                 graph.edges[u, v, k]["intent_failure_reason"] = reason
             failed += 1
     edge_count = graph.number_of_edges()
-    missing_after = sum(1 for _u, _v, d in graph.edges(data=True) if d.get("intent") is None)
+    missing_after = sum(
+        1 for _u, _v, d in graph.edges(data=True) if d.get("intent") is None
+    )
     graph.graph["intent_missing_count"] = missing_after
-    graph.graph["intent_success_rate"] = (1.0 - (missing_after / edge_count)) if edge_count else 1.0
+    graph.graph["intent_success_rate"] = (
+        (1.0 - (missing_after / edge_count)) if edge_count else 1.0
+    )
     graph.graph["re_infer_success_rate"] = (succeeded / total) if total else 1.0
     await _refresh_business_templates(graph)
     save_graph(graph, path)
@@ -726,7 +842,9 @@ async def run_mapping(
             await browser.close()
 
     all_actions, all_thoughts, all_urls = _collect_history_snapshots(history)
-    actions, thoughts, urls, runtime_filtered = _runtime_filter_snapshots(all_actions, all_thoughts, all_urls)
+    actions, thoughts, urls, runtime_filtered = _runtime_filter_snapshots(
+        all_actions, all_thoughts, all_urls
+    )
 
     # Console: print each step (step number, URL, selector, action, semantic_label)
     for i, action in enumerate(actions):
@@ -734,13 +852,17 @@ async def run_mapping(
         step_url = urls[i] if i < len(urls) else ""
         if step_url is None:
             step_url = ""
-        next_url = urls[i+1] if i+1 < len(urls) else step_url
+        next_url = urls[i + 1] if i + 1 < len(urls) else step_url
         if next_url is None:
             next_url = ""
-        
+
         edge_model = await parse_browser_use_step(action, thought, step_url, next_url)
-        intent_text = edge_model.intent.summary if edge_model.intent else f"<missing-intent:{edge_model.intent_failure_reason}>"
-        
+        intent_text = (
+            edge_model.intent.summary
+            if edge_model.intent
+            else f"<missing-intent:{edge_model.intent_failure_reason}>"
+        )
+
         print(
             f"  [{i + 1}] url={step_url!r} selector={edge_model.selector!r} "
             f"action={edge_model.action!r} intent={intent_text!r}"
@@ -794,10 +916,14 @@ async def run_mapping(
         G.graph["stop_reason"] = None
 
     # T4: intent_missing_count for quality assessment
-    intent_missing_count = sum(1 for _u, _v, d in G.edges(data=True) if d.get("intent") is None)
+    intent_missing_count = sum(
+        1 for _u, _v, d in G.edges(data=True) if d.get("intent") is None
+    )
     G.graph["intent_missing_count"] = intent_missing_count
     total_edges = G.number_of_edges()
-    intent_success_rate = (1.0 - (intent_missing_count / total_edges)) if total_edges else 1.0
+    intent_success_rate = (
+        (1.0 - (intent_missing_count / total_edges)) if total_edges else 1.0
+    )
     G.graph["intent_success_rate"] = round(intent_success_rate, 4)
     consistent = 0
     non_null_intent_edges = 0
@@ -806,23 +932,37 @@ async def run_mapping(
         if intent is None:
             continue
         non_null_intent_edges += 1
-        if _semantic_consistency(data.get("action", ActionType.UNKNOWN), intent, selector=str(data.get("selector", ""))):
+        if _semantic_consistency(
+            data.get("action", ActionType.UNKNOWN),
+            intent,
+            selector=str(data.get("selector", "")),
+        ):
             consistent += 1
-    consistency_rate = (consistent / non_null_intent_edges) if non_null_intent_edges else 1.0
+    consistency_rate = (
+        (consistent / non_null_intent_edges) if non_null_intent_edges else 1.0
+    )
     G.graph["semantic_consistency_rate"] = round(consistency_rate, 4)
     G.graph["inventory_non_empty_rate"] = 1.0 if inventory else 0.0
-    state_like_nodes = sum(1 for n, data in G.nodes(data=True) if str(n) != str(data.get("url", "")))
-    G.graph["state_like_node_ratio"] = (state_like_nodes / G.number_of_nodes()) if G.number_of_nodes() else 0.0
+    state_like_nodes = sum(
+        1 for n, data in G.nodes(data=True) if str(n) != str(data.get("url", ""))
+    )
+    G.graph["state_like_node_ratio"] = (
+        (state_like_nodes / G.number_of_nodes()) if G.number_of_nodes() else 0.0
+    )
     business_edges = 0
     for _u, _v, d in G.edges(data=True):
         key = getattr(d.get("intent"), "key", None)
         if isinstance(key, str) and key and not key.startswith("navigation."):
             business_edges += 1
-    G.graph["business_intent_edge_ratio"] = (business_edges / G.number_of_edges()) if G.number_of_edges() else 0.0
+    G.graph["business_intent_edge_ratio"] = (
+        (business_edges / G.number_of_edges()) if G.number_of_edges() else 0.0
+    )
     uv_counts: dict[tuple[str, str], int] = {}
     for u, v in G.edges():
         uv_counts[(str(u), str(v))] = uv_counts.get((str(u), str(v)), 0) + 1
-    G.graph["multi_edge_preserved_count"] = sum(max(0, c - 1) for c in uv_counts.values())
+    G.graph["multi_edge_preserved_count"] = sum(
+        max(0, c - 1) for c in uv_counts.values()
+    )
 
     await _refresh_business_templates(G)
     save_graph(G, output_path)
@@ -913,7 +1053,9 @@ def main() -> None:
             return
         print("Step 1: Scout (list interactive elements)...")
         if scout_pages:
-            await run_scout_multi(start_url=url, page_hints=scout_pages, output_path=inventory)
+            await run_scout_multi(
+                start_url=url, page_hints=scout_pages, output_path=inventory
+            )
         else:
             await run_scout(url, output_path=inventory)
         print(f"Inventory saved: {inventory}")
@@ -930,7 +1072,9 @@ def main() -> None:
         derived = extract_derived_urls(visited_urls, url, exclude_start=True)
         if derived:
             print(f"Step 3: Scout derived URLs ({len(derived)} pages)...")
-            await run_scout_multi(start_url=url, page_hints=derived, output_path=inventory)
+            await run_scout_multi(
+                start_url=url, page_hints=derived, output_path=inventory
+            )
             print(f"Inventory enriched with derived pages: {inventory}")
 
     asyncio.run(_run())

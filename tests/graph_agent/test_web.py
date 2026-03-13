@@ -13,7 +13,9 @@ from graph_agent.web.app import app
 def test_auth_login_route_removed():
     """POST /api/auth/login should not exist anymore."""
     client = TestClient(app)
-    resp = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
+    resp = client.post(
+        "/api/auth/login", json={"username": "admin", "password": "admin"}
+    )
     assert resp.status_code in (404, 405)
 
 
@@ -53,8 +55,22 @@ def test_api_intents_ignores_null_intent_edges():
     G.add_node("a", url="https://a.com")
     G.add_node("b", url="https://b.com")
     G.add_node("c", url="https://c.com")
-    G.add_edge("a", "b", selector="#x", action=ActionType.CLICK, intent=None, intent_failure_reason="parse failed")
-    G.add_edge("b", "c", selector="#login", action=ActionType.CLICK, intent=intent, intent_failure_reason=None)
+    G.add_edge(
+        "a",
+        "b",
+        selector="#x",
+        action=ActionType.CLICK,
+        intent=None,
+        intent_failure_reason="parse failed",
+    )
+    G.add_edge(
+        "b",
+        "c",
+        selector="#login",
+        action=ActionType.CLICK,
+        intent=intent,
+        intent_failure_reason=None,
+    )
 
     with patch("graph_agent.web.app.GRAPH_PATH") as mock_path:
         mock_path.exists.return_value = True
@@ -100,8 +116,22 @@ def test_api_graph_returns_missing_count_and_failure_reasons():
     G.add_node("a", url="https://a.com")
     G.add_node("b", url="https://b.com")
     G.add_node("c", url="https://c.com")
-    G.add_edge("a", "b", selector="#x", action=ActionType.CLICK, intent=None, intent_failure_reason="reason1")
-    G.add_edge("b", "c", selector="#y", action=ActionType.FILL, intent=None, intent_failure_reason="reason1")
+    G.add_edge(
+        "a",
+        "b",
+        selector="#x",
+        action=ActionType.CLICK,
+        intent=None,
+        intent_failure_reason="reason1",
+    )
+    G.add_edge(
+        "b",
+        "c",
+        selector="#y",
+        action=ActionType.FILL,
+        intent=None,
+        intent_failure_reason="reason1",
+    )
 
     with patch("graph_agent.web.app.GRAPH_PATH") as mock_path:
         mock_path.exists.return_value = True
@@ -275,10 +305,28 @@ def test_api_dashboard_returns_stats():
     G.add_node("a", url="https://a.com")
     G.add_node("b", url="https://b.com")
     G.add_node("c", url="https://c.com")
-    G.add_edge("a", "b", selector="#x", action=ActionType.CLICK, intent=None, intent_failure_reason="parse failed")
-    G.add_edge("b", "c", selector="#login", action=ActionType.CLICK, intent=Intent(
-        raw="click login", verb="Click", object="Login", summary="Click login", key="submit_login"
-    ), intent_failure_reason=None)
+    G.add_edge(
+        "a",
+        "b",
+        selector="#x",
+        action=ActionType.CLICK,
+        intent=None,
+        intent_failure_reason="parse failed",
+    )
+    G.add_edge(
+        "b",
+        "c",
+        selector="#login",
+        action=ActionType.CLICK,
+        intent=Intent(
+            raw="click login",
+            verb="Click",
+            object="Login",
+            summary="Click login",
+            key="submit_login",
+        ),
+        intent_failure_reason=None,
+    )
     G.graph["filtered_non_ui_edges"] = 3
     G.graph["mapping_stopped"] = True
     G.graph["stop_reason"] = "Stopped: unfillable form"
@@ -335,15 +383,19 @@ def test_api_playback_uses_path_source_url_as_start_url():
 
     captured: dict[str, str | None] = {"start_url": None}
 
-    async def _fake_sse(edge_list_arg, test_data_arg, start_url, expected_end_url, wait_for_network):
+    async def _fake_sse(
+        edge_list_arg, test_data_arg, start_url, expected_end_url, wait_for_network
+    ):
         captured["start_url"] = start_url
-        yield "data: {\"level\":\"success\"}\n\n"
+        yield 'data: {"level":"success"}\n\n'
 
     with patch("graph_agent.web.app.GRAPH_PATH") as mock_path:
         mock_path.exists.return_value = True
-        with patch("graph_agent.web.app.load_graph", return_value=G), patch(
-            "graph_agent.web.app.get_path_from_query", return_value=edge_list
-        ), patch("graph_agent.web.app._sse_generator", side_effect=_fake_sse):
+        with (
+            patch("graph_agent.web.app.load_graph", return_value=G),
+            patch("graph_agent.web.app.get_path_from_query", return_value=edge_list),
+            patch("graph_agent.web.app._sse_generator", side_effect=_fake_sse),
+        ):
             client = TestClient(app)
             resp = client.post(
                 "/api/playback",
@@ -377,14 +429,20 @@ def test_api_playback_uses_template_first_query_resolution():
         )
     ]
 
-    async def _fake_sse(edge_list_arg, test_data_arg, start_url, expected_end_url, wait_for_network):
-        yield "data: {\"level\":\"success\"}\n\n"
+    async def _fake_sse(
+        edge_list_arg, test_data_arg, start_url, expected_end_url, wait_for_network
+    ):
+        yield 'data: {"level":"success"}\n\n'
 
     with patch("graph_agent.web.app.GRAPH_PATH") as mock_path:
         mock_path.exists.return_value = True
-        with patch("graph_agent.web.app.load_graph", return_value=G), patch(
-            "graph_agent.web.app.get_path_from_query", return_value=edge_list
-        ) as mock_query, patch("graph_agent.web.app._sse_generator", side_effect=_fake_sse):
+        with (
+            patch("graph_agent.web.app.load_graph", return_value=G),
+            patch(
+                "graph_agent.web.app.get_path_from_query", return_value=edge_list
+            ) as mock_query,
+            patch("graph_agent.web.app._sse_generator", side_effect=_fake_sse),
+        ):
             client = TestClient(app)
             resp = client.post(
                 "/api/playback",
@@ -419,15 +477,19 @@ def test_api_playback_passes_wait_for_network_to_sse_generator():
 
     captured: dict[str, bool | None] = {"wait_for_network": None}
 
-    async def _fake_sse(edge_list_arg, test_data_arg, start_url, expected_end_url, wait_for_network):
+    async def _fake_sse(
+        edge_list_arg, test_data_arg, start_url, expected_end_url, wait_for_network
+    ):
         captured["wait_for_network"] = wait_for_network
-        yield "data: {\"level\":\"success\"}\n\n"
+        yield 'data: {"level":"success"}\n\n'
 
     with patch("graph_agent.web.app.GRAPH_PATH") as mock_path:
         mock_path.exists.return_value = True
-        with patch("graph_agent.web.app.load_graph", return_value=G), patch(
-            "graph_agent.web.app.get_path_from_query", return_value=edge_list
-        ), patch("graph_agent.web.app._sse_generator", side_effect=_fake_sse):
+        with (
+            patch("graph_agent.web.app.load_graph", return_value=G),
+            patch("graph_agent.web.app.get_path_from_query", return_value=edge_list),
+            patch("graph_agent.web.app._sse_generator", side_effect=_fake_sse),
+        ):
             client = TestClient(app)
             resp = client.post(
                 "/api/playback",
@@ -484,7 +546,17 @@ def test_api_playback_expands_template_dependencies():
             "exit_node": "secure",
             "path_length": 1,
             "confidence": 0.95,
-            "steps": [{"edge_id": "step-1", "source": "login", "target": "secure", "selector": "#login", "action": "click", "intent_key": "auth.submit.login", "param_name": None}],
+            "steps": [
+                {
+                    "edge_id": "step-1",
+                    "source": "login",
+                    "target": "secure",
+                    "selector": "#login",
+                    "action": "click",
+                    "intent_key": "auth.submit.login",
+                    "param_name": None,
+                }
+            ],
             "slots": {"submit": 0},
             "evidence": {},
         },
@@ -496,7 +568,17 @@ def test_api_playback_expands_template_dependencies():
             "exit_node": "dashboard",
             "path_length": 1,
             "confidence": 0.9,
-            "steps": [{"edge_id": "step-2", "source": "secure", "target": "dashboard", "selector": "#project", "action": "click", "intent_key": "project.dashboard.open", "param_name": None}],
+            "steps": [
+                {
+                    "edge_id": "step-2",
+                    "source": "secure",
+                    "target": "dashboard",
+                    "selector": "#project",
+                    "action": "click",
+                    "intent_key": "project.dashboard.open",
+                    "param_name": None,
+                }
+            ],
             "slots": {},
             "evidence": {},
             "depends_on": ["auth.login"],
@@ -505,14 +587,17 @@ def test_api_playback_expands_template_dependencies():
 
     captured: dict[str, list[str] | None] = {"edge_ids": None}
 
-    async def _fake_sse(edge_list_arg, test_data_arg, start_url, expected_end_url, wait_for_network):
+    async def _fake_sse(
+        edge_list_arg, test_data_arg, start_url, expected_end_url, wait_for_network
+    ):
         captured["edge_ids"] = [edge.edge_id for edge in edge_list_arg]
-        yield "data: {\"level\":\"success\"}\n\n"
+        yield 'data: {"level":"success"}\n\n'
 
     with patch("graph_agent.web.app.GRAPH_PATH") as mock_path:
         mock_path.exists.return_value = True
-        with patch("graph_agent.web.app.load_graph", return_value=G), patch(
-            "graph_agent.web.app._sse_generator", side_effect=_fake_sse
+        with (
+            patch("graph_agent.web.app.load_graph", return_value=G),
+            patch("graph_agent.web.app._sse_generator", side_effect=_fake_sse),
         ):
             client = TestClient(app)
             resp = client.post(
@@ -552,7 +637,17 @@ def test_api_intents_returns_templates_only_when_available():
             "exit_node": "b",
             "path_length": 3,
             "confidence": 0.95,
-            "steps": [{"edge_id": "step-1", "source": "a", "target": "b", "selector": "#login", "action": "click", "intent_key": "auth.submit.login", "param_name": None}],
+            "steps": [
+                {
+                    "edge_id": "step-1",
+                    "source": "a",
+                    "target": "b",
+                    "selector": "#login",
+                    "action": "click",
+                    "intent_key": "auth.submit.login",
+                    "param_name": None,
+                }
+            ],
             "slots": {"submit": "step-1"},
             "evidence": {},
         }

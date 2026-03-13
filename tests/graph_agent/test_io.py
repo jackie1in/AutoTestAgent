@@ -57,8 +57,22 @@ def test_save_load_roundtrip_mixed_intents():
     G.add_node("a", url="https://a.com")
     G.add_node("b", url="https://b.com")
     G.add_node("c", url="https://c.com")
-    G.add_edge("a", "b", selector="#x", action=ActionType.CLICK, intent=intent, intent_failure_reason=None)
-    G.add_edge("b", "c", selector="#y", action=ActionType.FILL, intent=None, intent_failure_reason="parse failed")
+    G.add_edge(
+        "a",
+        "b",
+        selector="#x",
+        action=ActionType.CLICK,
+        intent=intent,
+        intent_failure_reason=None,
+    )
+    G.add_edge(
+        "b",
+        "c",
+        selector="#y",
+        action=ActionType.FILL,
+        intent=None,
+        intent_failure_reason="parse failed",
+    )
 
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "graph.json"
@@ -114,7 +128,14 @@ def test_save_preserves_intent_null_in_json():
     G = nx.DiGraph()
     G.add_node("a", url="https://a.com")
     G.add_node("b", url="https://b.com")
-    G.add_edge("a", "b", selector="#x", action=ActionType.CLICK, intent=None, intent_failure_reason="reason")
+    G.add_edge(
+        "a",
+        "b",
+        selector="#x",
+        action=ActionType.CLICK,
+        intent=None,
+        intent_failure_reason="reason",
+    )
 
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "graph.json"
@@ -139,7 +160,14 @@ def test_save_load_roundtrip_t4_metadata():
         intent=Intent(summary="Click login", raw="click", verb="Click", object="Login"),
         intent_failure_reason=None,
     )
-    G.add_edge("b", "c", selector="#y", action=ActionType.FILL, intent=None, intent_failure_reason="parse failed")
+    G.add_edge(
+        "b",
+        "c",
+        selector="#y",
+        action=ActionType.FILL,
+        intent=None,
+        intent_failure_reason="parse failed",
+    )
 
     G.graph["filtered_non_ui_edges"] = 3
     G.graph["mapping_stopped"] = True
@@ -228,7 +256,10 @@ def test_save_load_roundtrip_preserves_edge_and_element_frame_path():
             "iframe[name='inner']",
         ]
         assert data["element"] is not None
-        assert [frame.name for frame in data["element"].frame_path] == ["outer", "inner"]
+        assert [frame.name for frame in data["element"].frame_path] == [
+            "outer",
+            "inner",
+        ]
 
 
 def test_save_load_roundtrip_business_templates_metadata():
@@ -236,7 +267,9 @@ def test_save_load_roundtrip_business_templates_metadata():
     G = nx.DiGraph()
     G.add_node("login", url="https://example.com/login")
     G.add_node("secure", url="https://example.com/secure")
-    G.add_edge("login", "secure", selector="#submit", action=ActionType.CLICK, intent=None)
+    G.add_edge(
+        "login", "secure", selector="#submit", action=ActionType.CLICK, intent=None
+    )
     template = BusinessTemplate(
         template_id="tpl-auth-login",
         business_key="auth.login",
@@ -279,7 +312,9 @@ def test_save_load_roundtrip_preserves_template_dependencies():
     G = nx.DiGraph()
     G.add_node("secure", url="https://example.com/secure")
     G.add_node("dashboard", url="https://example.com/dashboard")
-    G.add_edge("secure", "dashboard", selector="#project", action=ActionType.CLICK, intent=None)
+    G.add_edge(
+        "secure", "dashboard", selector="#project", action=ActionType.CLICK, intent=None
+    )
     template = BusinessTemplate(
         template_id="tpl-project-dashboard",
         business_key="project.dashboard.open",
@@ -319,7 +354,13 @@ def test_save_load_roundtrip_preserves_opaque_state_ids_with_url_metadata():
     G = nx.DiGraph()
     G.add_node("state-home", url="https://example.com/")
     G.add_node("state-login-empty", url="https://example.com/login")
-    G.add_edge("state-home", "state-login-empty", selector="#enter", action=ActionType.CLICK, intent=None)
+    G.add_edge(
+        "state-home",
+        "state-login-empty",
+        selector="#enter",
+        action=ActionType.CLICK,
+        intent=None,
+    )
 
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "graph.json"

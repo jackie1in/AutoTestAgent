@@ -56,8 +56,13 @@ def test_normalize_elements_dedup_and_drop_empty_selector():
 
 
 def test_normalize_type_maps_alias_and_infers_from_selector():
-    assert _normalize_type("anchor", "text=Form Authentication", "Form Authentication") == "link"
-    assert _normalize_type("unknown", "xpath=//button[@id='submit']", "Submit") == "button"
+    assert (
+        _normalize_type("anchor", "text=Form Authentication", "Form Authentication")
+        == "link"
+    )
+    assert (
+        _normalize_type("unknown", "xpath=//button[@id='submit']", "Submit") == "button"
+    )
     assert _normalize_type("other", "[name='password']", "Password") == "input"
 
 
@@ -81,7 +86,11 @@ def test_build_scout_metadata_includes_type_counts():
 def test_resolve_multi_page_urls_supports_path_and_absolute():
     urls = _resolve_multi_page_urls(
         start_url="https://the-internet.herokuapp.com",
-        page_hints=["/login", "https://the-internet.herokuapp.com/dropdown", "checkboxes"],
+        page_hints=[
+            "/login",
+            "https://the-internet.herokuapp.com/dropdown",
+            "checkboxes",
+        ],
     )
     assert urls == [
         "https://the-internet.herokuapp.com",
@@ -94,7 +103,11 @@ def test_resolve_multi_page_urls_supports_path_and_absolute():
 def test_aggregate_elements_with_sources_dedup_and_source_urls():
     per_page = {
         "https://the-internet.herokuapp.com": [
-            {"selector": "text=Form Authentication", "type": "link", "label": "Form Authentication"},
+            {
+                "selector": "text=Form Authentication",
+                "type": "link",
+                "label": "Form Authentication",
+            },
             {"selector": "#shared", "type": "button", "label": "Shared"},
         ],
         "https://the-internet.herokuapp.com/login": [
@@ -139,13 +152,15 @@ def test_extract_derived_urls_from_elements_parses_href():
     elements = [
         {"selector": "a[href='/login']", "type": "link", "label": "Login"},
         {"selector": 'a[href="/dashboard"]', "type": "link", "label": "Dashboard"},
-        {"selector": "xpath=//a[@href='/settings']", "type": "link", "label": "Settings"},
+        {
+            "selector": "xpath=//a[@href='/settings']",
+            "type": "link",
+            "label": "Settings",
+        },
         {"selector": "#submit", "type": "button", "label": "Submit"},
         {"selector": "a[href='#anchor']", "type": "link", "label": "Anchor"},
     ]
-    derived = extract_derived_urls_from_elements(
-        elements, "https://example.com/"
-    )
+    derived = extract_derived_urls_from_elements(elements, "https://example.com/")
     assert "https://example.com/login" in derived
     assert "https://example.com/dashboard" in derived
     assert "https://example.com/settings" in derived
@@ -157,7 +172,13 @@ async def test_run_scout_multi_aggregates_and_writes_metadata(monkeypatch, tmp_p
     async def _fake_run_scout(url, output_path=None):
         if url.endswith("/login"):
             return [{"selector": "#username", "type": "input", "label": "Username"}]
-        return [{"selector": "text=Form Authentication", "type": "link", "label": "Form Authentication"}]
+        return [
+            {
+                "selector": "text=Form Authentication",
+                "type": "link",
+                "label": "Form Authentication",
+            }
+        ]
 
     monkeypatch.setattr("graph_agent.mapping.scout.run_scout", _fake_run_scout)
     output = tmp_path / "inventory.json"

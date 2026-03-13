@@ -127,16 +127,18 @@ async def infer_intent_for_context(
         pairs = []
         for item in neighbor_steps:
             pairs.append(
-                f"- action:{item.get('action','')} selector:{item.get('selector','')} "
-                f"source:{item.get('source_url','')} target:{item.get('target_url','')} thought:{item.get('thought','')}"
+                f"- action:{item.get('action', '')} selector:{item.get('selector', '')} "
+                f"source:{item.get('source_url', '')} target:{item.get('target_url', '')} thought:{item.get('thought', '')}"
             )
         neighbor_section = "Neighbor steps:\n" + "\n".join(pairs) + "\n"
 
     page_signal_section = ""
     if page_signals:
-        page_signal_section = "Page signals:\n" + "\n".join(
-            f"- {k}: {v}" for k, v in page_signals.items() if v
-        ) + "\n"
+        page_signal_section = (
+            "Page signals:\n"
+            + "\n".join(f"- {k}: {v}" for k, v in page_signals.items() if v)
+            + "\n"
+        )
 
     prompt = f"""
 You are an intent normalizer for browser automation steps.
@@ -284,15 +286,57 @@ def _action_intent_conflict(
     text = f"{key} {summary}"
     if action == ActionType.FILL:
         # If selector strongly indicates a fillable control, be tolerant to wording.
-        if any(token in sel for token in ("input", "textarea", "select", "password", "#username", "#email", "#password")):
+        if any(
+            token in sel
+            for token in (
+                "input",
+                "textarea",
+                "select",
+                "password",
+                "#username",
+                "#email",
+                "#password",
+            )
+        ):
             return False
-        return all(token not in text for token in ("fill", "input", "type", "enter", "select", "choose", "toggle"))
+        return all(
+            token not in text
+            for token in (
+                "fill",
+                "input",
+                "type",
+                "enter",
+                "select",
+                "choose",
+                "toggle",
+            )
+        )
     if action == ActionType.CLICK:
         # Clicking links/buttons for navigation is valid click intent.
-        if any(token in sel for token in ("a[", "xpath=(//a)", "/a", "href", "link", "button", "btn")):
-            if any(token in text for token in ("navigate", "open", "visit", "go", "redirect", "route")):
+        if any(
+            token in sel
+            for token in ("a[", "xpath=(//a)", "/a", "href", "link", "button", "btn")
+        ):
+            if any(
+                token in text
+                for token in ("navigate", "open", "visit", "go", "redirect", "route")
+            ):
                 return False
-        return all(token not in text for token in ("click", "submit", "press", "tap", "toggle", "check", "open", "navigate", "visit", "go"))
+        return all(
+            token not in text
+            for token in (
+                "click",
+                "submit",
+                "press",
+                "tap",
+                "toggle",
+                "check",
+                "open",
+                "navigate",
+                "visit",
+                "go",
+            )
+        )
     if action == ActionType.NAVIGATE:
         src = (source_url or "").strip()
         tgt = (target_url or "").strip()
@@ -396,13 +440,15 @@ Context:
         return raw
 
 
-def _infer_constraints(param_name: str | None, element: ElementSnapshot | None = None) -> ElementConstraints | None:
+def _infer_constraints(
+    param_name: str | None, element: ElementSnapshot | None = None
+) -> ElementConstraints | None:
     """Infer loose constraints from param_name and element metadata."""
     if not param_name and element is None:
         return None
 
     key = (param_name or "").lower()
-    input_type = (element.type.lower() if element and element.type else "")
+    input_type = element.type.lower() if element and element.type else ""
     constraints = ElementConstraints()
     if key == "email" or input_type == "email":
         constraints.format = "email"
@@ -421,14 +467,14 @@ def _selector_from_element(interacted: dict | list | object) -> str:
     """Extract selector from interacted element dict (or list of dicts)."""
     if not interacted:
         return ""
-    
+
     # Handle list case (browser-use might return a list of elements)
     element = interacted
     if isinstance(interacted, list):
         if not interacted:
             return ""
         element = interacted[0]
-    
+
     # If element is not a dict (e.g. DOMInteractedElement object), try to convert or access attributes
     if not isinstance(element, dict):
         # Try to access attributes directly if it's an object
@@ -438,11 +484,11 @@ def _selector_from_element(interacted: dict | list | object) -> str:
         x_path = getattr(element, "x_path", None)
         if x_path:
             return f"xpath={x_path}"
-        
+
         css = getattr(element, "css_selector", None)
         if css:
             return css
-            
+
         # If it has a to_dict method (Pydantic model or similar)
         if hasattr(element, "to_dict"):
             element = element.to_dict()
@@ -466,12 +512,12 @@ def _selector_from_element(interacted: dict | list | object) -> str:
     x_path = element.get("x_path")
     if x_path:
         return f"xpath={x_path}"
-    
+
     # Try CSS selector
     css = element.get("css_selector")
     if css:
         return css
-    
+
     # Try attributes
     attrs_raw = element.get("attributes", {})
     attrs: Mapping[str, Any] = attrs_raw if isinstance(attrs_raw, Mapping) else {}
@@ -481,15 +527,19 @@ def _selector_from_element(interacted: dict | list | object) -> str:
         return f"[name='{attrs['name']}']"
     if attrs.get("class"):
         return f".{attrs['class'].replace(' ', '.')}"
-    
+
     return ""
 
 
-def _normalize_interacted_element(interacted: dict | list | object) -> Mapping[str, Any]:
+def _normalize_interacted_element(
+    interacted: dict | list | object,
+) -> Mapping[str, Any]:
     """Normalize browser-use interacted element into a mapping."""
     if not interacted:
         return {}
-    element = interacted[0] if isinstance(interacted, list) and interacted else interacted
+    element = (
+        interacted[0] if isinstance(interacted, list) and interacted else interacted
+    )
     if isinstance(element, Mapping):
         return element
     if hasattr(element, "to_dict"):
@@ -546,7 +596,9 @@ def _extract_tab_action(action: Mapping[str, Any]) -> TabActionType | None:
         return None
 
 
-def _frame_locator_snapshot_from_interacted(interacted: Mapping[str, Any]) -> FrameLocatorSnapshot | None:
+def _frame_locator_snapshot_from_interacted(
+    interacted: Mapping[str, Any],
+) -> FrameLocatorSnapshot | None:
     """Build a frame locator snapshot from one raw iframe mapping."""
     selector = _selector_from_element(interacted)
     if not selector:
@@ -557,14 +609,18 @@ def _frame_locator_snapshot_from_interacted(interacted: Mapping[str, Any]) -> Fr
         selector=selector,
         xpath=str(interacted.get("xpath")) if interacted.get("xpath") else None,
         x_path=str(interacted.get("x_path")) if interacted.get("x_path") else None,
-        css_selector=str(interacted.get("css_selector")) if interacted.get("css_selector") else None,
+        css_selector=str(interacted.get("css_selector"))
+        if interacted.get("css_selector")
+        else None,
         name=str(attrs.get("name")) if attrs.get("name") is not None else None,
         id=str(attrs.get("id")) if attrs.get("id") is not None else None,
         attributes=attrs,
     )
 
 
-def _extract_frame_path_from_interacted(interacted: dict | list | object) -> list[FrameLocatorSnapshot]:
+def _extract_frame_path_from_interacted(
+    interacted: dict | list | object,
+) -> list[FrameLocatorSnapshot]:
     """Extract nested iframe locator chain from interacted element metadata."""
     element = _normalize_interacted_element(interacted)
     raw_frame_path = element.get("frame_path", [])
@@ -582,7 +638,9 @@ def _extract_frame_path_from_interacted(interacted: dict | list | object) -> lis
     return frame_path
 
 
-def _element_snapshot_from_interacted(interacted: dict | list | object) -> ElementSnapshot | None:
+def _element_snapshot_from_interacted(
+    interacted: dict | list | object,
+) -> ElementSnapshot | None:
     """Build an element snapshot from browser-use interacted_element."""
     element = _normalize_interacted_element(interacted)
     if not element:
@@ -595,7 +653,9 @@ def _element_snapshot_from_interacted(interacted: dict | list | object) -> Eleme
         selector=selector,
         xpath=str(element.get("xpath")) if element.get("xpath") else None,
         x_path=str(element.get("x_path")) if element.get("x_path") else None,
-        css_selector=str(element.get("css_selector")) if element.get("css_selector") else None,
+        css_selector=str(element.get("css_selector"))
+        if element.get("css_selector")
+        else None,
         name=str(attrs.get("name")) if attrs.get("name") is not None else None,
         id=str(attrs.get("id")) if attrs.get("id") is not None else None,
         class_name=str(attrs.get("class")) if attrs.get("class") is not None else None,
@@ -605,7 +665,9 @@ def _element_snapshot_from_interacted(interacted: dict | list | object) -> Eleme
     )
 
 
-async def _infer_param_name(element: ElementSnapshot | None, is_fill: bool) -> str | None:
+async def _infer_param_name(
+    element: ElementSnapshot | None, is_fill: bool
+) -> str | None:
     """Infer param_name from real element attributes for fill actions."""
     if not is_fill or element is None:
         return None
@@ -616,7 +678,9 @@ async def _infer_param_name(element: ElementSnapshot | None, is_fill: bool) -> s
     return None
 
 
-async def _extract_action_value(action: Mapping[str, Any], play_action: ActionType) -> str | None:
+async def _extract_action_value(
+    action: Mapping[str, Any], play_action: ActionType
+) -> str | None:
     """Extract raw recorded value from browser-use action payload."""
     if play_action != ActionType.FILL:
         return None
@@ -642,7 +706,7 @@ async def parse_browser_use_step(
     page_signals: dict[str, str] | None = None,
 ) -> GraphEdge:
     """Parse one browser-use step to GraphEdge.
-    
+
     Args:
         action: The action dictionary from browser-use.
         thought: The thought object or dict from browser-use.
@@ -659,26 +723,30 @@ async def parse_browser_use_step(
             action = action.__dict__
         else:
             # Fallback
-            print(f"Warning: action is not a dict and cannot be converted: {type(action)}")
+            print(
+                f"Warning: action is not a dict and cannot be converted: {type(action)}"
+            )
             action = {}
 
     interacted = action.get("interacted_element") or {}
     element = _element_snapshot_from_interacted(interacted)
-    selector = element.selector if element is not None else _selector_from_element(interacted)
-    
+    selector = (
+        element.selector if element is not None else _selector_from_element(interacted)
+    )
+
     # Extract action type (click/fill) using mapping
     play_action = ActionType.UNKNOWN
     for key, action_type in ACTION_MAPPING.items():
         if key in action:
             play_action = action_type
             break
-            
+
     if play_action == ActionType.UNKNOWN:
         # Only print if it's truly an unknown/unmapped action key (not just one we explicitly mapped to UNKNOWN)
         known_keys = set(ACTION_MAPPING.keys())
         if not any(k in action for k in known_keys):
             print(f"Unknown action: {action} in parse_browser_use_step")
-    
+
     raw_thought = _get_next_goal(thought)
     distilled_thought = await distill_ui_thought(
         thought_text=raw_thought,

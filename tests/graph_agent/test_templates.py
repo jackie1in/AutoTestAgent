@@ -85,7 +85,13 @@ async def test_generate_business_templates_builds_login_template():
             "summary": "用户登录流程",
             "slots": {"username": 0, "password": 1, "submit": 2},
             "confidence": 0.94,
-            "evidence": {"intent_keys": ["auth.fill.username", "auth.fill.password", "auth.submit.login"]},
+            "evidence": {
+                "intent_keys": [
+                    "auth.fill.username",
+                    "auth.fill.password",
+                    "auth.submit.login",
+                ]
+            },
         }
     )
 
@@ -94,7 +100,11 @@ async def test_generate_business_templates_builds_login_template():
     assert len(templates) == 1
     assert templates[0].business_key == "auth.login"
     assert templates[0].path_length == 3
-    assert [step.edge_id for step in templates[0].steps] == ["step-1", "step-2", "step-3"]
+    assert [step.edge_id for step in templates[0].steps] == [
+        "step-1",
+        "step-2",
+        "step-3",
+    ]
 
 
 @pytest.mark.asyncio
@@ -132,14 +142,26 @@ async def test_generate_business_templates_keeps_null_intent_prefix():
             "summary": "用户登录流程",
             "slots": {"username": 1, "password": 2, "submit": 3},
             "confidence": 0.9,
-            "evidence": {"selectors": ["a[href='/login']", "#username", "#password", "button[type='submit']"]},
+            "evidence": {
+                "selectors": [
+                    "a[href='/login']",
+                    "#username",
+                    "#password",
+                    "button[type='submit']",
+                ]
+            },
         }
     )
 
     templates = await generate_business_templates(G, classifier=classifier)
 
     assert len(templates) == 1
-    assert [step.edge_id for step in templates[0].steps] == ["step-0", "step-1", "step-2", "step-3"]
+    assert [step.edge_id for step in templates[0].steps] == [
+        "step-0",
+        "step-1",
+        "step-2",
+        "step-3",
+    ]
 
 
 @pytest.mark.asyncio
@@ -307,7 +329,9 @@ async def test_generate_business_templates_rejects_navigation_only_click_noise()
         step_index=1,
         selector="li[data-tab='milestones']",
         action=ActionType.CLICK,
-        intent=_intent("Open milestones tab", "project.navigation.select_milestone_tab"),
+        intent=_intent(
+            "Open milestones tab", "project.navigation.select_milestone_tab"
+        ),
     )
     G.add_edge(
         "dashboard-milestones",
@@ -363,6 +387,7 @@ async def test_generate_business_templates_attaches_auth_login_dependency():
         action=ActionType.CLICK,
         intent=_intent("Save task", "project.task.save"),
     )
+
     async def classifier(payload: dict[str, object]) -> dict[str, object] | None:
         edge_ids = [step.get("edge_id") for step in payload["steps"]]  # type: ignore[index]
         if edge_ids == ["step-1", "step-2", "step-3"]:
@@ -527,7 +552,9 @@ async def test_generate_business_templates_prefers_direct_business_dependency_be
             "evidence": {},
         }
 
-    templates = await generate_business_templates(G, classifier=classifier, max_path_length=4)
+    templates = await generate_business_templates(
+        G, classifier=classifier, max_path_length=4
+    )
     by_key = {template.business_key: template for template in templates}
 
     assert by_key["navigation.sidebar.select"].depends_on == ["auth.login"]
@@ -627,7 +654,9 @@ async def test_generate_business_templates_attaches_auth_login_when_no_direct_te
             "evidence": {},
         }
 
-    templates = await generate_business_templates(G, classifier=classifier, max_path_length=3)
+    templates = await generate_business_templates(
+        G, classifier=classifier, max_path_length=3
+    )
     by_key = {template.business_key: template for template in templates}
 
     assert by_key["project.create.submit"].depends_on == ["auth.login"]
@@ -725,7 +754,9 @@ async def test_generate_business_templates_attaches_path_based_dependency_when_n
             "evidence": {},
         }
 
-    templates = await generate_business_templates(G, classifier=classifier, max_path_length=5)
+    templates = await generate_business_templates(
+        G, classifier=classifier, max_path_length=5
+    )
     by_key = {template.business_key: template for template in templates}
 
     assert "project.target.open" in by_key

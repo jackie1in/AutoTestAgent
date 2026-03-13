@@ -52,7 +52,10 @@ async def test_build_graph_preserves_intent_and_failure_reason():
     """T4: Edges with intent=None and intent_failure_reason are preserved in graph."""
     history = _make_mock_history(
         actions=[
-            {"click": {"element": "button"}, "interacted_element": {"xpath": "//button[@id='x']"}},
+            {
+                "click": {"element": "button"},
+                "interacted_element": {"xpath": "//button[@id='x']"},
+            },
         ],
         thoughts=[{"next_goal": "Click"}],
         urls=["https://a.com", "https://b.com"],
@@ -107,7 +110,9 @@ async def test_build_graph_filtered_non_ui_edges_in_metadata():
         {
             "selector": "xpath=//button",
             "action": ActionType.CLICK,
-            "intent": Intent(summary="Click btn", raw="click", verb="Click", object="Btn"),
+            "intent": Intent(
+                summary="Click btn", raw="click", verb="Click", object="Btn"
+            ),
             "intent_failure_reason": None,
             "param_name": None,
             "action_value": None,
@@ -152,7 +157,12 @@ async def test_build_graph_filters_unknown_action_key():
 async def test_build_graph_records_context_level_used():
     """Graph edge should preserve parser context_level_used for observability."""
     history = _make_mock_history(
-        actions=[{"click": {"element": "button"}, "interacted_element": {"xpath": "//button[@id='ok']"}}],
+        actions=[
+            {
+                "click": {"element": "button"},
+                "interacted_element": {"xpath": "//button[@id='ok']"},
+            }
+        ],
         thoughts=[{"next_goal": "Click confirm"}],
         urls=["https://a.com", "https://b.com"],
     )
@@ -162,7 +172,9 @@ async def test_build_graph_records_context_level_used():
         {
             "selector": "xpath=//button[@id='ok']",
             "action": ActionType.CLICK,
-            "intent": Intent(summary="Confirm action", raw="confirm", verb="Click", object="Confirm"),
+            "intent": Intent(
+                summary="Confirm action", raw="confirm", verb="Click", object="Confirm"
+            ),
             "context_level_used": "L1",
             "intent_failure_reason": None,
             "param_name": None,
@@ -186,7 +198,12 @@ async def test_build_graph_records_context_level_used():
 @pytest.mark.asyncio
 async def test_build_graph_tab_context_preserved_on_edge():
     history = _make_mock_history(
-        actions=[{"click": {"element": "button"}, "interacted_element": {"css_selector": "#quality"}}],
+        actions=[
+            {
+                "click": {"element": "button"},
+                "interacted_element": {"css_selector": "#quality"},
+            }
+        ],
         thoughts=[{"next_goal": "Open quality page"}],
         urls=["https://example.com/home", "https://example.com/quality"],
     )
@@ -250,8 +267,14 @@ async def test_build_graph_uses_opaque_state_ids_for_same_url_steps():
     """Same URL form states should not collapse to one URL-keyed node."""
     history = _make_mock_history(
         actions=[
-            {"input_text": {"text": "alice"}, "interacted_element": {"attributes": {"id": "username"}}},
-            {"input_text": {"text": "secret"}, "interacted_element": {"attributes": {"id": "password"}}},
+            {
+                "input_text": {"text": "alice"},
+                "interacted_element": {"attributes": {"id": "username"}},
+            },
+            {
+                "input_text": {"text": "secret"},
+                "interacted_element": {"attributes": {"id": "password"}},
+            },
         ],
         thoughts=[
             {"next_goal": "Fill username"},
@@ -269,7 +292,13 @@ async def test_build_graph_uses_opaque_state_ids_for_same_url_steps():
         {
             "selector": "#username",
             "action": ActionType.FILL,
-            "intent": Intent(summary="Fill username", raw="fill user", verb="Fill", object="Username", key="auth.fill.username"),
+            "intent": Intent(
+                summary="Fill username",
+                raw="fill user",
+                verb="Fill",
+                object="Username",
+                key="auth.fill.username",
+            ),
             "intent_failure_reason": None,
             "param_name": "username",
             "action_value": "alice",
@@ -283,7 +312,13 @@ async def test_build_graph_uses_opaque_state_ids_for_same_url_steps():
         {
             "selector": "#password",
             "action": ActionType.FILL,
-            "intent": Intent(summary="Fill password", raw="fill pass", verb="Fill", object="Password", key="auth.fill.password"),
+            "intent": Intent(
+                summary="Fill password",
+                raw="fill pass",
+                verb="Fill",
+                object="Password",
+                key="auth.fill.password",
+            ),
             "intent_failure_reason": None,
             "param_name": "password",
             "action_value": "secret",
@@ -472,15 +507,18 @@ async def test_re_infer_missing_intents_refreshes_business_templates(tmp_path: P
         confidence=0.93,
     )
 
-    with patch(
-        "graph_agent.mapping.run.infer_intent_for_context",
-        new_callable=AsyncMock,
-        return_value=(expected_intent, None),
-    ), patch(
-        "graph_agent.mapping.run.generate_business_templates",
-        new_callable=AsyncMock,
-        return_value=refreshed,
-    ) as mock_templates:
+    with (
+        patch(
+            "graph_agent.mapping.run.infer_intent_for_context",
+            new_callable=AsyncMock,
+            return_value=(expected_intent, None),
+        ),
+        patch(
+            "graph_agent.mapping.run.generate_business_templates",
+            new_callable=AsyncMock,
+            return_value=refreshed,
+        ) as mock_templates,
+    ):
         stats = await re_infer_missing_intents(graph_path)
 
     assert stats["succeeded"] == 2
@@ -491,7 +529,9 @@ async def test_re_infer_missing_intents_refreshes_business_templates(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_re_infer_missing_intents_tolerates_template_generation_failure(tmp_path: Path):
+async def test_re_infer_missing_intents_tolerates_template_generation_failure(
+    tmp_path: Path,
+):
     """Template generation failure should not block saving successful re-infer results."""
     graph_path = _make_graph_with_missing_intents(tmp_path)
     expected_intent = Intent(
@@ -503,14 +543,17 @@ async def test_re_infer_missing_intents_tolerates_template_generation_failure(tm
         confidence=0.93,
     )
 
-    with patch(
-        "graph_agent.mapping.run.infer_intent_for_context",
-        new_callable=AsyncMock,
-        return_value=(expected_intent, None),
-    ), patch(
-        "graph_agent.mapping.run.generate_business_templates",
-        new_callable=AsyncMock,
-        side_effect=RuntimeError("template llm failed"),
+    with (
+        patch(
+            "graph_agent.mapping.run.infer_intent_for_context",
+            new_callable=AsyncMock,
+            return_value=(expected_intent, None),
+        ),
+        patch(
+            "graph_agent.mapping.run.generate_business_templates",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("template llm failed"),
+        ),
     ):
         stats = await re_infer_missing_intents(graph_path)
 
@@ -525,7 +568,9 @@ async def test_re_infer_missing_intents_uses_node_url_metadata(tmp_path: Path):
     """Re-infer should pass real page URLs, not opaque state ids, into intent inference."""
     G: nx.MultiDiGraph = nx.MultiDiGraph()
     G.add_node("state-login-empty", label="login", url="https://example.com/login")
-    G.add_node("state-login-filled", label="login-filled", url="https://example.com/login")
+    G.add_node(
+        "state-login-filled", label="login-filled", url="https://example.com/login"
+    )
     G.add_edge(
         "state-login-empty",
         "state-login-filled",
@@ -573,7 +618,9 @@ async def test_re_infer_missing_intents_skips_non_null(tmp_path: Path):
         object="Btn",
         summary="Existing intent",
     )
-    G.add_edge("a", "b", selector="#btn", action=ActionType.CLICK, intent=existing_intent)
+    G.add_edge(
+        "a", "b", selector="#btn", action=ActionType.CLICK, intent=existing_intent
+    )
     graph_path = tmp_path / "graph.json"
     save_graph(G, graph_path)
 
@@ -615,7 +662,9 @@ def test_runtime_filter_snapshots_stabilizes_missing_urls():
     actions = [{"click": {}}, {"click": {}}, {"click": {}}]
     thoughts = [{}, {}, {}]
     urls = ["https://a.com/start", "", "", "https://a.com/next"]
-    out_actions, out_thoughts, out_urls, filtered = _runtime_filter_snapshots(actions, thoughts, urls)
+    out_actions, out_thoughts, out_urls, filtered = _runtime_filter_snapshots(
+        actions, thoughts, urls
+    )
     assert filtered == 0
     assert len(out_actions) == 3
     assert len(out_thoughts) == 3
@@ -636,7 +685,12 @@ def test_semantic_consistency_fill_allows_navigation_wording_on_input_selector()
         key="auth.navigation.login",
         confidence=0.8,
     )
-    assert _semantic_consistency(ActionType.FILL, intent, selector="xpath=//input[@id='username']") is True
+    assert (
+        _semantic_consistency(
+            ActionType.FILL, intent, selector="xpath=//input[@id='username']"
+        )
+        is True
+    )
 
 
 def test_semantic_consistency_click_accepts_navigation_intent():
@@ -648,7 +702,12 @@ def test_semantic_consistency_click_accepts_navigation_intent():
         key="elements.select.checkboxes",
         confidence=0.9,
     )
-    assert _semantic_consistency(ActionType.CLICK, intent, selector="xpath=//a[@href='/checkboxes']") is True
+    assert (
+        _semantic_consistency(
+            ActionType.CLICK, intent, selector="xpath=//a[@href='/checkboxes']"
+        )
+        is True
+    )
 
 
 def test_semantic_consistency_navigate_accepts_navigation_key():
@@ -704,6 +763,7 @@ def test_build_mapping_task_with_env_login_hints():
 def test_task_template_includes_derived_exploration_hint():
     """Task 2: Default task template should encourage exploring derived pages."""
     from graph_agent.mapping.run import DEFAULT_TASK_TEMPLATE
+
     task = DEFAULT_TASK_TEMPLATE.format(start_url="https://example.com/")
     assert "派生" in task
     assert "继续探索" in task
@@ -714,7 +774,12 @@ def test_task_template_includes_derived_exploration_hint():
 async def test_mapping_save_load_preserves_recording_context(tmp_path: Path):
     """Task 4: mapping -> save -> load preserves tab, frame_path, node URL, selector."""
     history = _make_mock_history(
-        actions=[{"click": {"element": "button"}, "interacted_element": {"css_selector": "#submit"}}],
+        actions=[
+            {
+                "click": {"element": "button"},
+                "interacted_element": {"css_selector": "#submit"},
+            }
+        ],
         thoughts=[{"next_goal": "Submit form"}],
         urls=["https://example.com/form", "https://example.com/done"],
     )
@@ -768,7 +833,10 @@ async def test_mapping_save_load_preserves_recording_context(tmp_path: Path):
     # Node URL preserved
     for nid, data in loaded.nodes(data=True):
         assert "url" in data
-        assert data["url"] in ("https://example.com/form", "https://example.com/done") or data["url"]
+        assert (
+            data["url"] in ("https://example.com/form", "https://example.com/done")
+            or data["url"]
+        )
 
     # Edge context preserved
     edges = list(loaded.edges(keys=True, data=True))
@@ -800,7 +868,13 @@ def test_write_acceptance_snapshot_creates_file(tmp_path: Path):
     G: nx.MultiDiGraph = nx.MultiDiGraph()
     G.add_node("a", label="a", url="a")
     G.add_node("b", label="b", url="b")
-    G.add_edge("a", "b", action=ActionType.CLICK, selector="#x", intent=Intent(raw="x", verb="Click", object="X", summary="Click x"))
+    G.add_edge(
+        "a",
+        "b",
+        action=ActionType.CLICK,
+        selector="#x",
+        intent=Intent(raw="x", verb="Click", object="X", summary="Click x"),
+    )
     G.graph["intent_missing_count"] = 0
     G.graph["intent_success_rate"] = 1.0
     G.graph["semantic_consistency_rate"] = 1.0
@@ -864,10 +938,22 @@ async def test_run_mapping_produces_graph_with_required_metadata(tmp_path: Path)
 
     mock_history = _make_mock_history_for_mapping(
         actions=[
-            {"click": {"element": "a"}, "interacted_element": {"attributes": {"href": "/login"}}},
-            {"input_text": {"text": "user"}, "interacted_element": {"attributes": {"id": "username"}}},
-            {"input_text": {"text": "pass"}, "interacted_element": {"attributes": {"id": "password"}}},
-            {"click": {"element": "button"}, "interacted_element": {"attributes": {"type": "submit"}}},
+            {
+                "click": {"element": "a"},
+                "interacted_element": {"attributes": {"href": "/login"}},
+            },
+            {
+                "input_text": {"text": "user"},
+                "interacted_element": {"attributes": {"id": "username"}},
+            },
+            {
+                "input_text": {"text": "pass"},
+                "interacted_element": {"attributes": {"id": "password"}},
+            },
+            {
+                "click": {"element": "button"},
+                "interacted_element": {"attributes": {"type": "submit"}},
+            },
         ],
         thoughts=[
             {"next_goal": "Go to login"},
@@ -902,22 +988,30 @@ async def test_run_mapping_produces_graph_with_required_metadata(tmp_path: Path)
         return MockBrowser()
 
     def _edge(sel, key, action_type):
-        return type("E", (), {
-            "selector": sel,
-            "action": action_type,
-            "intent": Intent(summary=key, raw=key, verb="Click", object=key, key=key),
-            "intent_failure_reason": None,
-            "param_name": "username" if "username" in key else ("password" if "password" in key else None),
-            "action_value": None,
-            "element": None,
-            "constraints": None,
-            "tab_id": "tab-0",
-            "target_tab_id": None,
-            "tab_action": None,
-            "tab": None,
-            "frame_path": [],
-            "context_level_used": None,
-        })()
+        return type(
+            "E",
+            (),
+            {
+                "selector": sel,
+                "action": action_type,
+                "intent": Intent(
+                    summary=key, raw=key, verb="Click", object=key, key=key
+                ),
+                "intent_failure_reason": None,
+                "param_name": "username"
+                if "username" in key
+                else ("password" if "password" in key else None),
+                "action_value": None,
+                "element": None,
+                "constraints": None,
+                "tab_id": "tab-0",
+                "target_tab_id": None,
+                "tab_action": None,
+                "tab": None,
+                "frame_path": [],
+                "context_level_used": None,
+            },
+        )()
 
     edge_models = [
         _edge('a[href="/login"]', "go_to_login", ActionType.CLICK),
@@ -970,7 +1064,9 @@ def test_mapping_output_graph_has_structure_for_playback(tmp_path: Path):
     G: nx.MultiDiGraph = nx.MultiDiGraph()
     G.add_node("state-0", label="home", url="https://the-internet.herokuapp.com/")
     G.add_node("state-1", label="login", url="https://the-internet.herokuapp.com/login")
-    G.add_node("state-2", label="secure", url="https://the-internet.herokuapp.com/secure")
+    G.add_node(
+        "state-2", label="secure", url="https://the-internet.herokuapp.com/secure"
+    )
     G.add_edge(
         "state-0",
         "state-1",

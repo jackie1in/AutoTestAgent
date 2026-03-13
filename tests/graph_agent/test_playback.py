@@ -7,7 +7,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from graph_agent.models import ActionType, FrameLocatorSnapshot, GraphEdge, Intent, TabActionType
+from graph_agent.models import (
+    ActionType,
+    FrameLocatorSnapshot,
+    GraphEdge,
+    Intent,
+    TabActionType,
+)
 from graph_agent.playback.engine import (
     _extract_login_error_message,
     _extract_login_error_message_from_page_text,
@@ -198,7 +204,11 @@ class _FakeAsyncPlaywright:
         self.page = page
 
     async def __aenter__(self) -> SimpleNamespace:
-        return SimpleNamespace(chromium=SimpleNamespace(launch=AsyncMock(return_value=_FakeBrowser(self.page))))
+        return SimpleNamespace(
+            chromium=SimpleNamespace(
+                launch=AsyncMock(return_value=_FakeBrowser(self.page))
+            )
+        )
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         return None
@@ -331,7 +341,9 @@ async def test_playback_falls_back_to_param_name_when_recorded_value_missing():
 
 
 @pytest.mark.asyncio
-async def test_playback_prefers_test_data_over_recorded_action_value(monkeypatch: pytest.MonkeyPatch):
+async def test_playback_prefers_test_data_over_recorded_action_value(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Runtime test_data should override stale recorded action_value for fill steps."""
     page = _FakePage()
     _install_fake_playwright(monkeypatch, page)
@@ -432,8 +444,10 @@ async def test_playback_open_popup_tab_routes_followup_click_to_new_page(
     popup = _FakePage()
     popup.url = "https://a.com/popup"
     page.popup_page = popup
+
     async def _confirm_click(fake_page: _FakePage) -> None:
         fake_page.url = "https://a.com/popup/confirmed"
+
     popup.click_hooks["#confirm"] = _confirm_click
     _install_fake_playwright(monkeypatch, page)
     edge_list = [
@@ -632,7 +646,9 @@ async def test_playback_tab_and_nested_iframe_routes_followup_click_to_popup_pag
     monkeypatch: pytest.MonkeyPatch,
 ):
     """tab + nested iframe 叠加时，frame 解析与点击都应落在 popup page 上。"""
-    page = _FakePage(missing_frames={"iframe[name='popup-outer']", "iframe[name='popup-inner']"})
+    page = _FakePage(
+        missing_frames={"iframe[name='popup-outer']", "iframe[name='popup-inner']"}
+    )
     popup = _FakePage()
     popup.url = "https://a.com/popup"
     page.popup_page = popup
@@ -691,7 +707,10 @@ def test_format_replay_error_tab():
     """Tab errors should be prefixed with 'tab:'."""
     err = ValueError("Target tab does not exist: tab-x")
     edge = GraphEdge(source="a", target="b", selector="#btn", action=ActionType.CLICK)
-    assert _format_replay_error(err, edge, "tab-x") == "tab: Target tab does not exist: tab-x"
+    assert (
+        _format_replay_error(err, edge, "tab-x")
+        == "tab: Target tab does not exist: tab-x"
+    )
 
 
 def test_format_replay_error_iframe():
@@ -979,7 +998,9 @@ async def test_playback_fails_fast_when_login_submit_does_not_leave_login_page(
 
 
 @pytest.mark.asyncio
-async def test_playback_navigate_waits_for_http_requests_before_next_action(monkeypatch: pytest.MonkeyPatch):
+async def test_playback_navigate_waits_for_http_requests_before_next_action(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """NAVIGATE should wait for spawned HTTP requests before continuing."""
     page = _FakePage()
     _install_fake_playwright(monkeypatch, page)
@@ -1025,13 +1046,15 @@ async def test_playback_navigate_waits_for_http_requests_before_next_action(monk
 
     assert result["success"] is True
     assert ("goto", "https://a.com/secure") in page.events
-    assert page.events.index(("request-finish", "https://a.com/bootstrap")) < page.events.index(
-        ("fill", "#user", "alice")
-    )
+    assert page.events.index(
+        ("request-finish", "https://a.com/bootstrap")
+    ) < page.events.index(("fill", "#user", "alice"))
 
 
 @pytest.mark.asyncio
-async def test_playback_click_waits_for_triggered_http_requests(monkeypatch: pytest.MonkeyPatch):
+async def test_playback_click_waits_for_triggered_http_requests(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """CLICK should wait for its HTTP request batch before the next step."""
     page = _FakePage()
     _install_fake_playwright(monkeypatch, page)
@@ -1076,13 +1099,15 @@ async def test_playback_click_waits_for_triggered_http_requests(monkeypatch: pyt
     )
 
     assert result["success"] is True
-    assert page.events.index(("request-finish", "https://a.com/api/projects")) < page.events.index(
-        ("fill", "#user", "alice")
-    )
+    assert page.events.index(
+        ("request-finish", "https://a.com/api/projects")
+    ) < page.events.index(("fill", "#user", "alice"))
 
 
 @pytest.mark.asyncio
-async def test_playback_no_http_request_continues_without_error(monkeypatch: pytest.MonkeyPatch):
+async def test_playback_no_http_request_continues_without_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """When an action triggers no HTTP request, playback should continue normally."""
     page = _FakePage()
     _install_fake_playwright(monkeypatch, page)
@@ -1113,7 +1138,9 @@ async def test_playback_no_http_request_continues_without_error(monkeypatch: pyt
     )
 
     assert result["success"] is True
-    assert page.events.index(("click", "#btn")) < page.events.index(("fill", "#user", "alice"))
+    assert page.events.index(("click", "#btn")) < page.events.index(
+        ("fill", "#user", "alice")
+    )
 
 
 def test_is_transient_error_timeout():
@@ -1124,7 +1151,10 @@ def test_is_transient_error_timeout():
 
 def test_is_transient_error_locator_message():
     """Locator timeout messages should be classified as transient."""
-    assert _is_transient_error(RuntimeError("Locator timed out: waiting for selector")) is True
+    assert (
+        _is_transient_error(RuntimeError("Locator timed out: waiting for selector"))
+        is True
+    )
     assert _is_transient_error(RuntimeError("Timeout 30000ms exceeded")) is True
 
 
@@ -1145,7 +1175,9 @@ def test_format_replay_error_async_load_prefix():
 
 
 @pytest.mark.asyncio
-async def test_playback_retries_on_transient_click_failure(monkeypatch: pytest.MonkeyPatch):
+async def test_playback_retries_on_transient_click_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Click should succeed on retry after transient TimeoutError."""
     page = _FakePage()
     attempt = [0]
@@ -1180,7 +1212,9 @@ async def test_playback_retries_on_transient_click_failure(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
-async def test_playback_retries_on_transient_fill_failure(monkeypatch: pytest.MonkeyPatch):
+async def test_playback_retries_on_transient_fill_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Fill should succeed on retry after transient failure."""
     page = _FakePage()
     attempt = [0]

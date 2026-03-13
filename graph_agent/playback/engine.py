@@ -158,7 +158,9 @@ def _frame_selector_candidates(frame: FrameLocatorSnapshot, index: int) -> list[
     xp = frame.xpath or frame.x_path
     xp_str = str(xp or "").strip()
     if xp_str and xp_str != primary:
-        candidates.append(f"xpath={xp_str}" if not xp_str.startswith("xpath=") else xp_str)
+        candidates.append(
+            f"xpath={xp_str}" if not xp_str.startswith("xpath=") else xp_str
+        )
     if not candidates:
         raise ValueError(f"Missing selector for iframe level {index}")
     return candidates
@@ -184,7 +186,9 @@ def _resolve_playback_context(page: Any, frame_path: list[FrameLocatorSnapshot])
     return context
 
 
-def _locator_in_context(page: Any, selector: str, frame_path: list[FrameLocatorSnapshot]) -> Any:
+def _locator_in_context(
+    page: Any, selector: str, frame_path: list[FrameLocatorSnapshot]
+) -> Any:
     """Build a locator in the target page/frame context."""
     return _resolve_playback_context(page, frame_path).locator(selector)
 
@@ -286,7 +290,9 @@ async def _run_with_http_wait(
 
         observe_deadline = monotonic() + (NETWORK_OBSERVE_MS / 1000)
         while not saw_request and monotonic() < observe_deadline:
-            timeout = max(0.0, min(observe_deadline - monotonic(), NETWORK_POLL_MS / 1000))
+            timeout = max(
+                0.0, min(observe_deadline - monotonic(), NETWORK_POLL_MS / 1000)
+            )
             if timeout == 0:
                 break
             try:
@@ -297,7 +303,9 @@ async def _run_with_http_wait(
 
         request_deadline = monotonic() + (timeout_ms / 1000)
         while saw_request and pending:
-            timeout = max(0.0, min(request_deadline - monotonic(), NETWORK_POLL_MS / 1000))
+            timeout = max(
+                0.0, min(request_deadline - monotonic(), NETWORK_POLL_MS / 1000)
+            )
             if timeout == 0:
                 raise TimeoutError("Timed out waiting for HTTP requests to finish")
             try:
@@ -334,7 +342,7 @@ async def run_playback(
         {"success": bool, "actual_url": str, "error": str | None}
     """
     actual_url = ""
-    
+
     # Config from env
     channel = os.getenv("PLAYWRIGHT_CHANNEL", "chrome")  # Default to chrome if not set
     # Default to headless=False for playback visibility unless explicitly set to true
@@ -352,17 +360,17 @@ async def run_playback(
                 fallback_tab_by_closed_tab_id: dict[str, str] = {}
                 redirected_tab_by_tab_id: dict[str, str] = {}
                 last_action_page = page
-                
+
                 # Navigate to start URL
                 try:
                     await page.goto(start_url)
                 except Exception as e:
-                     return {
+                    return {
                         "success": False,
                         "actual_url": "",
                         "error": f"Failed to navigate to start URL: {e}",
                     }
-                
+
                 actual_url = page.url
 
                 started_on_login_url = _is_login_like_url(start_url)
@@ -391,12 +399,17 @@ async def run_playback(
                 page.on("response", _on_response)
 
                 try:
-                    ordered_edges = sorted(edge_list, key=lambda e: (e.step_index if e.step_index is not None else 10**9))
+                    ordered_edges = sorted(
+                        edge_list,
+                        key=lambda e: (
+                            e.step_index if e.step_index is not None else 10**9
+                        ),
+                    )
                     for i, edge in enumerate(ordered_edges):
                         selector = edge.selector
                         action = edge.action
                         page_for_edge = page
-                    
+
                         # T7: 兼容 edge.intent is None，不依赖 intent.summary 必然存在
                         intent_summary = (
                             getattr(edge.intent, "summary", None) or ""
@@ -409,7 +422,7 @@ async def run_playback(
                             "action": action,
                             "intent": intent_summary,
                         }
-                        
+
                         try:
                             page_for_edge = _page_for_tab(
                                 pages_by_tab_id,
@@ -421,8 +434,11 @@ async def run_playback(
                             if action == ActionType.NAVIGATE:
                                 navigate_url = _resolve_navigate_url(edge)
                                 if not navigate_url:
-                                    raise ValueError("Navigate step is missing a resolvable URL")
+                                    raise ValueError(
+                                        "Navigate step is missing a resolvable URL"
+                                    )
                                 if wait_for_network:
+
                                     async def _goto() -> None:
                                         await page_for_edge.goto(navigate_url)
 
@@ -460,7 +476,9 @@ async def run_playback(
                                     if target_tab_id != close_tab_id
                                 }
                                 if opener_tab_id is not None:
-                                    fallback_tab_by_closed_tab_id[close_tab_id] = opener_tab_id
+                                    fallback_tab_by_closed_tab_id[close_tab_id] = (
+                                        opener_tab_id
+                                    )
                                     last_action_page = _page_for_tab(
                                         pages_by_tab_id,
                                         opener_tab_id,
@@ -480,7 +498,9 @@ async def run_playback(
                             if edge.tab_action == TabActionType.SWITCH:
                                 switch_target_tab_id = edge.target_tab_id or edge.tab_id
                                 redirected_tab_by_tab_id.pop(switch_target_tab_id, None)
-                                redirected_tab_by_tab_id[edge.tab_id] = switch_target_tab_id
+                                redirected_tab_by_tab_id[edge.tab_id] = (
+                                    switch_target_tab_id
+                                )
                                 switched_page = _page_for_tab(
                                     pages_by_tab_id,
                                     switch_target_tab_id,
@@ -497,10 +517,12 @@ async def run_playback(
                                 continue
 
                             if not selector:
-                                 # Skip if no selector (e.g. pure navigation or wait)
-                                 continue
+                                # Skip if no selector (e.g. pure navigation or wait)
+                                continue
 
-                            loc = _locator_in_context(page_for_edge, selector, edge.frame_path)
+                            loc = _locator_in_context(
+                                page_for_edge, selector, edge.frame_path
+                            )
 
                             if edge.tab_action == TabActionType.OPEN:
                                 async with page_for_edge.expect_popup() as popup_info:
@@ -515,7 +537,9 @@ async def run_playback(
                                 popup_page = await popup_info.value
                                 popup_page.set_default_timeout(timeout_ms)
                                 if hasattr(popup_page, "wait_for_load_state"):
-                                    await popup_page.wait_for_load_state("domcontentloaded")
+                                    await popup_page.wait_for_load_state(
+                                        "domcontentloaded"
+                                    )
                                 popup_tab_id = edge.target_tab_id or edge.tab_id
                                 pages_by_tab_id[popup_tab_id] = popup_page
                                 opener_by_tab_id[popup_tab_id] = edge.tab_id
@@ -528,7 +552,7 @@ async def run_playback(
                                     if res and hasattr(res, "__await__"):
                                         await res
                                 continue
-                            
+
                             if action == ActionType.FILL:
                                 value = ""
 
@@ -540,23 +564,37 @@ async def run_playback(
                                     value = str(edge.action_value)
                                 # 3. Try constraints generation.
                                 elif edge.constraints:
-                                    value = _generate_value_from_constraints(edge.constraints)
+                                    value = _generate_value_from_constraints(
+                                        edge.constraints
+                                    )
                                 # 4. Fallback
                                 else:
                                     value = "test_value"
-                                
+
                                 async def _do_fill() -> None:
                                     await loc.fill(value)
 
                                 await _retry_action(_do_fill)
                                 actual_url = page_for_edge.url
                                 last_action_page = page_for_edge
-                                param_name = (edge.param_name or "").lower() if edge.param_name else ""
-                                intent_key = (getattr(edge.intent, "key", "") or "").lower() if edge.intent else ""
-                                if param_name in {"username", "password"} or intent_key.startswith("auth.fill"):
+                                param_name = (
+                                    (edge.param_name or "").lower()
+                                    if edge.param_name
+                                    else ""
+                                )
+                                intent_key = (
+                                    (getattr(edge.intent, "key", "") or "").lower()
+                                    if edge.intent
+                                    else ""
+                                )
+                                if param_name in {
+                                    "username",
+                                    "password",
+                                } or intent_key.startswith("auth.fill"):
                                     saw_auth_credentials = True
-                                
+
                             elif action == ActionType.CLICK:
+
                                 async def _do_click() -> None:
                                     if wait_for_network:
                                         await _run_with_http_wait(
@@ -581,8 +619,12 @@ async def run_playback(
                                     )
                                     if not login_error_message:
                                         try:
-                                            body_text = await page_for_edge.locator("body").inner_text()
-                                            login_error_message = _extract_login_error_message_from_page_text(body_text)
+                                            body_text = await page_for_edge.locator(
+                                                "body"
+                                            ).inner_text()
+                                            login_error_message = _extract_login_error_message_from_page_text(
+                                                body_text
+                                            )
                                         except Exception:
                                             login_error_message = None
                                     if login_error_message:
@@ -600,18 +642,20 @@ async def run_playback(
                                     }
                                 if saw_auth_credentials:
                                     login_guard_satisfied = True
-                                
+
                             else:
                                 # Unknown action, log warning but continue? Or fail?
                                 # For now, just log
-                                print(f"Warning: Unknown action type {action} at step {i}")
+                                print(
+                                    f"Warning: Unknown action type {action} at step {i}"
+                                )
 
                             log_entry["success"] = True
                             if log_callback:
                                 res = log_callback(log_entry)
                                 if res and hasattr(res, "__await__"):
                                     await res
-                                
+
                         except Exception as step_error:  # noqa: BLE001
                             formatted_error = _format_replay_error(
                                 step_error, edge, edge.tab_id
@@ -622,7 +666,9 @@ async def run_playback(
                                 res = log_callback(log_entry)
                                 if res and hasattr(res, "__await__"):
                                     await res
-                            actual_url = pages_by_tab_id.get(edge.tab_id, page_for_edge).url
+                            actual_url = pages_by_tab_id.get(
+                                edge.tab_id, page_for_edge
+                            ).url
                             return {
                                 "success": False,
                                 "actual_url": actual_url,
@@ -635,7 +681,7 @@ async def run_playback(
                     try:
                         await expect(last_action_page).to_have_url(expected_end_url)
                     except AssertionError as e:
-                         return {
+                        return {
                             "success": False,
                             "actual_url": actual_url,
                             "error": f"Expected URL {expected_end_url}, got {actual_url}. Error: {e}",

@@ -23,19 +23,19 @@ from graph_agent.models import (
 def save_graph(G: nx.Graph, path: str | Path) -> None:
     """Serialize graph to JSON file using GraphData model."""
     path = Path(path)
-    
+
     nodes = []
     for nid, data in G.nodes(data=True):
-        nodes.append(GraphNode(
-            id=str(nid),
-            url=data.get("url", ""),
-            title=data.get("title")
-        ))
-        
+        nodes.append(
+            GraphNode(id=str(nid), url=data.get("url", ""), title=data.get("title"))
+        )
+
     edges = []
     edge_iter: Iterable[tuple[Any, Any, Any | None, dict[str, Any]]]
     if isinstance(G, nx.MultiDiGraph):
-        edge_iter = ((u, v, key, data) for u, v, key, data in G.edges(keys=True, data=True))
+        edge_iter = (
+            (u, v, key, data) for u, v, key, data in G.edges(keys=True, data=True)
+        )
     else:
         edge_iter = ((u, v, None, data) for u, v, data in G.edges(data=True))
 
@@ -44,7 +44,11 @@ def save_graph(G: nx.Graph, path: str | Path) -> None:
         intent_data = data.get("intent")
         intent: Intent | None
         if isinstance(intent_data, dict):
-            summary = str(intent_data.get("summary") or intent_data.get("raw") or data.get("semantic_label", "Unknown action"))
+            summary = str(
+                intent_data.get("summary")
+                or intent_data.get("raw")
+                or data.get("semantic_label", "Unknown action")
+            )
             intent = Intent(
                 raw=str(intent_data.get("raw") or summary),
                 verb=str(intent_data.get("verb") or "Unknown"),
@@ -85,7 +89,9 @@ def save_graph(G: nx.Graph, path: str | Path) -> None:
                 continue
 
         edge = GraphEdge(
-            edge_id=str(data.get("edge_id") or key) if (data.get("edge_id") or key) is not None else None,
+            edge_id=str(data.get("edge_id") or key)
+            if (data.get("edge_id") or key) is not None
+            else None,
             step_index=data.get("step_index"),
             source=str(u),
             target=str(v),
@@ -102,14 +108,14 @@ def save_graph(G: nx.Graph, path: str | Path) -> None:
             param_name=data.get("param_name"),
             action_value=data.get("action_value"),
             element=element,
-            constraints=constraints
+            constraints=constraints,
         )
         edges.append(edge)
-        
+
     metadata = dict(G.graph)
-    
+
     graph_data = GraphData(nodes=nodes, edges=edges, metadata=metadata)
-    
+
     path.write_text(graph_data.model_dump_json(indent=2), encoding="utf-8")
 
 
@@ -118,21 +124,23 @@ def load_graph(path: str | Path) -> nx.MultiDiGraph:
     path = Path(path)
     if not path.exists():
         return nx.MultiDiGraph()
-        
+
     text = path.read_text(encoding="utf-8")
     try:
         graph_data = GraphData.model_validate_json(text)
     except ValidationError:
         # Fallback for old format? Or just fail as per instructions "backward compatibility is NOT required"
-        print(f"Warning: Failed to validate graph data from {path}. Returning empty graph.")
+        print(
+            f"Warning: Failed to validate graph data from {path}. Returning empty graph."
+        )
         return nx.MultiDiGraph()
 
     G: nx.MultiDiGraph = nx.MultiDiGraph()
     G.graph.update(graph_data.metadata)
-    
+
     for node in graph_data.nodes:
         G.add_node(node.id, url=node.url, title=node.title)
-        
+
     for edge in graph_data.edges:
         # Store complex objects directly in the graph
         G.add_edge(
@@ -154,7 +162,7 @@ def load_graph(path: str | Path) -> nx.MultiDiGraph:
             param_name=edge.param_name,
             action_value=edge.action_value,
             element=edge.element,
-            constraints=edge.constraints
+            constraints=edge.constraints,
         )
-        
+
     return G
