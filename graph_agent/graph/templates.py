@@ -25,6 +25,11 @@ MATCHABLE_INTENT_CONFIDENCE = 0.5
 EdgeRow = tuple[str, str, Any | None, dict[str, Any]]
 TemplateClassifier = Callable[[dict[str, Any]], Awaitable[dict[str, Any] | None]]
 
+_MODULE_NAVIGATION_KEYS = {
+    "navigation.menu_selection",
+    "project.navigation.menu_selection",
+}
+
 
 def _is_navigation_like_intent_key(intent_key: str | None) -> bool:
     """Heuristic to keep tab/menu wandering out of template classification."""
@@ -289,6 +294,8 @@ def _make_template(
         for step in payload["steps"]
     ]
     business_key = str(classification.get("business_key") or "").strip()
+    if business_key in _MODULE_NAVIGATION_KEYS:
+        business_key = "navigation.module.select"
     edge_ids = ",".join(step.edge_id or "" for step in steps)
     template_id = hashlib.sha1(
         f"{business_key}|{edge_ids}".encode("utf-8")
@@ -451,6 +458,123 @@ def _attach_auth_login_dependency(
     return templates
 
 
+def _is_module_navigation_edge(data: dict[str, Any]) -> bool:
+    """Heuristic: identify post-login module-entry menu clicks."""
+    action_raw = data.get("action", ActionType.UNKNOWN)
+    if isinstance(action_raw, ActionType):
+        action = action_raw
+    else:
+        try:
+            action = ActionType(str(action_raw))
+        except ValueError:
+            action = ActionType.UNKNOWN
+    if action != ActionType.CLICK:
+        return False
+    intent = _normalize_intent(data.get("intent"))
+    key = str(intent.key or "").lower() if intent else ""
+    if not key:
+        return False
+    if "tab" in key:
+        return False
+    return (
+        ".navigation." in key
+        or ".menu" in key
+        or ".select." in key
+        or key.endswith(".select")
+    )
+
+
+def _build_module_navigation_template(
+    auth_template: BusinessTemplate,
+    graph: nx.Graph,
+) -> BusinessTemplate | None:
+    """Synthesize a module-entry template from short post-login menu click chains."""
+    if auth_template.exit_node not in graph:
+        return None
+
+    best_path: list[EdgeRow] = []
+    for first in _iter_out_edges(graph, auth_template.exit_node):
+        _u1, v1, _k1, data1 = first
+        if not _is_module_navigation_edge(data1):
+            continue
+        candidate = [first]
+        for second in _iter_out_edges(graph, str(v1)):
+            _u2, _v2, _k2, data2 = second
+            if not _is_module_navigation_edge(data2):
+                continue
+            candidate = [first, second]
+            break
+        if len(candidate) > len(best_path):
+            best_path = candidate
+
+    if not best_path:
+        return None
+
+    steps: list[BusinessTemplateStep] = []
+    evidence_keys: list[str] = []
+    for u, v, key, data in best_path:
+        edge_id = _edge_id_for_row(key, data)
+        intent = _normalize_intent(data.get("intent"))
+        intent_key = intent.key if intent else None
+        if intent_key:
+            evidence_keys.append(intent_key)
+        action_raw = data.get("action", ActionType.UNKNOWN)
+        action = (
+            action_raw if isinstance(action_raw, ActionType) else ActionType(str(action_raw))
+        )
+        steps.append(
+            BusinessTemplateStep(
+                edge_id=edge_id,
+                source=str(u),
+                target=str(v),
+                selector=str(data.get("selector") or ""),
+                action=action,
+                intent_key=intent_key,
+                param_name=str(data.get("param_name"))
+                if data.get("param_name") is not None
+                else None,
+            )
+        )
+
+    template_id = hashlib.sha1(
+        (
+            "navigation.module.select|"
+            + ",".join(step.edge_id or "" for step in steps)
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    return BusinessTemplate(
+        template_id=template_id,
+        business_key="navigation.module.select",
+        summary="登录后进入目标模块",
+        entry_node=str(best_path[0][0]),
+        exit_node=str(best_path[-1][1]),
+        path_length=len(steps),
+        confidence=0.76,
+        steps=steps,
+        slots={},
+        evidence={"intent_keys": evidence_keys, "source": "heuristic.module_navigation"},
+    )
+
+
+def _synthesize_navigation_module_template(
+    graph: nx.Graph,
+    templates: list[BusinessTemplate],
+) -> list[BusinessTemplate]:
+    """Add a deterministic post-login module-entry template when LLM classification is too generic."""
+    if any(t.business_key == "navigation.module.select" for t in templates):
+        return templates
+    auth_templates = [t for t in templates if t.business_key == "auth.login"]
+    if not auth_templates:
+        return templates
+    auth_template = auth_templates[0]
+    for candidate in auth_templates[1:]:
+        auth_template = _prefer_template(auth_template, candidate)
+    synthesized = _build_module_navigation_template(auth_template, graph)
+    if synthesized is None:
+        return templates
+    return [*templates, synthesized]
+
+
 async def generate_business_templates(
     graph: nx.Graph,
     classifier: TemplateClassifier | None = None,
@@ -505,7 +629,8 @@ async def generate_business_templates(
                         )
                 stack.append((v, next_path, next_used))
 
-    templates = _attach_direct_template_dependencies(graph, list(deduped.values()))
+    templates = _synthesize_navigation_module_template(graph, list(deduped.values()))
+    templates = _attach_direct_template_dependencies(graph, templates)
     return _attach_auth_login_dependency(graph, templates)
 
 

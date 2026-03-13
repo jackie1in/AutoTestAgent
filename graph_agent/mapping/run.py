@@ -35,7 +35,15 @@ DEFAULT_TASK_TEMPLATE = (
 )
 
 FILTERED_ACTION_KEYS = {"read_file", "write_file", "done", "unknown"}
-DISALLOWED_RUNTIME_ACTION_KEYS = {"read_file", "write_file", "replace_file", "done"}
+# Filter wait actions before state construction so they do not create
+# disconnected pseudo-states between two real UI interactions.
+DISALLOWED_RUNTIME_ACTION_KEYS = {
+    "read_file",
+    "write_file",
+    "replace_file",
+    "done",
+    "wait",
+}
 
 
 def _clean_url(url: str) -> str:

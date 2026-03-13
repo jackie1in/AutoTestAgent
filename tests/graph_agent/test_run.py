@@ -1,5 +1,6 @@
 """Tests for Mapping run module (T4:构图与统计联动, T5:re-infer-missing)."""
 
+import asyncio
 import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -45,6 +46,210 @@ def _make_mock_history(actions: list[dict], thoughts: list[dict], urls: list[str
             return urls
 
     return MockHistory()
+
+
+def test_collect_playback_diagnostics_includes_path_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Task 1: diagnostics should expose resolved path context and playback result."""
+    from graph_agent.acceptance.playback_diagnostics import (
+        collect_playback_diagnostics,
+    )
+
+    graph: nx.MultiDiGraph = nx.MultiDiGraph()
+    graph.add_node("home", url="https://example.com/")
+    graph.add_node("login", url="https://example.com/login")
+    graph.add_edge(
+        "home",
+        "login",
+        key="e1",
+        edge_id="e1",
+        selector='a[href="/login"]',
+        action=ActionType.CLICK,
+        tab_id="tab-0",
+        frame_path=[],
+        intent=Intent(
+            raw="Go to login",
+            verb="Go",
+            object="Login",
+            summary="Go to login",
+            key="auth.login",
+        ),
+    )
+    graph_path = tmp_path / "graph.json"
+    save_graph(graph, graph_path)
+
+    async def _fake_run_playback(*args, **kwargs):
+        return {
+            "success": False,
+            "actual_url": "https://example.com/login",
+            "error": "selector: missing",
+        }
+
+    monkeypatch.setattr(
+        "graph_agent.acceptance.playback_diagnostics.run_playback",
+        _fake_run_playback,
+    )
+
+    report = asyncio.run(
+        collect_playback_diagnostics(
+            graph_path=graph_path,
+            intent_query="auth.login",
+            start_url="https://example.com/",
+            test_data={},
+        )
+    )
+
+    assert report["intent_query"] == "auth.login"
+    assert report["path_length"] == 1
+    assert report["edges"][0]["tab_id"] == "tab-0"
+    assert report["edges"][0]["selector"] == 'a[href="/login"]'
+    assert report["playback"]["success"] is False
+
+
+def test_get_path_from_query_prefers_executable_path_with_prerequisites():
+    """Task 2: template-expanded query path should include required prerequisite steps."""
+    from graph_agent.graph.pathfinding import get_path_from_query
+    from graph_agent.graph.templates import store_business_templates
+
+    graph = nx.MultiDiGraph()
+    graph.add_node("entry", url="https://example.com/login")
+    graph.add_node("dashboard", url="https://example.com/dashboard")
+    graph.add_node("module", url="https://example.com/module")
+
+    login_intent = Intent(
+        raw="Login",
+        verb="Submit",
+        object="Login",
+        summary="Login",
+        key="auth.login",
+        confidence=0.9,
+    )
+    module_intent = Intent(
+        raw="Open module",
+        verb="Open",
+        object="Module",
+        summary="登录后进入目标模块",
+        key="navigation.module.select",
+        confidence=0.9,
+    )
+
+    graph.add_edge(
+        "entry",
+        "dashboard",
+        key="e-login",
+        edge_id="e-login",
+        selector="#submit",
+        action=ActionType.CLICK,
+        intent=login_intent,
+    )
+    graph.add_edge(
+        "dashboard",
+        "module",
+        key="e-module",
+        edge_id="e-module",
+        selector="#module",
+        action=ActionType.CLICK,
+        intent=module_intent,
+    )
+
+    templates = [
+        BusinessTemplate(
+            template_id="t-login",
+            business_key="auth.login",
+            summary="Login",
+            entry_node="entry",
+            exit_node="dashboard",
+            path_length=1,
+            confidence=0.9,
+            steps=[
+                BusinessTemplateStep(
+                    edge_id="e-login",
+                    source="entry",
+                    target="dashboard",
+                    selector="#submit",
+                    action=ActionType.CLICK,
+                    intent_key="auth.login",
+                )
+            ],
+        ),
+        BusinessTemplate(
+            template_id="t-module",
+            business_key="navigation.module.select",
+            summary="登录后进入目标模块",
+            entry_node="dashboard",
+            exit_node="module",
+            path_length=1,
+            confidence=0.9,
+            depends_on=["auth.login"],
+            steps=[
+                BusinessTemplateStep(
+                    edge_id="e-module",
+                    source="dashboard",
+                    target="module",
+                    selector="#module",
+                    action=ActionType.CLICK,
+                    intent_key="navigation.module.select",
+                )
+            ],
+        ),
+    ]
+
+    store_business_templates(graph, templates)
+    path = get_path_from_query("登录后进入目标模块", graph)
+
+    assert [edge.edge_id for edge in path] == ["e-login", "e-module"]
+
+
+def test_get_path_from_atomic_intent_keeps_required_same_state_prerequisites():
+    """Task 3: atomic intent search should retain earlier same-state prerequisite edges."""
+    from graph_agent.graph.pathfinding import get_path_from_query
+
+    graph = nx.MultiDiGraph()
+    graph.add_node("state", url="https://example.com/dashboard")
+    graph.add_node("done", url="https://example.com/done")
+
+    prereq_intent = Intent(
+        raw="Accept terms",
+        verb="Accept",
+        object="Terms",
+        summary="Accept terms",
+        key="form.accept.terms",
+        confidence=0.9,
+    )
+    target_intent = Intent(
+        raw="Submit form",
+        verb="Submit",
+        object="Form",
+        summary="Submit form",
+        key="form.submit",
+        confidence=0.9,
+    )
+
+    graph.add_edge(
+        "state",
+        "state",
+        key="e-prereq",
+        edge_id="e-prereq",
+        step_index=1,
+        selector="#accept",
+        action=ActionType.CLICK,
+        intent=prereq_intent,
+    )
+    graph.add_edge(
+        "state",
+        "done",
+        key="e-submit",
+        edge_id="e-submit",
+        step_index=2,
+        selector="#submit",
+        action=ActionType.CLICK,
+        intent=target_intent,
+    )
+
+    path = get_path_from_query("Submit form", graph, prefer_templates=False)
+
+    assert [edge.edge_id for edge in path] == ["e-prereq", "e-submit"]
 
 
 @pytest.mark.asyncio
@@ -601,6 +806,7 @@ async def test_re_infer_missing_intents_uses_node_url_metadata(tmp_path: Path):
     ) as mock_infer:
         await re_infer_missing_intents(graph_path)
 
+    assert mock_infer.await_args is not None
     kwargs = mock_infer.await_args.kwargs
     assert kwargs["source_url"] == "https://example.com/login"
     assert kwargs["target_url"] == "https://example.com/login"
@@ -674,6 +880,42 @@ def test_runtime_filter_snapshots_stabilizes_missing_urls():
         "https://a.com/start",
         "https://a.com/next",
     ]
+
+
+def test_runtime_filter_snapshots_drops_wait_actions_to_preserve_path_continuity():
+    """Wait actions should be removed before graph building to keep actionable states connected."""
+    actions = [
+        {"click": {"element": "login"}},
+        {"wait": {"seconds": 3}},
+        {"click": {"element": "project"}},
+    ]
+    thoughts = [
+        {"next_goal": "Submit login"},
+        {"next_goal": "Wait for dashboard"},
+        {"next_goal": "Open project module"},
+    ]
+    urls = [
+        "https://example.com/login",
+        "https://example.com/dashboard",
+        "https://example.com/dashboard",
+        "https://example.com/project",
+    ]
+
+    out_actions, out_thoughts, out_urls, filtered = _runtime_filter_snapshots(
+        actions, thoughts, urls
+    )
+
+    assert [next(iter(action.keys())) for action in out_actions] == ["click", "click"]
+    assert [thought["next_goal"] for thought in out_thoughts] == [
+        "Submit login",
+        "Open project module",
+    ]
+    assert out_urls == [
+        "https://example.com/login",
+        "https://example.com/dashboard",
+        "https://example.com/project",
+    ]
+    assert filtered == 1
 
 
 def test_semantic_consistency_fill_allows_navigation_wording_on_input_selector():
