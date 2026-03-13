@@ -14,6 +14,7 @@ import networkx as nx
 
 from graph_agent.acceptance.playback_acceptance import (
     PlaybackAcceptanceResult,
+    is_graph_from_mapping_run,
     run_playback_acceptance,
 )
 from graph_agent.graph.io import save_graph
@@ -176,14 +177,12 @@ async def test_playback_acceptance_at_least_three_intents(tmp_path):
 async def test_playback_acceptance_real_graph_at_least_three_intents():
     """
     Task 7: 基于 mapping.run 产出的 graph.json 做真实回放。
-    PRD 8.3: 至少 3 个真实业务意图回放成功。数据来源：graph_agent/data/graph.json
+    PRD 8.3: 至少 3 个真实业务意图回放成功。
+    测试数据来自最新 mapping.run 输出 (graph_agent/data/graph.json)。
     """
-    from pathlib import Path
-
-    if not Path(DEFAULT_GRAPH).exists():
-        pytest.skip(
-            "graph.json 不存在，请先运行 uv run python -m graph_agent.mapping.run"
-        )
+    ok, reason = is_graph_from_mapping_run(DEFAULT_GRAPH)
+    if not ok:
+        pytest.skip(reason)
     result = await run_playback_acceptance(
         DEFAULT_GRAPH,
         start_url=TARGET_HOME,
@@ -314,3 +313,32 @@ def test_playback_acceptance_result_meets_minimum_logic():
         results=[],
     )
     assert r.meets_minimum is True
+
+
+def test_is_graph_from_mapping_run_missing_file():
+    """is_graph_from_mapping_run 对不存在文件返回 False。"""
+    ok, reason = is_graph_from_mapping_run("/nonexistent/graph.json")
+    assert ok is False
+    assert "not found" in reason or "graph" in reason.lower()
+
+
+def test_is_graph_from_mapping_run_fixture_without_metadata(tmp_path):
+    """is_graph_from_mapping_run 对无 data_source/generated_at 的图返回 False。"""
+    G = _build_three_intent_fixture_graph()
+    graph_path = tmp_path / "graph.json"
+    save_graph(G, graph_path)
+    ok, reason = is_graph_from_mapping_run(graph_path)
+    assert ok is False
+    assert "mapping.run" in reason
+
+
+def test_is_graph_from_mapping_run_fixture_with_metadata(tmp_path):
+    """is_graph_from_mapping_run 对含 data_source 与 generated_at 的图返回 True。"""
+    G = _build_three_intent_fixture_graph()
+    G.graph["data_source"] = "mapping.run"
+    G.graph["generated_at"] = "2026-03-13T00:00:00+00:00"
+    graph_path = tmp_path / "graph.json"
+    save_graph(G, graph_path)
+    ok, reason = is_graph_from_mapping_run(graph_path)
+    assert ok is True
+    assert reason == ""

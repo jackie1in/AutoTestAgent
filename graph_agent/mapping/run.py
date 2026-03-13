@@ -964,6 +964,10 @@ async def run_mapping(
         max(0, c - 1) for c in uv_counts.values()
     )
 
+    # PRD 8.3 / 9.7: 标记图谱来自 mapping.run，供验收测试验证数据来源
+    G.graph["data_source"] = "mapping.run"
+    G.graph["generated_at"] = datetime.now(timezone.utc).isoformat()
+
     await _refresh_business_templates(G)
     save_graph(G, output_path)
     snapshot_path = _write_acceptance_snapshot(

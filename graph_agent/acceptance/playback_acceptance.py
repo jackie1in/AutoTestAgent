@@ -74,6 +74,32 @@ THE_INTERNET_CREDENTIALS = {
 }
 
 
+def is_graph_from_mapping_run(graph_path: str | Path) -> tuple[bool, str]:
+    """PRD 8.3 / 9.7: 验证图谱是否来自 mapping.run 输出。
+
+    Returns:
+        (True, "") 若图谱 metadata 含 data_source=mapping.run 且 generated_at 存在；
+        (False, reason) 否则。
+    """
+    path_obj = Path(graph_path)
+    if not path_obj.exists():
+        return False, f"graph not found: {graph_path}"
+    graph = load_graph(path_obj)
+    ds = graph.graph.get("data_source")
+    ga = graph.graph.get("generated_at")
+    if ds != "mapping.run":
+        return False, (
+            f"graph metadata data_source={ds!r}, expected 'mapping.run'. "
+            "请先运行: uv run python -m graph_agent.mapping.run"
+        )
+    if not ga:
+        return False, (
+            "graph metadata missing generated_at. "
+            "请先运行: uv run python -m graph_agent.mapping.run"
+        )
+    return True, ""
+
+
 def _has_iframe_or_tab(edges: list[Any]) -> bool:
     """检查路径是否包含 iframe 或 tab 动作。"""
     for e in edges:

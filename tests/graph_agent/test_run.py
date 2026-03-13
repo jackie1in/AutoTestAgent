@@ -1046,6 +1046,8 @@ async def test_run_mapping_produces_graph_with_required_metadata(tmp_path: Path)
 
     assert output_path.exists()
     assert G.graph["start_url"] == "https://the-internet.herokuapp.com/"
+    assert G.graph.get("data_source") == "mapping.run"
+    assert "generated_at" in G.graph
     assert "visited_urls" in G.graph
     assert "https://the-internet.herokuapp.com/" in G.graph["visited_urls"]
     assert "https://the-internet.herokuapp.com/login" in G.graph["visited_urls"]
