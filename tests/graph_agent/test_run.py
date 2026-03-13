@@ -821,3 +821,200 @@ def test_write_acceptance_snapshot_creates_file(tmp_path: Path):
     raw = snapshot_path.read_text(encoding="utf-8")
     assert '"target_url": "https://example.com"' in raw
     assert '"has_previous": false' in raw
+
+
+# --- Task 6: 重新录制真实图谱 ---
+
+
+def _make_mock_history_for_mapping(
+    actions: list[dict],
+    thoughts: list[dict],
+    urls: list[str],
+    final_result: str = "",
+) -> object:
+    """Create mock history for run_mapping (Agent.run return value)."""
+
+    class MockHistory:
+        def model_actions(self):
+            return actions
+
+        def model_thoughts(self):
+            return thoughts
+
+        def urls(self):
+            return urls
+
+        def final_result(self):
+            return final_result
+
+    return MockHistory()
+
+
+@pytest.mark.asyncio
+async def test_run_mapping_produces_graph_with_required_metadata(tmp_path: Path):
+    """Task 6: run_mapping produces graph with visited_urls, start_url, acceptance_snapshot."""
+    inventory_path = tmp_path / "element_inventory.json"
+    inventory_path.write_text(
+        '{"elements":[{"selector":"#username","type":"input"},{"selector":"#password","type":"input"},'
+        '{"selector":"button[type=submit]","type":"button"}],'
+        '"metadata":{"page_count":1,"aggregated_element_count":3}}',
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "graph.json"
+
+    mock_history = _make_mock_history_for_mapping(
+        actions=[
+            {"click": {"element": "a"}, "interacted_element": {"attributes": {"href": "/login"}}},
+            {"input_text": {"text": "user"}, "interacted_element": {"attributes": {"id": "username"}}},
+            {"input_text": {"text": "pass"}, "interacted_element": {"attributes": {"id": "password"}}},
+            {"click": {"element": "button"}, "interacted_element": {"attributes": {"type": "submit"}}},
+        ],
+        thoughts=[
+            {"next_goal": "Go to login"},
+            {"next_goal": "Fill username"},
+            {"next_goal": "Fill password"},
+            {"next_goal": "Submit"},
+        ],
+        urls=[
+            "https://the-internet.herokuapp.com/",
+            "https://the-internet.herokuapp.com/login",
+            "https://the-internet.herokuapp.com/login",
+            "https://the-internet.herokuapp.com/login",
+            "https://the-internet.herokuapp.com/secure",
+        ],
+    )
+
+    class MockBrowser:
+        async def stop(self):
+            pass
+
+        async def close(self):
+            pass
+
+    class MockAgent:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def run(self, max_steps: int = 30):
+            return mock_history
+
+    def mock_browser(*args, **kwargs):
+        return MockBrowser()
+
+    def _edge(sel, key, action_type):
+        return type("E", (), {
+            "selector": sel,
+            "action": action_type,
+            "intent": Intent(summary=key, raw=key, verb="Click", object=key, key=key),
+            "intent_failure_reason": None,
+            "param_name": "username" if "username" in key else ("password" if "password" in key else None),
+            "action_value": None,
+            "element": None,
+            "constraints": None,
+            "tab_id": "tab-0",
+            "target_tab_id": None,
+            "tab_action": None,
+            "tab": None,
+            "frame_path": [],
+            "context_level_used": None,
+        })()
+
+    edge_models = [
+        _edge('a[href="/login"]', "go_to_login", ActionType.CLICK),
+        _edge("#username", "fill_username", ActionType.FILL),
+        _edge("#password", "fill_password", ActionType.FILL),
+        _edge("button[type=submit]", "submit_login", ActionType.CLICK),
+    ]
+    # run_mapping calls parse_browser_use_step in print loop (4x) + _build_graph (4x) = 8x
+    edge_models = edge_models * 2
+
+    with (
+        patch("browser_use.Agent", MockAgent),
+        patch("browser_use.Browser", mock_browser),
+        patch(
+            "graph_agent.mapping.run.parse_browser_use_step",
+            new_callable=AsyncMock,
+            side_effect=edge_models,
+        ),
+        patch(
+            "graph_agent.mapping.run.generate_business_templates",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+    ):
+        from graph_agent.mapping.run import run_mapping
+
+        G = await run_mapping(
+            url="https://the-internet.herokuapp.com/",
+            output_path=str(output_path),
+            inventory_path=inventory_path,
+        )
+
+    assert output_path.exists()
+    assert G.graph["start_url"] == "https://the-internet.herokuapp.com/"
+    assert "visited_urls" in G.graph
+    assert "https://the-internet.herokuapp.com/" in G.graph["visited_urls"]
+    assert "https://the-internet.herokuapp.com/login" in G.graph["visited_urls"]
+    assert "https://the-internet.herokuapp.com/secure" in G.graph["visited_urls"]
+
+    snapshot_path = tmp_path / "acceptance_snapshot.json"
+    assert snapshot_path.exists()
+
+    loaded = load_graph(output_path)
+    assert loaded.number_of_nodes() >= 2
+    assert loaded.graph["start_url"] == "https://the-internet.herokuapp.com/"
+
+
+def test_mapping_output_graph_has_structure_for_playback(tmp_path: Path):
+    """Task 6: Graph from mapping has structure required for playback (selector, intent, url)."""
+    G: nx.MultiDiGraph = nx.MultiDiGraph()
+    G.add_node("state-0", label="home", url="https://the-internet.herokuapp.com/")
+    G.add_node("state-1", label="login", url="https://the-internet.herokuapp.com/login")
+    G.add_node("state-2", label="secure", url="https://the-internet.herokuapp.com/secure")
+    G.add_edge(
+        "state-0",
+        "state-1",
+        key="step-0",
+        selector='a[href="/login"]',
+        action=ActionType.CLICK,
+        intent=Intent(
+            summary="Go to login",
+            raw="go login",
+            verb="Click",
+            object="Login link",
+            key="go_to_login",
+        ),
+    )
+    G.add_edge(
+        "state-1",
+        "state-2",
+        key="step-1",
+        selector="button[type=submit]",
+        action=ActionType.CLICK,
+        intent=Intent(
+            summary="Submit login",
+            raw="submit",
+            verb="Submit",
+            object="Login form",
+            key="submit_login",
+        ),
+    )
+    G.graph["start_url"] = "https://the-internet.herokuapp.com/"
+    G.graph["visited_urls"] = [
+        "https://the-internet.herokuapp.com/",
+        "https://the-internet.herokuapp.com/login",
+        "https://the-internet.herokuapp.com/secure",
+    ]
+
+    graph_path = tmp_path / "graph.json"
+    save_graph(G, graph_path)
+    loaded = load_graph(graph_path)
+
+    assert loaded.number_of_edges() >= 2
+    for _u, _v, data in loaded.edges(data=True):
+        assert "selector" in data
+        assert data["selector"]
+        assert "action" in data
+    node_urls = {n.get("url") for _, n in loaded.nodes(data=True) if n.get("url")}
+    assert "https://the-internet.herokuapp.com/" in node_urls
+    assert "https://the-internet.herokuapp.com/secure" in node_urls
