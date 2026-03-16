@@ -117,6 +117,8 @@ def _graph_to_json_dict(G):
             "step_index": data.get("step_index"),
             "source": str(u),
             "target": str(v),
+            "source_url": data.get("source_url"),
+            "target_url": data.get("target_url"),
             "selector": data.get("selector", ""),
             "action": data.get("action", ""),
             "intent": intent_dict,

@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Callable, Awaitable
 from time import monotonic
 from typing import Any
+from urllib.parse import urlparse
 
 from playwright.async_api import expect, async_playwright
 from graph_agent.models import (
@@ -26,10 +27,33 @@ PLAYBACK_RETRY_COUNT = 2
 PLAYBACK_RETRY_DELAY_S = 0.3
 
 
+_LOGIN_URL_TOKENS: frozenset[str] = frozenset(
+    (
+        "login",
+        "signin",
+        "sign-in",
+        "sign_in",
+        "/sso",
+        "/oauth/authorize",
+        "/oauth2/authorize",
+    )
+)
+
+
 def _is_login_like_url(url: str) -> bool:
-    """Best-effort login page detection for early auth failure guard."""
+    """Best-effort login page detection for enhanced auth failure diagnostics."""
     lowered = url.lower()
-    return "login" in lowered or "signin" in lowered or "sign-in" in lowered
+    return any(token in lowered for token in _LOGIN_URL_TOKENS)
+
+
+def _urls_same_page(a: str, b: str) -> bool:
+    """Compare two URLs ignoring fragment and trivial query differences."""
+    pa, pb = urlparse(a), urlparse(b)
+    return (
+        pa.scheme == pb.scheme
+        and pa.netloc == pb.netloc
+        and pa.path.rstrip("/") == pb.path.rstrip("/")
+    )
 
 
 def _extract_login_error_message(payload_text: str) -> str | None:
@@ -113,8 +137,25 @@ def _remove_listener(page: Any, event: str, handler: Callable[[Any], None]) -> N
         page.remove_listener(event, handler)
 
 
+def _is_closed_context_error(exc: BaseException) -> bool:
+    """Detect Playwright 'page/context/browser has been closed' errors.
+
+    Also walks the exception chain (``__cause__``) so that wrapped errors
+    (e.g. ``ValueError`` from ``_resolve_playback_context``) are recognised.
+    """
+    cur: BaseException | None = exc
+    while cur is not None:
+        msg = str(cur).lower()
+        if "has been closed" in msg or "target closed" in msg:
+            return True
+        cur = cur.__cause__
+    return False
+
+
 def _is_transient_error(exc: BaseException) -> bool:
     """Detect transient failures (async load, timing) that may succeed on retry."""
+    if _is_closed_context_error(exc):
+        return False
     msg = str(exc).lower()
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
         return True
@@ -222,6 +263,51 @@ def _element_selector_candidates(edge: GraphEdge) -> list[str]:
         candidates.append(primary)
 
     return candidates if candidates else [primary] if primary else []
+
+
+async def _ensure_frame_attached(
+    page: Any, frame_path: list[FrameLocatorSnapshot], timeout_ms: int = 10_000
+) -> None:
+    """Wait for iframe element to appear in the DOM **and** for the inner
+    frame document to reach a usable state.
+
+    In SPAs the content-area iframe often keeps the same ``id``/``name`` but
+    its ``src`` is swapped by JS when the user clicks a different menu item.
+    The iframe *element* reappears almost immediately, but the inner document
+    may still be loading.  Without the second wait the subsequent
+    ``frame_locator().locator().click()`` will hit a detached frame and
+    throw ``Target page, context or browser has been closed``.
+    """
+    if not frame_path or not hasattr(page, "wait_for_selector"):
+        return
+
+    matched_sel: str | None = None
+    for frame in frame_path:
+        candidates = _frame_selector_candidates(frame, 1)
+        for sel in candidates:
+            try:
+                await page.wait_for_selector(
+                    sel, state="attached", timeout=timeout_ms
+                )
+                matched_sel = sel
+                break
+            except Exception:
+                continue
+        if matched_sel:
+            break
+
+    if matched_sel is None:
+        return
+
+    # After the iframe element is attached, wait for its inner frame to be
+    # navigated (domcontentloaded).  frame_locator() is lazy so we must
+    # resolve the actual Frame and call wait_for_load_state on it.
+    try:
+        fl = page.frame_locator(matched_sel)
+        inner_locator = fl.locator(":root")
+        await inner_locator.wait_for(state="attached", timeout=min(timeout_ms, 10_000))
+    except Exception:
+        pass
 
 
 def _locator_in_context(
@@ -416,6 +502,7 @@ async def run_playback(
             try:
                 page = await browser.new_page()
                 page.set_default_timeout(timeout_ms)
+                browser_context = page.context
                 pages_by_tab_id: dict[str, Any] = {"tab-0": page}
                 opener_by_tab_id: dict[str, str] = {}
                 fallback_tab_by_closed_tab_id: dict[str, str] = {}
@@ -434,15 +521,12 @@ async def run_playback(
 
                 actual_url = page.url
 
-                started_on_login_url = _is_login_like_url(start_url)
                 saw_auth_credentials = False
-                login_guard_satisfied = not started_on_login_url
+                nav_guard_passed = False
                 login_error_message: str | None = None
 
                 async def _capture_login_response(response: Any) -> None:
                     nonlocal login_error_message
-                    if not started_on_login_url:
-                        return
                     url = str(getattr(response, "url", "") or "").lower()
                     if "/project/login" not in url:
                         return
@@ -615,6 +699,11 @@ async def run_playback(
                                         await res
                                 continue
 
+                            if edge.frame_path:
+                                await _ensure_frame_attached(
+                                    page_for_edge, edge.frame_path, timeout_ms
+                                )
+
                             if action == ActionType.FILL:
                                 value = ""
 
@@ -659,7 +748,28 @@ async def run_playback(
                                 } or intent_key.startswith("auth.fill"):
                                     saw_auth_credentials = True
 
+                            elif action == ActionType.SELECT:
+                                value = ""
+                                if edge.param_name and edge.param_name in test_data:
+                                    value = str(test_data[edge.param_name])
+                                elif edge.action_value is not None:
+                                    value = str(edge.action_value)
+                                else:
+                                    value = ""
+
+                                async def _do_select(loc: Any) -> None:
+                                    await loc.select_option(value)
+
+                                await _retry_action(
+                                    lambda: _try_action_with_selector_fallback(
+                                        page_for_edge, edge, _do_select
+                                    )
+                                )
+                                actual_url = page_for_edge.url
+                                last_action_page = page_for_edge
+
                             elif action == ActionType.CLICK:
+                                url_before_click = page_for_edge.url
 
                                 async def _do_click(loc: Any) -> None:
                                     if wait_for_network:
@@ -676,29 +786,122 @@ async def run_playback(
                                         page_for_edge, edge, _do_click
                                     )
                                 )
-                                actual_url = page_for_edge.url
-                                last_action_page = page_for_edge
+
+                                # --- Post-click recovery & navigation assertion ---
+
+                                # 1. Tab closure recovery: the click may have closed
+                                #    the current tab (common in SSO / OAuth flows).
+                                if getattr(
+                                    page_for_edge, "is_closed", lambda: False
+                                )():
+                                    open_pages = [
+                                        pg
+                                        for pg in browser_context.pages
+                                        if not getattr(
+                                            pg, "is_closed", lambda: False
+                                        )()
+                                    ]
+                                    if open_pages:
+                                        pages_by_tab_id[edge.tab_id] = open_pages[0]
+                                        page_for_edge = open_pages[0]
+
+                                # 2. General redirect wait: if the click triggered a
+                                #    navigation, wait for the new page's DOM **and**
+                                #    network to settle.  SPAs often fire
+                                #    DOMContentLoaded long before the JS framework
+                                #    finishes mounting components + event handlers,
+                                #    so we use "networkidle" first (with a short
+                                #    timeout to avoid hangs on polling/websocket
+                                #    apps) then fall back to "domcontentloaded".
+                                url_after_click = page_for_edge.url
                                 if (
-                                    not login_guard_satisfied
-                                    and saw_auth_credentials
-                                    and _is_login_like_url(actual_url)
+                                    url_after_click
+                                    and url_before_click
+                                    and url_after_click != url_before_click
+                                    and hasattr(page_for_edge, "wait_for_load_state")
                                 ):
-                                    guard_error = (
-                                        "Login flow did not leave login page after credential submit/click; "
-                                        "authentication likely failed (credentials or selector drift)."
-                                    )
-                                    if not login_error_message:
+                                    try:
+                                        await page_for_edge.wait_for_load_state(
+                                            "networkidle",
+                                            timeout=min(timeout_ms, 15_000),
+                                        )
+                                    except Exception:
                                         try:
-                                            body_text = await page_for_edge.locator(
-                                                "body"
-                                            ).inner_text()
-                                            login_error_message = _extract_login_error_message_from_page_text(
-                                                body_text
+                                            await page_for_edge.wait_for_load_state(
+                                                "domcontentloaded",
+                                                timeout=min(timeout_ms, 10_000),
                                             )
                                         except Exception:
-                                            login_error_message = None
-                                    if login_error_message:
-                                        guard_error = f"{guard_error} Server says: {login_error_message}."
+                                            pass
+
+                                actual_url = page_for_edge.url
+                                last_action_page = page_for_edge
+
+                                # 3. General navigation assertion: the recording
+                                #    captured expected source/target URLs.  If the
+                                #    click was supposed to change the page but didn't,
+                                #    detect the failure early instead of letting
+                                #    downstream selectors time out one by one.
+                                expected_nav = (
+                                    not nav_guard_passed
+                                    and edge.source_url
+                                    and edge.target_url
+                                    and not _urls_same_page(
+                                        edge.source_url, edge.target_url
+                                    )
+                                )
+                                if expected_nav and actual_url and _urls_same_page(
+                                    actual_url, edge.source_url  # type: ignore[arg-type]
+                                ):
+                                    # Brief grace period for client-side JS redirects
+                                    # that fire after DOMContentLoaded.
+                                    await asyncio.sleep(2.0)
+                                    if getattr(
+                                        page_for_edge, "is_closed", lambda: False
+                                    )():
+                                        open_pages = [
+                                            pg
+                                            for pg in browser_context.pages
+                                            if not getattr(
+                                                pg, "is_closed", lambda: False
+                                            )()
+                                        ]
+                                        if open_pages:
+                                            pages_by_tab_id[edge.tab_id] = (
+                                                open_pages[0]
+                                            )
+                                            page_for_edge = open_pages[0]
+                                    actual_url = page_for_edge.url
+
+                                # Still on the source page after expected navigation?
+                                if expected_nav and actual_url and _urls_same_page(
+                                    actual_url, edge.source_url  # type: ignore[arg-type]
+                                ):
+                                    is_login = _is_login_like_url(actual_url)
+                                    if is_login and saw_auth_credentials:
+                                        guard_error = (
+                                            "Login flow did not leave login page after "
+                                            "credential submit/click; authentication "
+                                            "likely failed (credentials or selector drift)."
+                                        )
+                                        if not login_error_message:
+                                            try:
+                                                body_text = await page_for_edge.locator(
+                                                    "body"
+                                                ).inner_text()
+                                                login_error_message = _extract_login_error_message_from_page_text(
+                                                    body_text
+                                                )
+                                            except Exception:
+                                                login_error_message = None
+                                        if login_error_message:
+                                            guard_error = f"{guard_error} Server says: {login_error_message}."
+                                    else:
+                                        guard_error = (
+                                            f"Click was expected to navigate from "
+                                            f"{edge.source_url} to {edge.target_url} "
+                                            f"but page stayed on {actual_url}."
+                                        )
                                     log_entry["success"] = False
                                     log_entry["error"] = guard_error
                                     if log_callback:
@@ -710,8 +913,55 @@ async def run_playback(
                                         "actual_url": actual_url,
                                         "error": guard_error,
                                     }
-                                if saw_auth_credentials:
-                                    login_guard_satisfied = True
+
+                                # Navigation succeeded — skip future guard checks
+                                # for this flow to avoid false positives on subsequent
+                                # same-page clicks.
+                                if expected_nav:
+                                    nav_guard_passed = True
+
+                                # 4. Lookahead assertion: if this click has no
+                                #    frame_path but the NEXT step needs an iframe,
+                                #    verify the iframe appeared.  A silent
+                                #    no-op click (e.g. SPA not ready) would
+                                #    leave the page without the iframe, causing
+                                #    downstream failures.
+                                if (
+                                    not edge.frame_path
+                                    and i + 1 < len(ordered_edges)
+                                ):
+                                    next_edge = ordered_edges[i + 1]
+                                    if next_edge.frame_path:
+                                        try:
+                                            await _ensure_frame_attached(
+                                                page_for_edge,
+                                                next_edge.frame_path,
+                                                timeout_ms=min(
+                                                    timeout_ms, 15_000
+                                                ),
+                                            )
+                                        except Exception:
+                                            lookahead_error = (
+                                                f"Click on '{edge.selector}' "
+                                                f"completed but the expected "
+                                                f"iframe for the next step did "
+                                                f"not appear; the click likely "
+                                                f"had no effect (SPA not ready "
+                                                f"or wrong element)."
+                                            )
+                                            log_entry["success"] = False
+                                            log_entry["error"] = lookahead_error
+                                            if log_callback:
+                                                res = log_callback(log_entry)
+                                                if res and hasattr(
+                                                    res, "__await__"
+                                                ):
+                                                    await res
+                                            return {
+                                                "success": False,
+                                                "actual_url": actual_url,
+                                                "error": lookahead_error,
+                                            }
 
                             else:
                                 # Unknown action, log warning but continue? Or fail?
@@ -727,6 +977,119 @@ async def run_playback(
                                     await res
 
                         except Exception as step_error:  # noqa: BLE001
+                            # Closed-context recovery: when Playwright reports
+                            # the page/context/browser as closed (common after
+                            # SPA navigations that replace the page object),
+                            # try to recover to a surviving open page and
+                            # replay the failed step once more.
+                            if _is_closed_context_error(step_error):
+                                open_pages = [
+                                    p
+                                    for p in browser_context.pages
+                                    if not getattr(
+                                        p, "is_closed", lambda: False
+                                    )()
+                                ]
+                                if open_pages:
+                                    recovered = open_pages[0]
+                                    pages_by_tab_id[edge.tab_id] = recovered
+                                    page_for_edge = recovered
+                                    try:
+                                        if hasattr(recovered, "wait_for_load_state"):
+                                            await recovered.wait_for_load_state(
+                                                "domcontentloaded",
+                                                timeout=min(timeout_ms, 15_000),
+                                            )
+                                        if edge.frame_path:
+                                            await _ensure_frame_attached(
+                                                recovered,
+                                                edge.frame_path,
+                                                timeout_ms,
+                                            )
+                                        if action == ActionType.FILL:
+                                            value = ""
+                                            if (
+                                                edge.param_name
+                                                and edge.param_name in test_data
+                                            ):
+                                                value = str(
+                                                    test_data[edge.param_name]
+                                                )
+                                            elif edge.action_value is not None:
+                                                value = str(edge.action_value)
+                                            elif edge.constraints:
+                                                value = (
+                                                    _generate_value_from_constraints(
+                                                        edge.constraints
+                                                    )
+                                                )
+                                            else:
+                                                value = "test_value"
+
+                                            async def _do_fill_r(
+                                                loc: Any,
+                                            ) -> None:
+                                                await loc.fill(value)
+
+                                            await _retry_action(
+                                                lambda: _try_action_with_selector_fallback(
+                                                    page_for_edge,
+                                                    edge,
+                                                    _do_fill_r,
+                                                )
+                                            )
+                                        elif action == ActionType.SELECT:
+                                            value = ""
+                                            if (
+                                                edge.param_name
+                                                and edge.param_name in test_data
+                                            ):
+                                                value = str(
+                                                    test_data[edge.param_name]
+                                                )
+                                            elif edge.action_value is not None:
+                                                value = str(edge.action_value)
+                                            else:
+                                                value = ""
+
+                                            async def _do_select_r(
+                                                loc: Any,
+                                            ) -> None:
+                                                await loc.select_option(value)
+
+                                            await _retry_action(
+                                                lambda: _try_action_with_selector_fallback(
+                                                    page_for_edge,
+                                                    edge,
+                                                    _do_select_r,
+                                                )
+                                            )
+                                        elif action == ActionType.CLICK:
+                                            async def _do_click_r(
+                                                loc: Any,
+                                            ) -> None:
+                                                await loc.click()
+
+                                            await _retry_action(
+                                                lambda: _try_action_with_selector_fallback(
+                                                    page_for_edge,
+                                                    edge,
+                                                    _do_click_r,
+                                                )
+                                            )
+                                        actual_url = page_for_edge.url
+                                        last_action_page = page_for_edge
+                                        log_entry["success"] = True
+                                        if log_callback:
+                                            res = log_callback(log_entry)
+                                            if res and hasattr(
+                                                res, "__await__"
+                                            ):
+                                                await res
+                                        continue
+                                    except Exception:
+                                        pass
+
                             formatted_error = _format_replay_error(
                                 step_error, edge, edge.tab_id
                             )
@@ -736,9 +1099,12 @@ async def run_playback(
                                 res = log_callback(log_entry)
                                 if res and hasattr(res, "__await__"):
                                     await res
-                            actual_url = pages_by_tab_id.get(
-                                edge.tab_id, page_for_edge
-                            ).url
+                            try:
+                                actual_url = pages_by_tab_id.get(
+                                    edge.tab_id, page_for_edge
+                                ).url
+                            except Exception:
+                                actual_url = actual_url or ""
                             return {
                                 "success": False,
                                 "actual_url": actual_url,

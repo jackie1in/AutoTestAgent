@@ -28,7 +28,7 @@ ACTION_MAPPING = {
     "input": ActionType.FILL,
     "navigate": ActionType.NAVIGATE,
     "go_back": ActionType.NAVIGATE,
-    "select_dropdown": ActionType.FILL,
+    "select_dropdown": ActionType.SELECT,
     "send_keys": ActionType.FILL,
     "evaluate": ActionType.UNKNOWN,
     "scroll": ActionType.UNKNOWN,
@@ -284,6 +284,8 @@ def _action_intent_conflict(
     summary = (intent.summary or "").lower()
     sel = (selector or "").lower()
     text = f"{key} {summary}"
+    if action == ActionType.SELECT:
+        return False
     if action == ActionType.FILL:
         # If selector strongly indicates a fillable control, be tolerant to wording.
         if any(
@@ -682,7 +684,7 @@ async def _extract_action_value(
     action: Mapping[str, Any], play_action: ActionType
 ) -> str | None:
     """Extract raw recorded value from browser-use action payload."""
-    if play_action != ActionType.FILL:
+    if play_action not in (ActionType.FILL, ActionType.SELECT):
         return None
 
     for action_key in ("input_text", "input", "send_keys", "select_dropdown"):
@@ -755,7 +757,7 @@ async def parse_browser_use_step(
         source_url=source_url,
         target_url=target_url,
     )
-    is_fill = play_action == ActionType.FILL
+    is_fill = play_action in (ActionType.FILL, ActionType.SELECT)
     param_name = await _infer_param_name(element, is_fill)
     action_value = await _extract_action_value(action, play_action)
     intent, intent_failure_reason, context_level_used = await infer_intent_progressive(

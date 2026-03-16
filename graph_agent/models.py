@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, model_validator
 class ActionType(str, Enum):
     CLICK = "click"
     FILL = "fill"
+    SELECT = "select"
     NAVIGATE = "navigate"
     UNKNOWN = "unknown"
 
@@ -106,6 +107,8 @@ class GraphEdge(BaseModel):
     step_index: int | None = None
     source: str
     target: str
+    source_url: str | None = None
+    target_url: str | None = None
     selector: str
     action: ActionType
     tab_id: str = "tab-0"

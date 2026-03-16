@@ -205,6 +205,8 @@ def _edge_to_model(u: str, v: str, data: dict) -> GraphEdge:
         step_index=data.get("step_index"),
         source=u,
         target=v,
+        source_url=data.get("source_url"),
+        target_url=data.get("target_url"),
         selector=data.get("selector", ""),
         action=data.get("action", ActionType.UNKNOWN),
         tab_id=data.get("tab_id", "tab-0"),
@@ -577,6 +579,26 @@ def _get_path_from_atomic_intent(user_query: str, graph: nx.DiGraph) -> list[Gra
     return []
 
 
+def _prepend_entry_path(
+    graph: nx.Graph, expanded: list[GraphEdge]
+) -> list[GraphEdge]:
+    """If *expanded* doesn't start at a graph entry node, prepend a connecting path."""
+    if not expanded:
+        return expanded
+    first_source = expanded[0].source
+    if graph.in_degree(first_source) == 0:
+        return expanded
+    entries = [n for n in graph if graph.in_degree(n) == 0]
+    seen_edge_ids = {e.edge_id for e in expanded if e.edge_id}
+    for entry in entries:
+        prefix = _get_connecting_path(graph, entry, first_source)
+        if prefix:
+            unique_prefix = [e for e in prefix if not e.edge_id or e.edge_id not in seen_edge_ids]
+            if unique_prefix:
+                return unique_prefix + expanded
+    return expanded
+
+
 def get_path_from_query(
     user_query: str,
     graph: nx.DiGraph,
@@ -600,7 +622,7 @@ def get_path_from_query(
                 templates_by_key,
             )
             if expanded:
-                return expanded
+                return _prepend_entry_path(graph, expanded)
     return _get_path_from_atomic_intent(user_query, graph)
 
 

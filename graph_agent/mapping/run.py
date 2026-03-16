@@ -111,15 +111,69 @@ def _extract_action_key(action: dict | object) -> str:
 def _collect_history_snapshots(
     history: Any,
 ) -> tuple[list[dict[str, Any]], list[dict | object], list[str]]:
-    """Collect action/thought/url snapshots from history as plain lists."""
+    """Collect action/thought/url snapshots from history as plain lists.
+
+    ``model_actions()`` *flattens* multi-action steps (one history item can
+    contain several actions), while ``model_thoughts()`` and ``urls()``
+    return one entry per history item.  We must expand thoughts/urls to
+    match the flattened action list so that downstream code can index them
+    with the same ``i``.
+    """
+    if not history:
+        return [], [], []
+
+    # When the history object exposes the internal step list (AgentHistoryList),
+    # iterate step-by-step so that thoughts/urls are duplicated for
+    # multi-action steps, keeping indices aligned with the flat action list.
+    history_items = getattr(history, "history", None)
+    if history_items is not None:
+        actions: list[dict[str, Any]] = []
+        thoughts: list[dict | object] = []
+        urls: list[str] = []
+
+        try:
+            raw_urls = list(history.urls())
+        except Exception:
+            raw_urls = []
+
+        for step_idx, h in enumerate(history_items):
+            model_output = getattr(h, "model_output", None)
+            if not model_output:
+                continue
+            thought = model_output.current_state
+            url = raw_urls[step_idx] if step_idx < len(raw_urls) else ""
+
+            state = getattr(h, "state", None)
+            ie_list = (
+                getattr(state, "interacted_element", None)
+                if state
+                else None
+            ) or [None] * len(model_output.action)
+            for action_obj, ie in zip(model_output.action, ie_list):
+                if hasattr(action_obj, "model_dump"):
+                    output = action_obj.model_dump(
+                        exclude_none=True, mode="json"
+                    )
+                else:
+                    output = _action_to_dict(action_obj)
+                output["interacted_element"] = ie
+                actions.append(output)
+                thoughts.append(thought)
+                urls.append(url if url is not None else "")
+
+        return actions, thoughts, urls
+
+    # Fallback for legacy / mock history objects that only expose the
+    # high-level methods.  This path has the known multi-action alignment
+    # issue but keeps backward compat with test mocks.
     raw_actions = list(history.model_actions()) if history else []
-    actions = [_action_to_dict(a) for a in raw_actions]
-    thoughts = list(history.model_thoughts()) if history else []
+    actions_fb = [_action_to_dict(a) for a in raw_actions]
+    thoughts_fb = list(history.model_thoughts()) if history else []
     try:
-        urls = list(history.urls()) if history else []
+        urls_fb = list(history.urls()) if history else []
     except Exception:
-        urls = []
-    return actions, thoughts, urls
+        urls_fb = []
+    return actions_fb, thoughts_fb, urls_fb
 
 
 def _runtime_filter_snapshots(
@@ -355,6 +409,12 @@ def _semantic_consistency(action: ActionType, intent: Any, selector: str = "") -
     sel = (selector or "").lower()
     text = f"{key} {summary} {verb} {obj}"
 
+    if action == ActionType.SELECT:
+        return any(
+            k in text
+            for k in ("select", "choose", "pick", "dropdown", "option")
+        )
+
     if action == ActionType.FILL:
         if any(
             token in sel
@@ -527,7 +587,7 @@ async def _build_graph_from_history(
         if edge_model.action == ActionType.NAVIGATE:
             continue
         if (
-            edge_model.action in (ActionType.CLICK, ActionType.FILL)
+            edge_model.action in (ActionType.CLICK, ActionType.FILL, ActionType.SELECT)
             and edge_model.selector
         ):
             # Add edge regardless of inventory (dynamic discovery)
@@ -538,6 +598,8 @@ async def _build_graph_from_history(
                 key=edge_id,
                 edge_id=edge_id,
                 step_index=i,
+                source_url=from_url,
+                target_url=to_url,
                 selector=edge_model.selector,
                 action=edge_model.action,
                 tab_id=getattr(edge_model, "tab_id", "tab-0"),

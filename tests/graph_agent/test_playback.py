@@ -18,6 +18,7 @@ from graph_agent.playback.engine import (
     _extract_login_error_message,
     _extract_login_error_message_from_page_text,
     _format_replay_error,
+    _is_closed_context_error,
     _is_transient_error,
     run_playback,
 )
@@ -88,6 +89,9 @@ class _FakeLocator:
     async def fill(self, value: str) -> None:
         self.page.events.append(("fill", self.selector, value))
 
+    async def wait_for(self, *, state: str = "attached", timeout: int = 30_000) -> None:
+        self.page.events.append(("wait-locator", self.selector, state))
+
 
 class _FakeFrameContext:
     def __init__(self, page: "_FakePage") -> None:
@@ -101,6 +105,17 @@ class _FakeFrameContext:
 
     def locator(self, selector: str) -> _FakeLocator:
         return _FakeLocator(self.page, selector)
+
+
+class _FakeBrowserContext:
+    def __init__(self, page: "_FakePage") -> None:
+        self._page = page
+
+    @property
+    def pages(self) -> list["_FakePage"]:
+        if self._page.closed:
+            return []
+        return [self._page]
 
 
 class _FakePage:
@@ -117,6 +132,7 @@ class _FakePage:
             "requestfinished": [],
             "requestfailed": [],
         }
+        self.context = _FakeBrowserContext(self)
 
     def set_default_timeout(self, timeout_ms: int) -> None:
         self.events.append(("set-timeout", str(timeout_ms)))
@@ -151,6 +167,19 @@ class _FakePage:
 
     def expect_popup(self) -> "_FakeExpectPopup":
         return _FakeExpectPopup(self)
+
+    async def wait_for_selector(
+        self, selector: str, *, state: str = "attached", timeout: int = 30_000
+    ) -> None:
+        self.events.append(("wait-selector", selector, state))
+
+    async def wait_for_load_state(
+        self, state: str = "load", timeout: int = 30_000
+    ) -> None:
+        self.events.append(("wait-load", state))
+
+    def is_closed(self) -> bool:
+        return self.closed
 
     async def close(self) -> None:
         self.closed = True
@@ -399,6 +428,9 @@ async def test_playback_click_uses_nested_frame_path(monkeypatch: pytest.MonkeyP
     assert page.events == [
         ("set-timeout", str(60_000)),
         ("goto", "https://a.com/start"),
+        ("wait-selector", "iframe[name='outer']", "attached"),
+        ("frame", "iframe[name='outer']"),
+        ("wait-locator", ":root", "attached"),
         ("frame", "iframe[name='outer']"),
         ("frame", "iframe[name='inner']"),
         ("click", "#submit"),
@@ -696,9 +728,14 @@ async def test_playback_tab_and_nested_iframe_routes_followup_click_to_popup_pag
     assert ("click", "#confirm") not in page.events
     assert popup.events == [
         ("set-timeout", str(60_000)),
+        ("wait-load", "domcontentloaded"),
+        ("wait-selector", "iframe[name='popup-outer']", "attached"),
+        ("frame", "iframe[name='popup-outer']"),
+        ("wait-locator", ":root", "attached"),
         ("frame", "iframe[name='popup-outer']"),
         ("frame", "iframe[name='popup-inner']"),
         ("click", "#confirm"),
+        ("wait-load", "networkidle"),
     ]
     assert result["actual_url"] == "https://a.com/popup/frame-confirmed"
 
@@ -971,6 +1008,8 @@ async def test_playback_fails_fast_when_login_submit_does_not_leave_login_page(
         GraphEdge(
             source="login-pass",
             target="secure",
+            source_url="https://example.com/login",
+            target_url="https://example.com/secure",
             selector="#submit",
             action=ActionType.CLICK,
             intent=_make_intent("Submit login", key="auth.submit.login"),
@@ -1164,6 +1203,19 @@ def test_is_transient_error_non_transient():
     assert _is_transient_error(RuntimeError("missing frame: iframe#x")) is False
 
 
+def test_is_transient_error_excludes_closed_context():
+    """Closed-context errors must NOT be transient — they need recovery, not retry."""
+    assert (
+        _is_transient_error(
+            RuntimeError(
+                "Locator.click: Target page, context or browser has been closed"
+            )
+        )
+        is False
+    )
+    assert _is_transient_error(RuntimeError("target closed")) is False
+
+
 def test_format_replay_error_async_load_prefix():
     """Timeout/async errors should be prefixed with async_load."""
     err = RuntimeError("Locator timed out: waiting for selector '#btn'")
@@ -1326,6 +1378,257 @@ async def test_playback_frame_selector_fallback_uses_css_when_primary_fails(
     assert result["success"] is True
     assert ("frame", "iframe#frame-outer") in page.events
     assert ("frame", "iframe[name='outer']") not in page.events
+
+
+def test_is_closed_context_error_matches():
+    """Closed-context errors should be detected."""
+    assert (
+        _is_closed_context_error(
+            RuntimeError("Locator.click: Target page, context or browser has been closed")
+        )
+        is True
+    )
+    assert _is_closed_context_error(RuntimeError("target closed")) is True
+    assert _is_closed_context_error(RuntimeError("something else")) is False
+    assert _is_closed_context_error(ValueError("normal error")) is False
+
+
+class _FakeMultiPageBrowserContext:
+    """Browser context that tracks multiple pages for closed-context recovery tests."""
+
+    def __init__(self, page_list: list["_FakePage"]) -> None:
+        self._page_list = page_list
+
+    @property
+    def pages(self) -> list["_FakePage"]:
+        return [p for p in self._page_list if not p.is_closed()]
+
+
+@pytest.mark.asyncio
+async def test_playback_recovers_from_closed_context_on_click(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When click raises 'has been closed', playback should recover to surviving page and retry."""
+    page = _FakePage()
+    recovery_page = _FakePage()
+    recovery_page.url = "https://a.com/start"
+
+    multi_ctx = _FakeMultiPageBrowserContext([page, recovery_page])
+    page.context = multi_ctx
+
+    async def _stale_click(fake_page: _FakePage) -> None:
+        fake_page.closed = True
+        raise RuntimeError(
+            "Locator.click: Target page, context or browser has been closed"
+        )
+
+    page.click_hooks["#confirm"] = _stale_click
+    _install_fake_playwright(monkeypatch, page)
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#confirm",
+            action=ActionType.CLICK,
+            tab_id="tab-0",
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={},
+        start_url="https://a.com/start",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert ("click", "#confirm") in recovery_page.events
+
+
+@pytest.mark.asyncio
+async def test_playback_recovers_from_closed_context_on_fill(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When fill raises 'has been closed', playback should recover to surviving page and retry."""
+    page = _FakePage()
+    recovery_page = _FakePage()
+    recovery_page.url = "https://a.com/start"
+
+    multi_ctx = _FakeMultiPageBrowserContext([page, recovery_page])
+    page.context = multi_ctx
+
+    class _ClosableLocator(_FakeLocator):
+        async def fill(self, value: str) -> None:
+            self.page.closed = True
+            raise RuntimeError(
+                "Locator.fill: Target page, context or browser has been closed"
+            )
+
+    page.locator = lambda selector: _ClosableLocator(page, selector)
+    _install_fake_playwright(monkeypatch, page)
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#user",
+            action=ActionType.FILL,
+            param_name="username",
+            action_value="alice",
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={"username": "alice"},
+        start_url="https://a.com/start",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert ("fill", "#user", "alice") in recovery_page.events
+
+
+@pytest.mark.asyncio
+async def test_playback_ensure_frame_attached_absorbs_stale_frame(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When iframe frame_locator is stale on first call, _ensure_frame_attached
+    should absorb it so the real action succeeds without hitting recovery."""
+    page = _FakePage()
+    multi_ctx = _FakeMultiPageBrowserContext([page])
+    page.context = multi_ctx
+
+    attempt = [0]
+    original_frame_locator = page.frame_locator
+
+    def _frame_locator_with_stale_first(selector: str) -> _FakeFrameContext:
+        attempt[0] += 1
+        if attempt[0] == 1:
+            raise RuntimeError(
+                "Locator.click: Target page, context or browser has been closed"
+            )
+        return original_frame_locator(selector)
+
+    page.frame_locator = _frame_locator_with_stale_first
+    _install_fake_playwright(monkeypatch, page)
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#menu-item",
+            action=ActionType.CLICK,
+            tab_id="tab-0",
+            frame_path=[
+                FrameLocatorSnapshot(
+                    selector="xpath=/html/body/div/iframe"
+                ),
+            ],
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={},
+        start_url="https://a.com/start",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert ("click", "#menu-item") in page.events
+    assert any(
+        ev[0] == "wait-selector" and "iframe" in ev[1] for ev in page.events
+    )
+
+
+@pytest.mark.asyncio
+async def test_playback_recovers_closed_iframe_context_with_wait(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When click raises 'has been closed' (e.g. iframe navigation during click),
+    recovery should wait for page load + iframe then retry."""
+    page = _FakePage()
+    multi_ctx = _FakeMultiPageBrowserContext([page])
+    page.context = multi_ctx
+
+    click_attempt = [0]
+
+    async def _stale_first_click(fake_page: _FakePage) -> None:
+        click_attempt[0] += 1
+        if click_attempt[0] == 1:
+            raise RuntimeError(
+                "Locator.click: Target page, context or browser has been closed"
+            )
+
+    page.click_hooks["#menu-item"] = _stale_first_click
+    _install_fake_playwright(monkeypatch, page)
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#menu-item",
+            action=ActionType.CLICK,
+            tab_id="tab-0",
+            frame_path=[
+                FrameLocatorSnapshot(
+                    selector="xpath=/html/body/div/iframe"
+                ),
+            ],
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={},
+        start_url="https://a.com/start",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert click_attempt[0] == 2
+    assert ("wait-load", "domcontentloaded") in page.events
+
+
+@pytest.mark.asyncio
+async def test_playback_closed_context_no_recovery_page_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When 'has been closed' and no surviving page, playback should fail gracefully."""
+    page = _FakePage()
+    multi_ctx = _FakeMultiPageBrowserContext([page])
+    page.context = multi_ctx
+
+    async def _stale_click(fake_page: _FakePage) -> None:
+        fake_page.closed = True
+        raise RuntimeError(
+            "Locator.click: Target page, context or browser has been closed"
+        )
+
+    page.click_hooks["#btn"] = _stale_click
+    _install_fake_playwright(monkeypatch, page)
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="b",
+            selector="#btn",
+            action=ActionType.CLICK,
+            tab_id="tab-0",
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={},
+        start_url="https://a.com/start",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is False
+    assert "has been closed" in (result["error"] or "").lower()
 
 
 @pytest.mark.asyncio
