@@ -13,7 +13,10 @@ from graph_agent.mapping.run import (
     _build_mapping_task_with_env_hints,
     _compute_snapshot_delta,
     FILTERED_ACTION_KEYS,
+    _resolve_mapping_channel,
+    _resolve_mapping_headless,
     re_infer_missing_intents,
+    re_infer_with_feedback,
     _resolve_snapshot_path,
     _resolve_target_state,
     _runtime_filter_snapshots,
@@ -105,6 +108,12 @@ def test_collect_playback_diagnostics_includes_path_context(
     assert report["edges"][0]["tab_id"] == "tab-0"
     assert report["edges"][0]["selector"] == 'a[href="/login"]'
     assert report["playback"]["success"] is False
+    assert report["root_cause"] == "selector"
+    assert report["root_cause_detail"] == "selector.unknown"
+    assert report["failed_step_index"] is None
+    assert report["failed_edge_id"] is None
+    assert "failure_output_path" in report
+    assert Path(report["failure_output_path"]).exists()
 
 
 def test_get_path_from_query_prefers_executable_path_with_prerequisites():
@@ -335,6 +344,8 @@ async def test_build_graph_filtered_non_ui_edges_in_metadata():
 
     assert G.graph["filtered_non_ui_edges"] == 2  # read_file, write_file
     assert G.number_of_edges() == 1
+    assert "intent_alignment_warning_count" in G.graph
+    assert "intent_alignment_warning_breakdown" in G.graph
 
 
 @pytest.mark.asyncio
@@ -607,6 +618,59 @@ async def test_re_infer_missing_intents_success(tmp_path: Path):
         assert data["intent"] is not None
         assert data["intent"].summary == "Click submit button"
         assert data["intent_failure_reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_re_infer_with_feedback_updates_targeted_edge(tmp_path: Path):
+    """Playback feedback should target failed edge and pass hint into re-infer."""
+    graph_path = _make_graph_with_missing_intents(tmp_path)
+    failures_path = tmp_path / "playback_failures.json"
+    failures_path.write_text(
+        """
+{
+  "failures": [
+    {
+      "root_cause": "selector",
+      "error": "selector: timeout",
+      "failed_edge_id": "step-1",
+      "edges": [
+        {"edge_id": "step-1", "source": "https://a.com", "target": "https://b.com"}
+      ]
+    }
+  ]
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    expected_intent = Intent(
+        raw="click submit",
+        verb="Click",
+        object="Submit",
+        summary="Click submit button",
+        key="auth.submit.login",
+    )
+
+    with patch(
+        "graph_agent.mapping.run.infer_intent_for_context",
+        new_callable=AsyncMock,
+        return_value=(expected_intent, None),
+    ) as mock_infer:
+        stats = await re_infer_with_feedback(
+            graph_path=graph_path,
+            feedback=failures_path,
+        )
+
+    assert stats["total"] == 1
+    assert stats["succeeded"] == 1
+    kwargs = mock_infer.await_args.kwargs
+    assert kwargs["playback_error_hint"] == "selector: timeout"
+    G = load_graph(graph_path)
+    ab_multi = G.get_edge_data("https://a.com", "https://b.com") or {}
+    ab_data = next(iter(ab_multi.values()))
+    assert ab_data["intent"] is not None
+    bc_multi = G.get_edge_data("https://b.com", "https://c.com") or {}
+    bc_data = next(iter(bc_multi.values()))
+    assert bc_data["intent"] is None
 
 
 @pytest.mark.asyncio
@@ -952,6 +1016,23 @@ def test_semantic_consistency_click_accepts_navigation_intent():
     )
 
 
+def test_semantic_consistency_rich_text_accepts_type_intent():
+    intent = Intent(
+        raw="type content",
+        verb="Type",
+        object="Rich text editor",
+        summary="Type content in the rich text editor",
+        key="elements.iframe.type",
+        confidence=0.9,
+    )
+    assert (
+        _semantic_consistency(
+            ActionType.RICH_TEXT, intent, selector="#tinymce"
+        )
+        is True
+    )
+
+
 def test_semantic_consistency_navigate_accepts_navigation_key():
     intent = Intent(
         raw="open home",
@@ -1002,6 +1083,78 @@ def test_build_mapping_task_with_env_login_hints():
     assert "password=SuperSecretPassword!" in text
 
 
+@pytest.mark.parametrize(
+    "error_text, expected_primary, expected_detail",
+    [
+        ("tab: missing tab", "tab", "tab.missing"),
+        ("iframe: Failed to locate iframe #f1", "iframe", "iframe.not_found"),
+        (
+            "iframe: Target page, context or browser has been closed",
+            "iframe",
+            "iframe.not_attached",
+        ),
+        ("iframe: some other error", "iframe", "iframe.unknown"),
+        (
+            "async_load: Target page, context or browser has been closed",
+            "iframe",
+            "iframe.not_attached",
+        ),
+        ("async_load: Timeout 30000ms exceeded", "async_load", "async_load.timeout"),
+        (
+            "Login flow did not leave login page",
+            "dependency",
+            "dependency.nav_failed",
+        ),
+        (
+            "Click was expected to navigate away",
+            "dependency",
+            "dependency.nav_failed",
+        ),
+        (
+            "iframe for the next step did not appear",
+            "dependency",
+            "dependency.lookahead",
+        ),
+        (
+            "selector: element is not attached to the DOM",
+            "selector",
+            "selector.stale",
+        ),
+        ("selector: waiting for selector '#x'", "selector", "selector.not_found"),
+        ("selector: Timeout 30000ms exceeded", "selector", "selector.timeout"),
+        ("selector: generic error", "selector", "selector.unknown"),
+        (None, "dependency", "dependency.unknown"),
+        ("", "dependency", "dependency.unknown"),
+    ],
+)
+def test_classify_root_cause_detail(error_text, expected_primary, expected_detail):
+    from graph_agent.acceptance.failure_chain import classify_root_cause_detail
+
+    primary, detail = classify_root_cause_detail(error_text)
+    assert primary.value == expected_primary
+    assert detail == expected_detail
+
+
+def test_resolve_mapping_headless_from_env():
+    with patch.dict("os.environ", {}, clear=True):
+        assert _resolve_mapping_headless() is True
+    with patch.dict("os.environ", {"MAPPING_HEADLESS": "true"}, clear=True):
+        assert _resolve_mapping_headless() is True
+    with patch.dict("os.environ", {"MAPPING_HEADLESS": "1"}, clear=True):
+        assert _resolve_mapping_headless() is True
+    with patch.dict("os.environ", {"MAPPING_HEADLESS": "false"}, clear=True):
+        assert _resolve_mapping_headless() is False
+    with patch.dict("os.environ", {"MAPPING_HEADLESS": "0"}, clear=True):
+        assert _resolve_mapping_headless() is False
+
+
+def test_resolve_mapping_channel_from_env():
+    with patch.dict("os.environ", {}, clear=True):
+        assert _resolve_mapping_channel() is None
+    with patch.dict("os.environ", {"MAPPING_CHANNEL": "chrome"}, clear=True):
+        assert _resolve_mapping_channel() == "chrome"
+
+
 def test_task_template_includes_derived_exploration_hint():
     """Task 2: Default task template should encourage exploring derived pages."""
     from graph_agent.mapping.run import DEFAULT_TASK_TEMPLATE
@@ -1010,6 +1163,15 @@ def test_task_template_includes_derived_exploration_hint():
     assert "派生" in task
     assert "继续探索" in task
     assert "菜单" in task or "列表" in task or "详情" in task
+
+
+def test_task_template_mentions_rich_text_editors():
+    from graph_agent.mapping.run import DEFAULT_TASK_TEMPLATE
+
+    task = DEFAULT_TASK_TEMPLATE.format(start_url="https://example.com/")
+    assert "富文本" in task
+    assert "contenteditable" in task
+    assert "input_text" in task
 
 
 @pytest.mark.asyncio
@@ -1261,9 +1423,6 @@ async def test_run_mapping_produces_graph_with_required_metadata(tmp_path: Path)
         _edge("#password", "fill_password", ActionType.FILL),
         _edge("button[type=submit]", "submit_login", ActionType.CLICK),
     ]
-    # run_mapping calls parse_browser_use_step in print loop (4x) + _build_graph (4x) = 8x
-    edge_models = edge_models * 2
-
     with (
         patch("browser_use.Agent", MockAgent),
         patch("browser_use.Browser", mock_browser),
@@ -1290,6 +1449,8 @@ async def test_run_mapping_produces_graph_with_required_metadata(tmp_path: Path)
     assert G.graph["start_url"] == "https://the-internet.herokuapp.com/"
     assert G.graph.get("data_source") == "mapping.run"
     assert "generated_at" in G.graph
+    assert "intent_alignment_warning_count" in G.graph
+    assert "intent_alignment_warning_breakdown" in G.graph
     assert "visited_urls" in G.graph
     assert "https://the-internet.herokuapp.com/" in G.graph["visited_urls"]
     assert "https://the-internet.herokuapp.com/login" in G.graph["visited_urls"]
@@ -1301,6 +1462,7 @@ async def test_run_mapping_produces_graph_with_required_metadata(tmp_path: Path)
     loaded = load_graph(output_path)
     assert loaded.number_of_nodes() >= 2
     assert loaded.graph["start_url"] == "https://the-internet.herokuapp.com/"
+    assert loaded.graph.get("intent_alignment_warning_count", 0) >= 0
 
 
 def test_mapping_output_graph_has_structure_for_playback(tmp_path: Path):

@@ -75,6 +75,17 @@ class _FakeRequest:
         self.resource_type = resource_type
 
 
+class _FakeKeyboard:
+    def __init__(self, page: "_FakePage") -> None:
+        self._page = page
+
+    async def press(self, key: str) -> None:
+        self._page.events.append(("keyboard-press", key))
+
+    async def type(self, text: str) -> None:
+        self._page.events.append(("keyboard-type", text))
+
+
 class _FakeLocator:
     def __init__(self, page: "_FakePage", selector: str) -> None:
         self.page = page
@@ -88,6 +99,9 @@ class _FakeLocator:
 
     async def fill(self, value: str) -> None:
         self.page.events.append(("fill", self.selector, value))
+
+    async def select_option(self, value: str) -> None:
+        self.page.events.append(("select_option", self.selector, value))
 
     async def wait_for(self, *, state: str = "attached", timeout: int = 30_000) -> None:
         self.page.events.append(("wait-locator", self.selector, state))
@@ -133,6 +147,7 @@ class _FakePage:
             "requestfailed": [],
         }
         self.context = _FakeBrowserContext(self)
+        self.keyboard = _FakeKeyboard(self)
 
     def set_default_timeout(self, timeout_ms: int) -> None:
         self.events.append(("set-timeout", str(timeout_ms)))
@@ -1676,3 +1691,64 @@ async def test_playback_popup_waits_for_load_state(monkeypatch: pytest.MonkeyPat
 
     assert result["success"] is True
     assert load_state_called[0] is True
+
+
+@pytest.mark.asyncio
+async def test_playback_rich_text_uses_click_selectall_type(monkeypatch):
+    """RICH_TEXT action should click, Ctrl+A, then keyboard.type."""
+    page = _FakePage()
+    page.url = "https://editor.com/"
+
+    _install_fake_playwright(monkeypatch, page)
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="a",
+            selector="#tinymce",
+            action=ActionType.RICH_TEXT,
+            frame_path=[FrameLocatorSnapshot(selector="#mce_0_ifr")],
+            param_name="editor_content",
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={"editor_content": "Hello <b>World</b>"},
+        start_url="https://editor.com/",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert ("click", "#tinymce") in page.events
+    assert ("keyboard-press", "Control+a") in page.events
+    assert ("keyboard-type", "Hello <b>World</b>") in page.events
+
+
+@pytest.mark.asyncio
+async def test_playback_rich_text_fallback_to_action_value(monkeypatch):
+    """RICH_TEXT should use action_value when test_data has no matching key."""
+    page = _FakePage()
+    page.url = "https://editor.com/"
+
+    _install_fake_playwright(monkeypatch, page)
+
+    edge_list = [
+        GraphEdge(
+            source="a",
+            target="a",
+            selector="#editor",
+            action=ActionType.RICH_TEXT,
+            action_value="Recorded text",
+        ),
+    ]
+
+    result = await run_playback(
+        edge_list,
+        test_data={},
+        start_url="https://editor.com/",
+        wait_for_network=False,
+    )
+
+    assert result["success"] is True
+    assert ("keyboard-type", "Recorded text") in page.events

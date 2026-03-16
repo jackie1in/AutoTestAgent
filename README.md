@@ -62,6 +62,8 @@ LLM_MODEL=google/gemini-2.5-pro-preview
 # MAPPING_URL=https://the-internet.herokuapp.com/login
 # MAPPING_USERNAME=tomsmith
 # MAPPING_PASSWORD=SuperSecretPassword!
+# MAPPING_HEADLESS=false
+# MAPPING_CHANNEL=chrome
 # PLAYWRIGHT_CHANNEL=chrome
 # PLAYWRIGHT_HEADLESS=false
 ```

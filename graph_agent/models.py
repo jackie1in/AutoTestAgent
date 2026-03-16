@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, model_validator
 class ActionType(str, Enum):
     CLICK = "click"
     FILL = "fill"
+    RICH_TEXT = "rich_text"
     SELECT = "select"
     NAVIGATE = "navigate"
     UNKNOWN = "unknown"

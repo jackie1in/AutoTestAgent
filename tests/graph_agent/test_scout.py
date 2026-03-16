@@ -64,6 +64,10 @@ def test_normalize_type_maps_alias_and_infers_from_selector():
         _normalize_type("unknown", "xpath=//button[@id='submit']", "Submit") == "button"
     )
     assert _normalize_type("other", "[name='password']", "Password") == "input"
+    assert _normalize_type("richtext", "#tinymce", "Editor") == "richtext"
+    assert _normalize_type("contenteditable", "#editor", None) == "richtext"
+    assert _normalize_type("other", "#tinymce", "Rich text editor") == "richtext"
+    assert _normalize_type("other", "[contenteditable=true]", None) == "richtext"
 
 
 def test_build_scout_metadata_includes_type_counts():

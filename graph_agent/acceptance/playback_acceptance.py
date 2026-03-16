@@ -8,11 +8,16 @@ PRD 8.3 / 9.7: 基于 mapping.run 产出的新图谱完成真实业务回放。
 
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass, field
+import uuid
+from collections import Counter
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from graph_agent.acceptance.failure_chain import classify_root_cause_detail
 from graph_agent.graph.io import load_graph
 from graph_agent.graph.pathfinding import get_path_from_query
 from graph_agent.playback.engine import run_playback
@@ -28,6 +33,10 @@ class PlaybackResult:
     actual_url: str = ""
     error: str | None = None
     has_iframe_or_tab: bool = False
+    root_cause: str | None = None
+    root_cause_detail: str | None = None
+    failed_step_index: int | None = None
+    failed_edge_id: str | None = None
 
 
 @dataclass
@@ -199,6 +208,7 @@ async def run_playback_acceptance(
                 test_data=data,
                 start_url=str(url),
             )
+            rc_primary, rc_detail = classify_root_cause_detail(result.get("error"))
             pr = PlaybackResult(
                 intent_query=q,
                 success=result["success"],
@@ -206,6 +216,10 @@ async def run_playback_acceptance(
                 actual_url=result.get("actual_url", ""),
                 error=result.get("error"),
                 has_iframe_or_tab=has_iframe_tab,
+                root_cause=rc_primary.value if not result["success"] else None,
+                root_cause_detail=rc_detail if not result["success"] else None,
+                failed_step_index=result.get("failed_step_index"),
+                failed_edge_id=result.get("failed_edge_id"),
             )
             results.append(pr)
             if result["success"]:
@@ -220,10 +234,46 @@ async def run_playback_acceptance(
     finally:
         os.environ.pop("PLAYWRIGHT_HEADLESS", None)
 
-    return PlaybackAcceptanceResult(
+    acceptance = PlaybackAcceptanceResult(
         graph_path=str(graph_path),
         total_attempted=len(results),
         total_succeeded=succeeded,
         with_iframe_or_tab_succeeded=with_iframe_tab_succeeded,
         results=results,
     )
+    _write_acceptance_report(acceptance, Path(graph_path).parent)
+    return acceptance
+
+
+def _write_acceptance_report(
+    result: PlaybackAcceptanceResult,
+    output_dir: Path,
+) -> Path:
+    """Serialize *PlaybackAcceptanceResult* to ``acceptance_report.json``."""
+    root_cause_counts: dict[str, int] = Counter()
+    root_cause_detail_counts: dict[str, int] = Counter()
+    for r in result.results:
+        if r.root_cause:
+            root_cause_counts[r.root_cause] += 1
+        if r.root_cause_detail:
+            root_cause_detail_counts[r.root_cause_detail] += 1
+
+    report = {
+        "run_id": str(uuid.uuid4()),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "graph_path": result.graph_path,
+        "total_attempted": result.total_attempted,
+        "total_succeeded": result.total_succeeded,
+        "with_iframe_or_tab_succeeded": result.with_iframe_or_tab_succeeded,
+        "results": [asdict(r) for r in result.results],
+        "summary": {
+            "root_cause_distribution": dict(root_cause_counts),
+            "root_cause_detail_distribution": dict(root_cause_detail_counts),
+        },
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / "acceptance_report.json"
+    out_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return out_path

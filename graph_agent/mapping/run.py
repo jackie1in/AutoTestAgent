@@ -9,6 +9,7 @@ import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from collections.abc import Awaitable, Callable
 
 import networkx as nx
 from networkx import MultiDiGraph
@@ -27,6 +28,8 @@ from graph_agent.models import ActionType
 DEFAULT_TASK_TEMPLATE = (
     "从起始URL开始探索核心业务流程：{start_url}。"
     "探索阶段优先使用UI交互动作：click/fill/navigate/select。"
+    "遇到表单时尽量填写所有字段，包括富文本编辑器（contenteditable/TinyMCE/CKEditor/Quill等）——"
+    "使用 input_text 动作向富文本区域输入示例文本即可。"
     "在点击菜单、列表项、详情入口、子项目入口、概览入口后，继续探索进入的派生页面，不要停留在入口页。"
     "记录每一步的 selector、业务意图、动作类型及目标状态。"
     "严禁在探索过程中使用 read_file/write_file/replace_file 等文件工具；仅允许在最终 done 时输出结论。"
@@ -243,6 +246,22 @@ def _resolve_mapping_url(url: str | None) -> str:
     raise ValueError("url is required. Provide --url or set MAPPING_URL.")
 
 
+def _resolve_mapping_headless() -> bool:
+    """Resolve mapping headless mode from MAPPING_HEADLESS env."""
+    raw = (os.getenv("MAPPING_HEADLESS") or "").strip().lower()
+    if raw in {"", "1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return True
+
+
+def _resolve_mapping_channel() -> str | None:
+    """Resolve optional browser channel from MAPPING_CHANNEL env."""
+    raw = (os.getenv("MAPPING_CHANNEL") or "").strip()
+    return raw or None
+
+
 def _build_mapping_task(task: str | None, start_url: str) -> str:
     """Use custom task if provided; otherwise render generic task template."""
     custom_task = (task or "").strip()
@@ -415,6 +434,12 @@ def _semantic_consistency(action: ActionType, intent: Any, selector: str = "") -
             for k in ("select", "choose", "pick", "dropdown", "option")
         )
 
+    if action == ActionType.RICH_TEXT:
+        return any(
+            k in text
+            for k in ("type", "fill", "input", "enter", "edit", "write", "rich", "content")
+        )
+
     if action == ActionType.FILL:
         if any(
             token in sel
@@ -503,6 +528,7 @@ async def _build_graph_from_history(
     thoughts: list[dict | object] | None = None,
     urls: list[str] | None = None,
     runtime_non_ui_action_count: int = 0,
+    step_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
 ) -> MultiDiGraph:
     """Build DiGraph from agent history.
 
@@ -545,6 +571,12 @@ async def _build_graph_from_history(
 
     edges_added = 0
     filtered_non_ui_edges = 0
+    semantic_mismatch_warnings = 0
+    url_discontinuity_warnings = 0
+    frame_context_transition_warnings = 0
+    processed_steps: list[dict[str, str]] = []
+    previous_target_url = ""
+    previous_had_frame_path = False
     for i, action in enumerate(actions):
         # Ensure action is a dict
         action = _action_to_dict(action)
@@ -560,7 +592,10 @@ async def _build_graph_from_history(
         to_node, to_url = _resolve_target_state(i, urls, thoughts, actions)
 
         action_key = _extract_action_key(action)
-        neighbor_steps = _build_neighbor_steps(i, actions, thoughts, urls, window=1)
+        if action_key in FILTERED_ACTION_KEYS:
+            filtered_non_ui_edges += 1
+            continue
+        neighbor_steps = processed_steps[-1:] if processed_steps else []
         page_signals = _build_page_signals(from_url, to_url, action_key)
         edge_model = await parse_browser_use_step(
             action,
@@ -570,15 +605,38 @@ async def _build_graph_from_history(
             neighbor_steps=neighbor_steps,
             page_signals=page_signals,
         )
+        intent_text = (
+            edge_model.intent.summary
+            if edge_model.intent
+            else f"<missing-intent:{edge_model.intent_failure_reason}>"
+        )
+        callback_payload = {
+            "index": i,
+            "source_url": from_url,
+            "target_url": to_url,
+            "action_key": action_key,
+            "edge_model": edge_model,
+            "intent_text": intent_text,
+        }
+        if step_callback:
+            maybe_result = step_callback(callback_payload)
+            if maybe_result and hasattr(maybe_result, "__await__"):
+                await maybe_result
+
+        if edge_model.intent and not _semantic_consistency(
+            edge_model.action, edge_model.intent, selector=edge_model.selector
+        ):
+            semantic_mismatch_warnings += 1
+        if previous_target_url and from_url and previous_target_url != from_url:
+            url_discontinuity_warnings += 1
+        current_had_frame_path = bool(getattr(edge_model, "frame_path", []))
+        if i > 0 and current_had_frame_path != previous_had_frame_path:
+            frame_context_transition_warnings += 1
 
         if from_node not in G:
             G.add_node(from_node, label=from_url or from_node, url=from_url)
         if to_node not in G:
             G.add_node(to_node, label=to_url or to_node, url=to_url)
-
-        if action_key in FILTERED_ACTION_KEYS:
-            filtered_non_ui_edges += 1
-            continue
 
         # Skip adding edge for navigate; only add for click/fill with selector
         if edge_model.action == ActionType.UNKNOWN:
@@ -587,7 +645,7 @@ async def _build_graph_from_history(
         if edge_model.action == ActionType.NAVIGATE:
             continue
         if (
-            edge_model.action in (ActionType.CLICK, ActionType.FILL, ActionType.SELECT)
+            edge_model.action in (ActionType.CLICK, ActionType.FILL, ActionType.SELECT, ActionType.RICH_TEXT)
             and edge_model.selector
         ):
             # Add edge regardless of inventory (dynamic discovery)
@@ -617,8 +675,30 @@ async def _build_graph_from_history(
             )
             edges_added += 1
 
+        processed_steps.append(
+            {
+                "action": action_key,
+                "selector": edge_model.selector or "",
+                "source_url": _clean_url(from_url or ""),
+                "target_url": _clean_url(to_url or ""),
+                "thought": _extract_next_goal(thought),
+            }
+        )
+        previous_target_url = to_url or from_url or previous_target_url
+        previous_had_frame_path = current_had_frame_path
+
     G.graph["filtered_non_ui_edges"] = filtered_non_ui_edges
     G.graph["runtime_non_ui_action_count"] = runtime_non_ui_action_count
+    G.graph["intent_alignment_warning_count"] = (
+        semantic_mismatch_warnings
+        + url_discontinuity_warnings
+        + frame_context_transition_warnings
+    )
+    G.graph["intent_alignment_warning_breakdown"] = {
+        "semantic_mismatch": semantic_mismatch_warnings,
+        "url_discontinuity": url_discontinuity_warnings,
+        "frame_context_transition": frame_context_transition_warnings,
+    }
     if edges_added == 0:
         G.graph["filtered_all_edges"] = True
     return G
@@ -694,6 +774,9 @@ def _build_snapshot_metric_map(graph: nx.Graph) -> dict[str, float]:
         ),
         "runtime_non_ui_action_count": float(
             graph.graph.get("runtime_non_ui_action_count", 0)
+        ),
+        "intent_alignment_warning_count": float(
+            graph.graph.get("intent_alignment_warning_count", 0)
         ),
         "state_like_node_ratio": float(graph.graph.get("state_like_node_ratio", 0.0)),
         "re_infer_success_rate": float(graph.graph.get("re_infer_success_rate", 0.0)),
@@ -851,6 +934,164 @@ async def re_infer_missing_intents(
     return {"total": total, "succeeded": succeeded, "failed": failed}
 
 
+def _load_playback_failures(
+    feedback: str | Path | list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Load normalized playback failure records."""
+    if isinstance(feedback, list):
+        return [item for item in feedback if isinstance(item, dict)]
+    path = Path(feedback)
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(payload, dict):
+        raw = payload.get("failures", [])
+        if isinstance(raw, list):
+            return [item for item in raw if isinstance(item, dict)]
+    return []
+
+
+def _edge_locator_keys(
+    source: str | None,
+    target: str | None,
+    edge_id: str | None,
+) -> tuple[str, str, str]:
+    return (str(source or ""), str(target or ""), str(edge_id or ""))
+
+
+async def re_infer_with_feedback(
+    graph_path: str | Path,
+    feedback: str | Path | list[dict[str, Any]],
+    inventory_path: str | Path | None = None,
+) -> dict[str, int]:
+    """Re-infer intents for playback failed edges with diagnostic hints."""
+    path = Path(graph_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Graph file not found: {path}")
+    graph = load_graph(path)
+    failures = _load_playback_failures(feedback)
+    if not failures:
+        return {"total": 0, "succeeded": 0, "failed": 0}
+
+    repairable_causes = {"selector", "dependency", "async_load"}
+    edge_hints: dict[tuple[str, str, str], str] = {}
+    pair_hints: dict[tuple[str, str], str] = {}
+    for item in failures:
+        root_cause = str(item.get("root_cause") or "").lower()
+        if root_cause and root_cause not in repairable_causes:
+            continue
+        failed_edge_id = str(item.get("failed_edge_id") or "")
+        if not failed_edge_id:
+            continue
+        edges = item.get("edges", [])
+        source = ""
+        target = ""
+        if isinstance(edges, list):
+            matched = next(
+                (
+                    e
+                    for e in edges
+                    if isinstance(e, dict) and str(e.get("edge_id") or "") == failed_edge_id
+                ),
+                None,
+            )
+            if isinstance(matched, dict):
+                source = str(matched.get("source") or "")
+                target = str(matched.get("target") or "")
+        key = _edge_locator_keys(source, target, failed_edge_id)
+        edge_hints[key] = str(item.get("error") or "")
+        if source and target:
+            pair_hints[(source, target)] = str(item.get("error") or "")
+
+    if not edge_hints:
+        return {"total": 0, "succeeded": 0, "failed": 0}
+
+    total = 0
+    succeeded = 0
+    failed = 0
+    edge_iter: list[tuple[str, str, Any, dict[str, Any]]]
+    if isinstance(graph, nx.MultiDiGraph):
+        edge_iter = [
+            (u, v, k, data) for u, v, k, data in graph.edges(keys=True, data=True)
+        ]
+    else:
+        edge_iter = [(u, v, None, data) for u, v, data in graph.edges(data=True)]
+
+    for u, v, k, data in edge_iter:
+        edge_id = str(data.get("edge_id") or k or "")
+        lookup_keys = [
+            _edge_locator_keys(str(u), str(v), edge_id),
+            _edge_locator_keys("", "", edge_id),
+        ]
+        playback_hint = next((edge_hints.get(k2) for k2 in lookup_keys if k2 in edge_hints), None)
+        if playback_hint is None:
+            playback_hint = pair_hints.get((str(u), str(v)))
+        if playback_hint is None:
+            continue
+
+        total += 1
+        action_raw = data.get("action", ActionType.UNKNOWN)
+        if isinstance(action_raw, ActionType):
+            action = action_raw
+        else:
+            try:
+                action = ActionType(str(action_raw))
+            except ValueError:
+                action = ActionType.UNKNOWN
+        selector = str(data.get("selector", ""))
+        param_name = data.get("param_name")
+        thought_text = ""
+        source_meta = graph.nodes[u] if u in graph else {}
+        target_meta = graph.nodes[v] if v in graph else {}
+        source_url = str(source_meta.get("url") or u)
+        target_url = str(target_meta.get("url") or v)
+        intent, reason = await infer_intent_for_context(
+            action=action,
+            selector=selector,
+            source_url=source_url,
+            target_url=target_url,
+            param_name=str(param_name) if param_name is not None else None,
+            thought_text=thought_text,
+            playback_error_hint=playback_hint,
+        )
+        if intent is not None:
+            if k is None:
+                graph.edges[u, v]["intent"] = intent
+                graph.edges[u, v]["intent_failure_reason"] = None
+            else:
+                graph.edges[u, v, k]["intent"] = intent
+                graph.edges[u, v, k]["intent_failure_reason"] = None
+            succeeded += 1
+        else:
+            if k is None:
+                graph.edges[u, v]["intent"] = None
+                graph.edges[u, v]["intent_failure_reason"] = reason
+            else:
+                graph.edges[u, v, k]["intent"] = None
+                graph.edges[u, v, k]["intent_failure_reason"] = reason
+            failed += 1
+
+    edge_count = graph.number_of_edges()
+    missing_after = sum(1 for _u, _v, d in graph.edges(data=True) if d.get("intent") is None)
+    graph.graph["intent_missing_count"] = missing_after
+    graph.graph["intent_success_rate"] = (
+        (1.0 - (missing_after / edge_count)) if edge_count else 1.0
+    )
+    graph.graph["re_infer_feedback_success_rate"] = (succeeded / total) if total else 1.0
+    await _refresh_business_templates(graph)
+    save_graph(graph, path)
+    _write_acceptance_snapshot(
+        graph=graph,
+        graph_output_path=path,
+        inventory_path=inventory_path,
+        target_url="",
+    )
+    return {"total": total, "succeeded": succeeded, "failed": failed}
+
+
 async def run_mapping(
     url: str | None = None,
     output_path: str | None = None,
@@ -886,7 +1127,16 @@ async def run_mapping(
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-    browser = Browser(headless=True)
+    browser_kwargs: dict[str, Any] = {"headless": _resolve_mapping_headless()}
+    channel = _resolve_mapping_channel()
+    if channel:
+        browser_kwargs["channel"] = channel
+    try:
+        browser = Browser(**browser_kwargs)
+    except TypeError:
+        # Older browser-use versions may not support channel keyword.
+        browser_kwargs.pop("channel", None)
+        browser = Browser(**browser_kwargs)
     llm = get_llm()
     initial_actions = [{"navigate": {"url": resolved_url, "new_tab": False}}]
     full_task = resolved_task
@@ -916,25 +1166,13 @@ async def run_mapping(
         all_actions, all_thoughts, all_urls
     )
 
-    # Console: print each step (step number, URL, selector, action, semantic_label)
-    for i, action in enumerate(actions):
-        thought: dict | object = thoughts[i] if i < len(thoughts) else {}
-        step_url = urls[i] if i < len(urls) else ""
-        if step_url is None:
-            step_url = ""
-        next_url = urls[i + 1] if i + 1 < len(urls) else step_url
-        if next_url is None:
-            next_url = ""
-
-        edge_model = await parse_browser_use_step(action, thought, step_url, next_url)
-        intent_text = (
-            edge_model.intent.summary
-            if edge_model.intent
-            else f"<missing-intent:{edge_model.intent_failure_reason}>"
-        )
-
+    async def _log_step(info: dict[str, Any]) -> None:
+        edge_model = info["edge_model"]
+        step_url = info["source_url"]
+        intent_text = info["intent_text"]
+        index = int(info["index"]) + 1
         print(
-            f"  [{i + 1}] url={step_url!r} selector={edge_model.selector!r} "
+            f"  [{index}] url={step_url!r} selector={edge_model.selector!r} "
             f"action={edge_model.action!r} intent={intent_text!r}"
         )
 
@@ -945,6 +1183,7 @@ async def run_mapping(
         thoughts=thoughts,
         urls=urls,
         runtime_non_ui_action_count=runtime_filtered,
+        step_callback=_log_step,
     )
     G.graph["start_url"] = resolved_url
 

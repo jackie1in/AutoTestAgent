@@ -526,3 +526,85 @@ async def test_parse_browser_use_step_extracts_tab_context():
     assert edge.tab.opener_tab_id == "tab-0"
     assert edge.tab.url == "https://example.com/quality"
     assert edge.tab.title == "Quality"
+
+
+@pytest.mark.asyncio
+async def test_parse_browser_use_step_detects_contenteditable_as_rich_text():
+    """input_text on contenteditable element should be parsed as RICH_TEXT."""
+    action = {
+        "input_text": {"text": "Hello World"},
+        "interacted_element": {
+            "xpath": "//body",
+            "attributes": {"contenteditable": "true"},
+        },
+    }
+    thought = {"next_goal": "Type content in the rich text editor"}
+
+    expected_intent = Intent(
+        raw="Type content",
+        verb="Type",
+        object="Rich text editor",
+        summary="Type content in the rich text editor",
+        key="elements.iframe.type",
+        confidence=0.9,
+    )
+
+    with patch(
+        "graph_agent.mapping.parser.infer_intent_progressive",
+        new_callable=AsyncMock,
+        return_value=(expected_intent, None, "L0"),
+    ):
+        edge = await parse_browser_use_step(
+            action=action,
+            thought=thought,
+            source_url="https://example.com/editor",
+            target_url="https://example.com/editor",
+        )
+
+    assert edge.action == ActionType.RICH_TEXT
+    assert edge.action_value == "Hello World"
+
+
+def test_is_contenteditable_true_for_contenteditable_attr():
+    from graph_agent.mapping.parser import _is_contenteditable
+    from graph_agent.models import ElementSnapshot
+
+    elem = ElementSnapshot(
+        selector="#editor",
+        attributes={"contenteditable": "true"},
+    )
+    assert _is_contenteditable(elem) is True
+
+
+def test_is_contenteditable_false_for_input():
+    from graph_agent.mapping.parser import _is_contenteditable
+    from graph_agent.models import ElementSnapshot
+
+    elem = ElementSnapshot(
+        selector="#username",
+        type="input",
+        attributes={},
+    )
+    assert _is_contenteditable(elem) is False
+
+
+def test_is_contenteditable_true_for_tinymce_selector():
+    from graph_agent.mapping.parser import _is_contenteditable
+    from graph_agent.models import ElementSnapshot
+
+    elem = ElementSnapshot(
+        selector="#tinymce",
+        attributes={},
+    )
+    assert _is_contenteditable(elem) is True
+
+
+def test_is_contenteditable_true_for_ql_editor_class():
+    from graph_agent.mapping.parser import _is_contenteditable
+    from graph_agent.models import ElementSnapshot
+
+    elem = ElementSnapshot(
+        selector=".ql-editor",
+        attributes={"class": "ql-editor"},
+    )
+    assert _is_contenteditable(elem) is True

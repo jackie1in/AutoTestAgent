@@ -486,7 +486,13 @@ async def run_playback(
         timeout_ms: Timeout for navigation and actions (default 60s).
 
     Returns:
-        {"success": bool, "actual_url": str, "error": str | None}
+        {
+            "success": bool,
+            "actual_url": str,
+            "error": str | None,
+            "failed_step_index": int | None,
+            "failed_edge_id": str | None,
+        }
     """
     actual_url = ""
 
@@ -517,6 +523,8 @@ async def run_playback(
                         "success": False,
                         "actual_url": "",
                         "error": f"Failed to navigate to start URL: {e}",
+                        "failed_step_index": None,
+                        "failed_edge_id": None,
                     }
 
                 actual_url = page.url
@@ -748,6 +756,33 @@ async def run_playback(
                                 } or intent_key.startswith("auth.fill"):
                                     saw_auth_credentials = True
 
+                            elif action == ActionType.RICH_TEXT:
+                                value = ""
+                                if edge.param_name and edge.param_name in test_data:
+                                    value = str(test_data[edge.param_name])
+                                elif edge.action_value is not None:
+                                    value = str(edge.action_value)
+                                elif edge.constraints:
+                                    value = _generate_value_from_constraints(
+                                        edge.constraints
+                                    )
+                                else:
+                                    value = "test_value"
+
+                                async def _do_rich_text(loc: Any) -> None:
+                                    await loc.click()
+                                    kb = page_for_edge.keyboard
+                                    await kb.press("Control+a")
+                                    await kb.type(value)
+
+                                await _retry_action(
+                                    lambda: _try_action_with_selector_fallback(
+                                        page_for_edge, edge, _do_rich_text
+                                    )
+                                )
+                                actual_url = page_for_edge.url
+                                last_action_page = page_for_edge
+
                             elif action == ActionType.SELECT:
                                 value = ""
                                 if edge.param_name and edge.param_name in test_data:
@@ -912,6 +947,8 @@ async def run_playback(
                                         "success": False,
                                         "actual_url": actual_url,
                                         "error": guard_error,
+                                        "failed_step_index": i,
+                                        "failed_edge_id": edge.edge_id,
                                     }
 
                                 # Navigation succeeded — skip future guard checks
@@ -961,6 +998,8 @@ async def run_playback(
                                                 "success": False,
                                                 "actual_url": actual_url,
                                                 "error": lookahead_error,
+                                                "failed_step_index": i,
+                                                "failed_edge_id": edge.edge_id,
                                             }
 
                             else:
@@ -1038,6 +1077,41 @@ async def run_playback(
                                                     _do_fill_r,
                                                 )
                                             )
+                                        elif action == ActionType.RICH_TEXT:
+                                            value = ""
+                                            if (
+                                                edge.param_name
+                                                and edge.param_name in test_data
+                                            ):
+                                                value = str(
+                                                    test_data[edge.param_name]
+                                                )
+                                            elif edge.action_value is not None:
+                                                value = str(edge.action_value)
+                                            elif edge.constraints:
+                                                value = (
+                                                    _generate_value_from_constraints(
+                                                        edge.constraints
+                                                    )
+                                                )
+                                            else:
+                                                value = "test_value"
+
+                                            async def _do_rich_text_r(
+                                                loc: Any,
+                                            ) -> None:
+                                                await loc.click()
+                                                kb = page_for_edge.keyboard
+                                                await kb.press("Control+a")
+                                                await kb.type(value)
+
+                                            await _retry_action(
+                                                lambda: _try_action_with_selector_fallback(
+                                                    page_for_edge,
+                                                    edge,
+                                                    _do_rich_text_r,
+                                                )
+                                            )
                                         elif action == ActionType.SELECT:
                                             value = ""
                                             if (
@@ -1109,6 +1183,8 @@ async def run_playback(
                                 "success": False,
                                 "actual_url": actual_url,
                                 "error": formatted_error,
+                                "failed_step_index": i,
+                                "failed_edge_id": edge.edge_id,
                             }
                 finally:
                     _remove_listener(page, "response", _on_response)
@@ -1121,9 +1197,17 @@ async def run_playback(
                             "success": False,
                             "actual_url": actual_url,
                             "error": f"Expected URL {expected_end_url}, got {actual_url}. Error: {e}",
+                            "failed_step_index": None,
+                            "failed_edge_id": None,
                         }
 
-                return {"success": True, "actual_url": actual_url, "error": None}
+                return {
+                    "success": True,
+                    "actual_url": actual_url,
+                    "error": None,
+                    "failed_step_index": None,
+                    "failed_edge_id": None,
+                }
             finally:
                 await browser.close()
     except Exception as e:  # noqa: BLE001
@@ -1131,4 +1215,6 @@ async def run_playback(
             "success": False,
             "actual_url": actual_url or "",
             "error": str(e),
+            "failed_step_index": None,
+            "failed_edge_id": None,
         }

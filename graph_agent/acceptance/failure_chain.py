@@ -25,6 +25,45 @@ class FailureRootCause(str, Enum):
     ASYNC_LOAD = "async_load"
 
 
+def classify_root_cause_detail(error: str | None) -> tuple[FailureRootCause, str]:
+    """Return (primary root cause, secondary detail) from playback error text."""
+    text = str(error or "")
+    lower = text.lower()
+
+    if lower.startswith("tab:"):
+        return FailureRootCause.TAB, "tab.missing"
+
+    if lower.startswith("iframe:"):
+        if "failed to locate iframe" in lower:
+            return FailureRootCause.IFRAME, "iframe.not_found"
+        if "has been closed" in lower or "target closed" in lower:
+            return FailureRootCause.IFRAME, "iframe.not_attached"
+        return FailureRootCause.IFRAME, "iframe.unknown"
+
+    if lower.startswith("async_load:"):
+        if "has been closed" in lower or "target closed" in lower:
+            return FailureRootCause.IFRAME, "iframe.not_attached"
+        return FailureRootCause.ASYNC_LOAD, "async_load.timeout"
+
+    if "login flow did not leave" in lower:
+        return FailureRootCause.DEPENDENCY, "dependency.nav_failed"
+    if "click was expected to navigate" in lower:
+        return FailureRootCause.DEPENDENCY, "dependency.nav_failed"
+    if "iframe for the next step did not appear" in lower:
+        return FailureRootCause.DEPENDENCY, "dependency.lookahead"
+
+    if lower.startswith("selector:"):
+        if "not attached" in lower or "detached" in lower:
+            return FailureRootCause.SELECTOR, "selector.stale"
+        if "waiting for selector" in lower or "no element" in lower:
+            return FailureRootCause.SELECTOR, "selector.not_found"
+        if "timeout" in lower:
+            return FailureRootCause.SELECTOR, "selector.timeout"
+        return FailureRootCause.SELECTOR, "selector.unknown"
+
+    return FailureRootCause.DEPENDENCY, "dependency.unknown"
+
+
 class TargetChainDescription(BaseModel):
     """目标业务链说明，供后续任务复用。"""
 

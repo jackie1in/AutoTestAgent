@@ -119,6 +119,7 @@ async def infer_intent_for_context(
     neighbor_steps: list[dict[str, str]] | None = None,
     page_signals: dict[str, str] | None = None,
     context_level: str = "L0",
+    playback_error_hint: str | None = None,
 ) -> tuple[Intent | None, str | None]:
     """Infer intent from context using AI only."""
     llm = get_llm()
@@ -139,6 +140,9 @@ async def infer_intent_for_context(
             + "\n".join(f"- {k}: {v}" for k, v in page_signals.items() if v)
             + "\n"
         )
+    playback_section = ""
+    if playback_error_hint:
+        playback_section = f"Playback failure hint:\n- error: {playback_error_hint}\n"
 
     prompt = f"""
 You are an intent normalizer for browser automation steps.
@@ -159,7 +163,7 @@ Context:
 - target_url: {target_url}
 - param_name: {param_name or ""}
 - thought: {thought_text or ""}
-{neighbor_section}{page_signal_section}
+{neighbor_section}{page_signal_section}{playback_section}
 
 Rules:
 - Return JSON only.
@@ -285,6 +289,8 @@ def _action_intent_conflict(
     sel = (selector or "").lower()
     text = f"{key} {summary}"
     if action == ActionType.SELECT:
+        return False
+    if action == ActionType.RICH_TEXT:
         return False
     if action == ActionType.FILL:
         # If selector strongly indicates a fillable control, be tolerant to wording.
@@ -667,6 +673,29 @@ def _element_snapshot_from_interacted(
     )
 
 
+def _is_contenteditable(element: ElementSnapshot | None) -> bool:
+    """Detect whether the interacted element is a contenteditable rich text target."""
+    if element is None:
+        return False
+    attrs = element.attributes or {}
+    if "contenteditable" in attrs and str(attrs["contenteditable"]).lower() in (
+        "true",
+        "",
+    ):
+        return True
+    tag = str(element.type or "").lower()
+    if tag in ("input", "textarea", "select"):
+        return False
+    sel = (element.selector or "").lower()
+    rich_hints = ("tinymce", "ckeditor", "ql-editor", "prosemirror", "contenteditable")
+    if any(h in sel for h in rich_hints):
+        return True
+    for v in attrs.values():
+        if isinstance(v, str) and any(h in v.lower() for h in rich_hints):
+            return True
+    return False
+
+
 async def _infer_param_name(
     element: ElementSnapshot | None, is_fill: bool
 ) -> str | None:
@@ -684,7 +713,7 @@ async def _extract_action_value(
     action: Mapping[str, Any], play_action: ActionType
 ) -> str | None:
     """Extract raw recorded value from browser-use action payload."""
-    if play_action not in (ActionType.FILL, ActionType.SELECT):
+    if play_action not in (ActionType.FILL, ActionType.RICH_TEXT, ActionType.SELECT):
         return None
 
     for action_key in ("input_text", "input", "send_keys", "select_dropdown"):
@@ -757,7 +786,10 @@ async def parse_browser_use_step(
         source_url=source_url,
         target_url=target_url,
     )
-    is_fill = play_action in (ActionType.FILL, ActionType.SELECT)
+    if play_action == ActionType.FILL and _is_contenteditable(element):
+        play_action = ActionType.RICH_TEXT
+
+    is_fill = play_action in (ActionType.FILL, ActionType.RICH_TEXT, ActionType.SELECT)
     param_name = await _infer_param_name(element, is_fill)
     action_value = await _extract_action_value(action, play_action)
     intent, intent_failure_reason, context_level_used = await infer_intent_progressive(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from collections import Counter
 from pathlib import Path
@@ -14,8 +15,25 @@ from graph_agent.llm import get_llm, ainvoke_prompt
 
 LOG = logging.getLogger(__name__)
 
+
+def _resolve_mapping_headless() -> bool:
+    """Resolve mapping/scout headless mode from MAPPING_HEADLESS env."""
+    raw = (os.getenv("MAPPING_HEADLESS") or "").strip().lower()
+    if raw in {"", "1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return True
+
+
+def _resolve_mapping_channel() -> str | None:
+    """Resolve optional browser channel from MAPPING_CHANNEL env."""
+    raw = (os.getenv("MAPPING_CHANNEL") or "").strip()
+    return raw or None
+
 SCOUT_TASK_TEMPLATE = (
     "Navigate to {url} using the navigate action, then identify ALL interactive elements on the page. "
+    "Include rich text editors (contenteditable divs, TinyMCE, CKEditor, Quill, ProseMirror) as type 'richtext'. "
     "Do NOT click anything. Keep output short and deterministic. "
     "Prefer returning a compact JSON object with an `elements` array; "
     "if strict JSON cannot be guaranteed, return a concise plain-text list of selectors and element types only. "
@@ -23,7 +41,8 @@ SCOUT_TASK_TEMPLATE = (
 )
 
 EXTRACT_PROMPT = """From the following scout report (list of interactive elements on a web page), extract a JSON array of elements.
-Each item must have: "selector" (Playwright selector, e.g. #id or [name="x"] or xpath=...), "type" (one of: button, input, link, other), "label" (optional short description or null).
+Each item must have: "selector" (Playwright selector, e.g. #id or [name="x"] or xpath=...), "type" (one of: button, input, link, richtext, other), "label" (optional short description or null).
+Use type "richtext" for contenteditable elements, rich text editors (TinyMCE, CKEditor, Quill, ProseMirror), or WYSIWYG areas.
 Output only the JSON array, no markdown or explanation.
 
 Scout report:
@@ -46,6 +65,11 @@ _TYPE_ALIASES: dict[str, str] = {
     "link": "link",
     "anchor": "link",
     "a": "link",
+    "richtext": "richtext",
+    "rich_text": "richtext",
+    "contenteditable": "richtext",
+    "wysiwyg": "richtext",
+    "editor": "richtext",
     "other": "other",
 }
 
@@ -112,6 +136,20 @@ def _infer_type_from_selector_or_label(selector: str, label: str | None) -> str:
     s = (selector or "").lower()
     label_lower = (label or "").lower()
     text = f"{s} {label_lower}"
+    if any(
+        token in text
+        for token in (
+            "contenteditable",
+            "tinymce",
+            "ckeditor",
+            "ql-editor",
+            "prosemirror",
+            "wysiwyg",
+            "rich text",
+            "richtext",
+        )
+    ):
+        return "richtext"
     if any(
         token in text
         for token in ("#btn", ".btn", "button", "submit", "login", "logout")
@@ -229,7 +267,15 @@ async def run_scout(
     """
     from browser_use import Agent, Browser
 
-    browser = Browser(headless=True)
+    browser_kwargs: dict[str, Any] = {"headless": _resolve_mapping_headless()}
+    channel = _resolve_mapping_channel()
+    if channel:
+        browser_kwargs["channel"] = channel
+    try:
+        browser = Browser(**browser_kwargs)
+    except TypeError:
+        browser_kwargs.pop("channel", None)
+        browser = Browser(**browser_kwargs)
     llm = get_llm()
     initial_actions = [{"navigate": {"url": url, "new_tab": False}}]
     task = SCOUT_TASK_TEMPLATE.format(url=url)
