@@ -1,5 +1,6 @@
 """LLM configuration and factory."""
 
+import asyncio
 import os
 from typing import Any
 from dotenv import load_dotenv
@@ -7,12 +8,34 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-async def ainvoke_prompt(llm: Any, prompt: str) -> Any:
+def _resolve_intent_timeout_s() -> float | None:
+    """Resolve LLM call timeout from MAPPING_INTENT_TIMEOUT_MS env (milliseconds)."""
+    raw = (os.getenv("MAPPING_INTENT_TIMEOUT_MS") or "").strip()
+    if not raw:
+        return None
+    try:
+        ms = int(raw)
+    except ValueError:
+        return None
+    return ms / 1000.0 if ms > 0 else None
+
+
+async def ainvoke_prompt(
+    llm: Any, prompt: str, *, timeout_ms: int | None = None
+) -> Any:
     """Invoke llm with prompt using multi-format fallbacks.
 
     Different providers/adapters accept different message formats.
     This helper retries a few common payload shapes.
+
+    ``timeout_ms`` overrides the env-based MAPPING_INTENT_TIMEOUT_MS.
+    When set, ``asyncio.TimeoutError`` propagates to the caller.
     """
+    if timeout_ms is not None:
+        timeout_s: float | None = timeout_ms / 1000.0 if timeout_ms > 0 else None
+    else:
+        timeout_s = _resolve_intent_timeout_s()
+
     errors: list[str] = []
     payloads: list[tuple[str, Any]] = []
     # browser-use ChatOpenAI expects browser_use BaseMessage objects.
@@ -38,7 +61,12 @@ async def ainvoke_prompt(llm: Any, prompt: str) -> Any:
 
     for fmt, payload in payloads:
         try:
-            return await llm.ainvoke(payload)
+            coro = llm.ainvoke(payload)
+            if timeout_s is not None:
+                return await asyncio.wait_for(coro, timeout=timeout_s)
+            return await coro
+        except asyncio.TimeoutError:
+            raise
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{fmt}:{exc}")
 

@@ -109,6 +109,7 @@ def save_graph(G: nx.Graph, path: str | Path) -> None:
             intent_failure_reason=data.get("intent_failure_reason"),
             param_name=data.get("param_name"),
             action_value=data.get("action_value"),
+            thought=data.get("thought"),
             element=element,
             constraints=constraints,
         )
@@ -165,6 +166,7 @@ def load_graph(path: str | Path) -> nx.MultiDiGraph:
             intent_failure_reason=edge.intent_failure_reason,
             param_name=edge.param_name,
             action_value=edge.action_value,
+            thought=edge.thought,
             element=edge.element,
             constraints=edge.constraints,
         )

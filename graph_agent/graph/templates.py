@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
@@ -580,14 +581,19 @@ async def generate_business_templates(
     classifier: TemplateClassifier | None = None,
     min_path_length: int = MIN_TEMPLATE_PATH_LENGTH,
     max_path_length: int = MAX_TEMPLATE_PATH_LENGTH,
+    concurrency: int = 5,
 ) -> list[BusinessTemplate]:
-    """Generate deduplicated high-level business templates from graph paths."""
+    """Generate deduplicated high-level business templates from graph paths.
+
+    Classification LLM calls run concurrently (bounded by ``concurrency``).
+    """
     if graph.number_of_edges() == 0:
         return []
 
     classify = classifier if classifier is not None else _classify_candidate_with_llm
-    deduped: dict[tuple[str, str], BusinessTemplate] = {}
 
+    # Phase 1: collect candidate payloads via DFS (no LLM calls)
+    candidates: list[dict[str, Any]] = []
     for start_node in graph.nodes():
         stack: list[tuple[str, list[EdgeRow], set[str]]] = [
             (str(start_node), [], set())
@@ -607,27 +613,51 @@ async def generate_business_templates(
                 terminal_intent = _candidate_terminal_intent(data)
                 if terminal_intent is not None and len(next_path) >= min_path_length:
                     payload = _path_to_payload(graph, next_path)
-                    if not _is_business_path_candidate(payload):
-                        stack.append((v, next_path, next_used))
-                        continue
-                    try:
-                        classified = await classify(payload)
-                    except Exception:
-                        classified = None
-                    if (
-                        classified
-                        and classified.get("is_business_flow") is True
-                        and classified.get("business_key")
-                    ):
-                        template = _make_template(payload, classified)
-                        dedupe_key = (
-                            template.business_key,
-                            template.steps[-1].edge_id or "",
-                        )
-                        deduped[dedupe_key] = _prefer_template(
-                            deduped.get(dedupe_key), template
-                        )
+                    if _is_business_path_candidate(payload):
+                        candidates.append(payload)
                 stack.append((v, next_path, next_used))
+
+    if not candidates:
+        return []
+
+    # Phase 2: classify candidates concurrently
+    print(f"  Classifying {len(candidates)} business template candidates "
+          f"(concurrency={concurrency}) …")
+    sem = asyncio.Semaphore(concurrency)
+    completed = 0
+
+    async def classify_one(
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        nonlocal completed
+        async with sem:
+            try:
+                result = await classify(payload)
+            except Exception:
+                result = None
+            completed += 1
+            if completed % 10 == 0 or completed == len(candidates):
+                print(f"    template classification: {completed}/{len(candidates)}")
+            return payload, result
+
+    results = await asyncio.gather(*[classify_one(p) for p in candidates])
+
+    # Phase 3: build deduplicated templates from results
+    deduped: dict[tuple[str, str], BusinessTemplate] = {}
+    for payload, classified in results:
+        if (
+            classified
+            and classified.get("is_business_flow") is True
+            and classified.get("business_key")
+        ):
+            template = _make_template(payload, classified)
+            dedupe_key = (
+                template.business_key,
+                template.steps[-1].edge_id or "",
+            )
+            deduped[dedupe_key] = _prefer_template(
+                deduped.get(dedupe_key), template
+            )
 
     templates = _synthesize_navigation_module_template(graph, list(deduped.values()))
     templates = _attach_direct_template_dependencies(graph, templates)

@@ -6,10 +6,20 @@ from unittest.mock import AsyncMock, patch
 from graph_agent.models import ActionType, Intent, TabActionType
 from graph_agent.mapping.parser import (
     _action_intent_conflict,
+    clear_intent_cache,
     infer_intent_for_context,
     infer_intent_progressive,
     parse_browser_use_step,
+    parse_browser_use_step_lite,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_cache():
+    """Reset intent cache between tests to avoid cross-test pollution."""
+    clear_intent_cache()
+    yield
+    clear_intent_cache()
 
 
 def _mock_llm_response(content: str):
@@ -280,8 +290,8 @@ async def test_parse_browser_use_step_ai_success():
 
 
 @pytest.mark.asyncio
-async def test_infer_intent_progressive_escalates_to_l2():
-    """Progressive disclosure should escalate L0/L1 and accept at L2."""
+async def test_infer_intent_progressive_retries_on_low_confidence():
+    """Single-pass inference should retry once on low confidence and succeed."""
     low_confidence = (
         None,
         "low_confidence:0.22",
@@ -298,7 +308,7 @@ async def test_infer_intent_progressive_escalates_to_l2():
     with patch(
         "graph_agent.mapping.parser.infer_intent_for_context",
         new_callable=AsyncMock,
-        side_effect=[low_confidence, low_confidence, (high_confidence_intent, None)],
+        side_effect=[low_confidence, (high_confidence_intent, None)],
     ) as mock_infer:
         intent, reason, level = await infer_intent_progressive(
             action=ActionType.CLICK,
@@ -313,8 +323,40 @@ async def test_infer_intent_progressive_escalates_to_l2():
 
     assert intent is not None
     assert reason is None
-    assert level == "L2"
-    assert mock_infer.await_count == 3
+    assert level == "full_retry"
+    assert mock_infer.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_infer_intent_progressive_succeeds_on_first_pass():
+    """Single-pass inference should succeed on first call without retry."""
+    intent_ok = Intent(
+        raw="click login",
+        verb="Click",
+        object="Login button",
+        summary="Click login button",
+        key="auth.click.login",
+        confidence=0.95,
+    )
+
+    with patch(
+        "graph_agent.mapping.parser.infer_intent_for_context",
+        new_callable=AsyncMock,
+        return_value=(intent_ok, None),
+    ) as mock_infer:
+        intent, reason, level = await infer_intent_progressive(
+            action=ActionType.CLICK,
+            selector="#login",
+            source_url="https://a.com",
+            target_url="https://a.com/secure",
+            param_name=None,
+            thought_text="click login",
+        )
+
+    assert intent is not None
+    assert reason is None
+    assert level == "full"
+    assert mock_infer.await_count == 1
 
 
 def test_action_intent_conflict_allows_click_navigation_link():
@@ -608,3 +650,121 @@ def test_is_contenteditable_true_for_ql_editor_class():
         attributes={"class": "ql-editor"},
     )
     assert _is_contenteditable(elem) is True
+
+
+# ---------------------------------------------------------------------------
+# Phase 1/2 optimization tests
+# ---------------------------------------------------------------------------
+
+
+def test_parse_browser_use_step_lite_no_llm():
+    """Lite parser should extract action/selector/element without LLM, intent=None."""
+    action = {
+        "click": {"element": "button"},
+        "interacted_element": {"xpath": "//button[@id='submit']"},
+    }
+    thought = {"next_goal": "Submit the form"}
+
+    edge = parse_browser_use_step_lite(
+        action=action,
+        thought=thought,
+        source_url="https://a.com/form",
+        target_url="https://a.com/done",
+    )
+
+    assert edge.intent is None
+    assert edge.intent_failure_reason == "pending"
+    assert edge.selector == "xpath=//button[@id='submit']"
+    assert edge.action == ActionType.CLICK
+    assert edge.source == "https://a.com/form"
+    assert edge.target == "https://a.com/done"
+
+
+def test_parse_browser_use_step_lite_fill_extracts_param_and_value():
+    """Lite parser should extract param_name and action_value for fill actions."""
+    action = {
+        "input_text": {"text": "admin"},
+        "interacted_element": {
+            "css_selector": "input[name='user']",
+            "attributes": {"name": "user", "type": "text"},
+        },
+    }
+    thought = {"next_goal": "Fill username"}
+
+    edge = parse_browser_use_step_lite(
+        action=action,
+        thought=thought,
+        source_url="https://a.com/login",
+        target_url="https://a.com/login",
+    )
+
+    assert edge.action == ActionType.FILL
+    assert edge.param_name == "user"
+    assert edge.action_value == "admin"
+    assert edge.intent is None
+
+
+@pytest.mark.asyncio
+async def test_intent_cache_hit():
+    """Second call with same inputs should return cached intent without LLM call."""
+    mock_response = _mock_llm_response(
+        '{"key":"auth.fill.user","confidence":0.9,"summary":"Fill user","verb":"Fill","object":"User"}'
+    )
+    mock_llm = AsyncMock()
+    mock_llm.ainvoke = AsyncMock(return_value=mock_response)
+
+    with patch("graph_agent.mapping.parser.get_llm", return_value=mock_llm):
+        intent1, _ = await infer_intent_for_context(
+            action=ActionType.FILL, selector="#user",
+            source_url="https://a.com/login", target_url="https://a.com/login",
+            param_name="user", thought_text="fill user",
+        )
+        intent2, _ = await infer_intent_for_context(
+            action=ActionType.FILL, selector="#user",
+            source_url="https://a.com/login", target_url="https://a.com/login",
+            param_name="user", thought_text="fill user",
+        )
+
+    assert intent1 is not None
+    assert intent2 is intent1
+    assert mock_llm.ainvoke.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_skip_refine_env(monkeypatch):
+    """MAPPING_SKIP_REFINE=true should skip the refinement LLM call."""
+    monkeypatch.setenv("MAPPING_SKIP_REFINE", "true")
+    mock_response = _mock_llm_response(
+        '{"key":"navigation.click.link","confidence":0.91,"summary":"Click link","verb":"Click","object":"Link"}'
+    )
+    mock_llm = AsyncMock()
+    mock_llm.ainvoke = AsyncMock(return_value=mock_response)
+
+    with patch("graph_agent.mapping.parser.get_llm", return_value=mock_llm):
+        intent, reason = await infer_intent_for_context(
+            action=ActionType.CLICK, selector="a[href='/']",
+            source_url="https://a.com", target_url="https://a.com/b",
+            param_name=None, thought_text="click link",
+        )
+
+    assert intent is not None
+    assert intent.key == "navigation.click.link"
+    assert mock_llm.ainvoke.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_skip_distill_env(monkeypatch):
+    """MAPPING_SKIP_DISTILL=true should skip the thought distillation LLM call."""
+    monkeypatch.setenv("MAPPING_SKIP_DISTILL", "true")
+    from graph_agent.mapping.parser import distill_ui_thought
+
+    result = await distill_ui_thought(
+        thought_text="Write the report to csv file and then fill username",
+        action=ActionType.FILL,
+        selector="#user",
+        source_url="https://a.com",
+        target_url="https://a.com",
+    )
+
+    assert "csv" in result
+    assert "fill" in result.lower()

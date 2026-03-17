@@ -20,7 +20,13 @@ from graph_agent.graph.templates import (
 )
 from graph_agent.graph.io import save_graph, load_graph
 from graph_agent.llm import get_llm
-from graph_agent.mapping.parser import parse_browser_use_step, infer_intent_for_context
+from graph_agent.mapping.parser import (
+    parse_browser_use_step,
+    parse_browser_use_step_lite,
+    infer_intent_for_context,
+    infer_intent_progressive,
+    distill_ui_thought,
+)
 from graph_agent.mapping.scout import extract_derived_urls, run_scout, run_scout_multi
 from graph_agent.models import ActionType
 
@@ -262,6 +268,146 @@ def _resolve_mapping_channel() -> str | None:
     return raw or None
 
 
+def _resolve_intent_context_window(default: int = 1) -> int:
+    """Resolve intent context window size from env.
+
+    Uses MAPPING_INTENT_CONTEXT_WINDOW, clamps to [0, 5] to avoid oversized prompts.
+    """
+    raw = (os.getenv("MAPPING_INTENT_CONTEXT_WINDOW") or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(0, min(5, value))
+
+
+def _resolve_intent_mode() -> str:
+    """Resolve intent inference mode: 'sync' (blocking) or 'async' (deferred)."""
+    raw = (os.getenv("MAPPING_INTENT_MODE") or "").strip().lower()
+    if raw in ("async", "deferred"):
+        return "async"
+    return "sync"
+
+
+def _resolve_intent_concurrency(default: int = 3) -> int:
+    """Resolve parallel intent inference concurrency from env."""
+    raw = (os.getenv("MAPPING_INTENT_CONCURRENCY") or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(1, min(10, value))
+
+
+class IntentWorker:
+    """Async worker that infers intents for pending graph edges in parallel."""
+
+    def __init__(
+        self,
+        graph: MultiDiGraph,
+        *,
+        concurrency: int = 3,
+        step_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+    ):
+        self._graph = graph
+        self._concurrency = concurrency
+        self._step_callback = step_callback
+        self._pending: list[dict[str, Any]] = []
+        self.succeeded = 0
+        self.failed = 0
+
+    def enqueue(self, item: dict[str, Any]) -> None:
+        """Queue an edge for deferred intent inference."""
+        self._pending.append(item)
+
+    async def drain(self) -> dict[str, int]:
+        """Run all pending inferences with bounded concurrency, then return stats."""
+        sem = asyncio.Semaphore(self._concurrency)
+
+        async def process(item: dict[str, Any]) -> None:
+            async with sem:
+                await self._infer_one(item)
+
+        await asyncio.gather(*[process(p) for p in self._pending])
+        return {
+            "total": len(self._pending),
+            "succeeded": self.succeeded,
+            "failed": self.failed,
+        }
+
+    async def _infer_one(self, item: dict[str, Any]) -> None:
+        from graph_agent.mapping.parser import _get_next_goal
+
+        edge_id: str = item["edge_id"]
+        from_node: str = item["from_node"]
+        to_node: str = item["to_node"]
+        action_type: ActionType = item["action_type"]
+        selector: str = item["selector"]
+        from_url: str = item["from_url"]
+        to_url: str = item["to_url"]
+        param_name: str | None = item.get("param_name")
+        raw_thought: str = item.get("raw_thought", "")
+        neighbor_steps: list[dict[str, str]] = item.get("neighbor_steps", [])
+        page_signals: dict[str, str] = item.get("page_signals", {})
+        step_index: int = item.get("step_index", 0)
+
+        thought_text = await distill_ui_thought(
+            thought_text=raw_thought,
+            action=action_type,
+            selector=selector,
+            source_url=from_url,
+            target_url=to_url,
+        )
+        intent, reason, level = await infer_intent_progressive(
+            action=action_type,
+            selector=selector,
+            source_url=from_url,
+            target_url=to_url,
+            param_name=param_name,
+            thought_text=thought_text,
+            neighbor_steps=neighbor_steps,
+            page_signals=page_signals,
+        )
+
+        G = self._graph
+        if isinstance(G, nx.MultiDiGraph):
+            if G.has_edge(from_node, to_node, key=edge_id):
+                G.edges[from_node, to_node, edge_id]["intent"] = intent
+                G.edges[from_node, to_node, edge_id]["context_level_used"] = level
+                G.edges[from_node, to_node, edge_id]["intent_failure_reason"] = reason
+        else:
+            if G.has_edge(from_node, to_node):
+                G.edges[from_node, to_node]["intent"] = intent
+                G.edges[from_node, to_node]["context_level_used"] = level
+                G.edges[from_node, to_node]["intent_failure_reason"] = reason
+
+        if intent is not None:
+            self.succeeded += 1
+        else:
+            self.failed += 1
+
+        intent_text = (
+            intent.summary if intent else f"<missing-intent:{reason}>"
+        )
+        if self._step_callback:
+            callback_payload = {
+                "index": step_index,
+                "source_url": from_url,
+                "target_url": to_url,
+                "action_key": action_type.value,
+                "edge_id": edge_id,
+                "intent_text": intent_text,
+                "async_resolved": True,
+            }
+            maybe = self._step_callback(callback_payload)
+            if maybe and hasattr(maybe, "__await__"):
+                await maybe
+
+
 def _build_mapping_task(task: str | None, start_url: str) -> str:
     """Use custom task if provided; otherwise render generic task template."""
     custom_task = (task or "").strip()
@@ -378,6 +524,91 @@ def _build_page_signals(
         "transition": f"{(src.path if src else '')} -> {(tgt.path if tgt else '')}",
         "action_key": action_key,
     }
+
+
+def _action_key_from_edge_data(data: dict[str, Any]) -> str:
+    """Extract action key string from edge data."""
+    action_raw = data.get("action", ActionType.UNKNOWN)
+    if isinstance(action_raw, ActionType):
+        return action_raw.value
+    text = str(action_raw or "").strip().lower()
+    return text or ActionType.UNKNOWN.value
+
+
+def _collect_neighbor_steps_from_graph(
+    graph: nx.Graph,
+    current_step_index: int | None,
+    window: int,
+) -> list[dict[str, str]]:
+    """Collect previous edge context around current edge by step_index."""
+    if window <= 0 or current_step_index is None:
+        return []
+
+    rows: list[tuple[int, str, str, dict[str, Any]]] = []
+    if isinstance(graph, nx.MultiDiGraph):
+        for u, v, _k, data in graph.edges(keys=True, data=True):
+            if not isinstance(data, dict):
+                continue
+            step_idx = data.get("step_index")
+            if not isinstance(step_idx, int):
+                continue
+            rows.append((step_idx, str(u), str(v), data))
+    else:
+        for u, v, data in graph.edges(data=True):
+            if not isinstance(data, dict):
+                continue
+            step_idx = data.get("step_index")
+            if not isinstance(step_idx, int):
+                continue
+            rows.append((step_idx, str(u), str(v), data))
+    if not rows:
+        return []
+
+    rows.sort(key=lambda x: x[0])
+    previous = [row for row in rows if row[0] < current_step_index][-window:]
+    out: list[dict[str, str]] = []
+    for _step_idx, u, v, data in previous:
+        source_meta = graph.nodes[u] if u in graph else {}
+        target_meta = graph.nodes[v] if v in graph else {}
+        out.append(
+            {
+                "action": _action_key_from_edge_data(data),
+                "selector": str(data.get("selector", "") or ""),
+                "source_url": str(source_meta.get("url") or u),
+                "target_url": str(target_meta.get("url") or v),
+                "thought": str(data.get("thought") or ""),
+            }
+        )
+    return out
+
+
+def _prepare_infer_context_for_edge(
+    graph: nx.Graph,
+    u: str,
+    v: str,
+    data: dict[str, Any],
+    *,
+    window: int,
+) -> tuple[str, str, str, list[dict[str, str]], dict[str, str]]:
+    """Build normalized infer context payload for one existing graph edge."""
+    source_meta = graph.nodes[u] if u in graph else {}
+    target_meta = graph.nodes[v] if v in graph else {}
+    source_url = str(source_meta.get("url") or u)
+    target_url = str(target_meta.get("url") or v)
+    thought_text = str(data.get("thought") or "")
+    neighbor_steps = _collect_neighbor_steps_from_graph(
+        graph=graph,
+        current_step_index=data.get("step_index")
+        if isinstance(data.get("step_index"), int)
+        else None,
+        window=window,
+    )
+    page_signals = _build_page_signals(
+        source_url=source_url,
+        target_url=target_url,
+        action_key=_action_key_from_edge_data(data),
+    )
+    return source_url, target_url, thought_text, neighbor_steps, page_signals
 
 
 def _is_http_url(value: str) -> bool:
@@ -529,13 +760,19 @@ async def _build_graph_from_history(
     urls: list[str] | None = None,
     runtime_non_ui_action_count: int = 0,
     step_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+    intent_mode: str | None = None,
 ) -> MultiDiGraph:
     """Build DiGraph from agent history.
 
     - Node IDs are cleaned URLs (no query params).
     - Edges are added for all valid click/fill actions.
     - Inventory is optional (deprecated constraint).
+    - intent_mode: 'sync' (default, blocking LLM) or 'async' (deferred via IntentWorker).
     """
+    if intent_mode is None:
+        intent_mode = _resolve_intent_mode()
+    use_async = intent_mode == "async"
+
     G: MultiDiGraph = MultiDiGraph()
     actions = (
         actions
@@ -563,11 +800,16 @@ async def _build_graph_from_history(
         0, first_url, first_thought, first_action
     )
 
-    # Try to find title for start node
     start_label = start_url or start_node
-    # We can't easily get the title for the very first state from history actions/thoughts
-    # unless we look at the first thought's context, but let's keep it simple.
     G.add_node(start_node, label=start_label, url=start_url)
+
+    worker: IntentWorker | None = None
+    if use_async:
+        worker = IntentWorker(
+            G,
+            concurrency=_resolve_intent_concurrency(),
+            step_callback=step_callback,
+        )
 
     edges_added = 0
     filtered_non_ui_edges = 0
@@ -577,34 +819,39 @@ async def _build_graph_from_history(
     processed_steps: list[dict[str, str]] = []
     previous_target_url = ""
     previous_had_frame_path = False
+    context_window = _resolve_intent_context_window(default=1)
     for i, action in enumerate(actions):
-        # Ensure action is a dict
         action = _action_to_dict(action)
 
         thought = thoughts[i] if i < len(thoughts) else {}
 
-        # Determine From/To Nodes
-        # from_node is the URL before action i
         raw_from = urls[i] if i < len(urls) else ""
         from_node, from_url = _state_from_snapshot(i, raw_from, thought, action)
 
-        # to_node: best-effort concrete URL resolution to reduce pseudo-state noise.
         to_node, to_url = _resolve_target_state(i, urls, thoughts, actions)
 
         action_key = _extract_action_key(action)
         if action_key in FILTERED_ACTION_KEYS:
             filtered_non_ui_edges += 1
             continue
-        neighbor_steps = processed_steps[-1:] if processed_steps else []
-        page_signals = _build_page_signals(from_url, to_url, action_key)
-        edge_model = await parse_browser_use_step(
-            action,
-            thought,
-            from_url,
-            to_url,
-            neighbor_steps=neighbor_steps,
-            page_signals=page_signals,
+        neighbor_steps = (
+            processed_steps[-context_window:]
+            if processed_steps and context_window > 0
+            else []
         )
+        page_signals = _build_page_signals(from_url, to_url, action_key)
+
+        if use_async:
+            edge_model = parse_browser_use_step_lite(
+                action, thought, from_url, to_url,
+            )
+        else:
+            edge_model = await parse_browser_use_step(
+                action, thought, from_url, to_url,
+                neighbor_steps=neighbor_steps,
+                page_signals=page_signals,
+            )
+
         intent_text = (
             edge_model.intent.summary
             if edge_model.intent
@@ -618,12 +865,12 @@ async def _build_graph_from_history(
             "edge_model": edge_model,
             "intent_text": intent_text,
         }
-        if step_callback:
+        if step_callback and not use_async:
             maybe_result = step_callback(callback_payload)
             if maybe_result and hasattr(maybe_result, "__await__"):
                 await maybe_result
 
-        if edge_model.intent and not _semantic_consistency(
+        if not use_async and edge_model.intent and not _semantic_consistency(
             edge_model.action, edge_model.intent, selector=edge_model.selector
         ):
             semantic_mismatch_warnings += 1
@@ -638,7 +885,6 @@ async def _build_graph_from_history(
         if to_node not in G:
             G.add_node(to_node, label=to_url or to_node, url=to_url)
 
-        # Skip adding edge for navigate; only add for click/fill with selector
         if edge_model.action == ActionType.UNKNOWN:
             filtered_non_ui_edges += 1
             continue
@@ -648,7 +894,6 @@ async def _build_graph_from_history(
             edge_model.action in (ActionType.CLICK, ActionType.FILL, ActionType.SELECT, ActionType.RICH_TEXT)
             and edge_model.selector
         ):
-            # Add edge regardless of inventory (dynamic discovery)
             edge_id = f"step-{i}"
             G.add_edge(
                 from_node,
@@ -670,10 +915,28 @@ async def _build_graph_from_history(
                 intent_failure_reason=edge_model.intent_failure_reason,
                 param_name=edge_model.param_name,
                 action_value=edge_model.action_value,
+                thought=_extract_next_goal(thought),
                 element=edge_model.element,
                 constraints=edge_model.constraints,
             )
             edges_added += 1
+
+            if use_async and worker is not None:
+                raw_thought = _extract_next_goal(thought)
+                worker.enqueue({
+                    "edge_id": edge_id,
+                    "from_node": from_node,
+                    "to_node": to_node,
+                    "step_index": i,
+                    "action_type": edge_model.action,
+                    "selector": edge_model.selector,
+                    "from_url": from_url,
+                    "to_url": to_url,
+                    "param_name": edge_model.param_name,
+                    "raw_thought": raw_thought,
+                    "neighbor_steps": list(neighbor_steps),
+                    "page_signals": dict(page_signals) if page_signals else {},
+                })
 
         processed_steps.append(
             {
@@ -687,6 +950,19 @@ async def _build_graph_from_history(
         previous_target_url = to_url or from_url or previous_target_url
         previous_had_frame_path = current_had_frame_path
 
+    # Drain async intent worker if used
+    if use_async and worker is not None:
+        stats = await worker.drain()
+        # Recompute semantic warnings after async inference
+        semantic_mismatch_warnings = 0
+        for _u, _v, data in G.edges(data=True):
+            if data.get("intent") and not _semantic_consistency(
+                data.get("action", ActionType.UNKNOWN),
+                data["intent"],
+                selector=str(data.get("selector", "")),
+            ):
+                semantic_mismatch_warnings += 1
+
     G.graph["filtered_non_ui_edges"] = filtered_non_ui_edges
     G.graph["runtime_non_ui_action_count"] = runtime_non_ui_action_count
     G.graph["intent_alignment_warning_count"] = (
@@ -699,6 +975,7 @@ async def _build_graph_from_history(
         "url_discontinuity": url_discontinuity_warnings,
         "frame_context_transition": frame_context_transition_warnings,
     }
+    G.graph["intent_mode"] = intent_mode
     if edges_added == 0:
         G.graph["filtered_all_edges"] = True
     return G
@@ -838,6 +1115,7 @@ def _write_acceptance_snapshot(
 
 async def _refresh_business_templates(graph: nx.Graph) -> None:
     """Regenerate business templates and store them in graph metadata."""
+    print("Generating business templates …")
     try:
         templates = await generate_business_templates(graph)
     except Exception:
@@ -871,6 +1149,7 @@ async def re_infer_missing_intents(
     else:
         edge_iter = [(u, v, None, data) for u, v, data in graph.edges(data=True)]
 
+    context_window = _resolve_intent_context_window(default=1)
     for u, v, k, data in edge_iter:
         if data.get("intent") is not None:
             continue
@@ -885,11 +1164,15 @@ async def re_infer_missing_intents(
                 action = ActionType.UNKNOWN
         selector = str(data.get("selector", ""))
         param_name = data.get("param_name")
-        thought_text = ""
-        source_meta = graph.nodes[u] if u in graph else {}
-        target_meta = graph.nodes[v] if v in graph else {}
-        source_url = str(source_meta.get("url") or u)
-        target_url = str(target_meta.get("url") or v)
+        source_url, target_url, thought_text, neighbor_steps, page_signals = (
+            _prepare_infer_context_for_edge(
+                graph,
+                str(u),
+                str(v),
+                data,
+                window=context_window,
+            )
+        )
         intent, reason = await infer_intent_for_context(
             action=action,
             selector=selector,
@@ -897,6 +1180,8 @@ async def re_infer_missing_intents(
             target_url=target_url,
             param_name=str(param_name) if param_name is not None else None,
             thought_text=thought_text,
+            neighbor_steps=neighbor_steps,
+            page_signals=page_signals,
         )
         if intent is not None:
             if k is None:
@@ -1020,6 +1305,7 @@ async def re_infer_with_feedback(
     else:
         edge_iter = [(u, v, None, data) for u, v, data in graph.edges(data=True)]
 
+    context_window = _resolve_intent_context_window(default=1)
     for u, v, k, data in edge_iter:
         edge_id = str(data.get("edge_id") or k or "")
         lookup_keys = [
@@ -1043,11 +1329,15 @@ async def re_infer_with_feedback(
                 action = ActionType.UNKNOWN
         selector = str(data.get("selector", ""))
         param_name = data.get("param_name")
-        thought_text = ""
-        source_meta = graph.nodes[u] if u in graph else {}
-        target_meta = graph.nodes[v] if v in graph else {}
-        source_url = str(source_meta.get("url") or u)
-        target_url = str(target_meta.get("url") or v)
+        source_url, target_url, thought_text, neighbor_steps, page_signals = (
+            _prepare_infer_context_for_edge(
+                graph,
+                str(u),
+                str(v),
+                data,
+                window=context_window,
+            )
+        )
         intent, reason = await infer_intent_for_context(
             action=action,
             selector=selector,
@@ -1055,6 +1345,8 @@ async def re_infer_with_feedback(
             target_url=target_url,
             param_name=str(param_name) if param_name is not None else None,
             thought_text=thought_text,
+            neighbor_steps=neighbor_steps,
+            page_signals=page_signals,
             playback_error_hint=playback_hint,
         )
         if intent is not None:
@@ -1167,14 +1459,20 @@ async def run_mapping(
     )
 
     async def _log_step(info: dict[str, Any]) -> None:
-        edge_model = info["edge_model"]
+        edge_model = info.get("edge_model")
         step_url = info["source_url"]
         intent_text = info["intent_text"]
         index = int(info["index"]) + 1
-        print(
-            f"  [{index}] url={step_url!r} selector={edge_model.selector!r} "
-            f"action={edge_model.action!r} intent={intent_text!r}"
-        )
+        if edge_model:
+            print(
+                f"  [{index}] url={step_url!r} selector={edge_model.selector!r} "
+                f"action={edge_model.action!r} intent={intent_text!r}"
+            )
+        else:
+            print(
+                f"  [{index}] url={step_url!r} intent={intent_text!r}"
+                f" (async resolved)"
+            )
 
     G: MultiDiGraph = await _build_graph_from_history(
         history,

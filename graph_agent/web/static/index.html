@@ -374,9 +374,27 @@
           });
       }
 
+      function connectIntentStream() {
+        var es = new EventSource("/api/graph/stream");
+        es.onmessage = function (event) {
+          try {
+            var data = JSON.parse(event.data);
+            if (data.edge_id && data.status === "resolved") {
+              loadGraph();
+              loadIntents();
+            }
+          } catch (e) { /* ignore parse errors from keepalive */ }
+        };
+        es.onerror = function () {
+          es.close();
+          setTimeout(connectIntentStream, 5000);
+        };
+      }
+
       playbackBtn.addEventListener("click", runPlayback);
       loadGraph();
       loadIntents();
+      connectIntentStream();
     })();
   </script>
 </body>

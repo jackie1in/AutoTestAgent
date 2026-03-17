@@ -122,6 +122,7 @@ class GraphEdge(BaseModel):
     intent_failure_reason: str | None = None
     param_name: str | None = None
     action_value: str | None = None
+    thought: str | None = None
     element: ElementSnapshot | None = None
     constraints: ElementConstraints | None = None
 

@@ -1,4 +1,4 @@
-"""FastAPI app: GET /api/graph, GET /api/intents, POST /api/playback (SSE)."""
+"""FastAPI app: GET /api/graph, GET /api/intents, POST /api/playback (SSE), GET /api/graph/stream (SSE)."""
 
 import json
 import asyncio
@@ -496,6 +496,42 @@ def post_playback(body: PlaybackRequest):
         ),
         media_type="text/event-stream",
     )
+
+
+_graph_stream_subscribers: list[asyncio.Queue] = []
+
+
+def notify_intent_update(edge_id: str, intent_dict: dict | None, status: str) -> None:
+    """Push an intent update event to all SSE subscribers (called from IntentWorker)."""
+    event = {"edge_id": edge_id, "intent": intent_dict, "status": status}
+    for q in list(_graph_stream_subscribers):
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            pass
+
+
+@app.get("/api/graph/stream")
+async def graph_stream():
+    """SSE endpoint that pushes edge intent updates as they resolve."""
+    q: asyncio.Queue = asyncio.Queue(maxsize=256)
+    _graph_stream_subscribers.append(q)
+
+    async def event_generator():
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=30.0)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if q in _graph_stream_subscribers:
+                _graph_stream_subscribers.remove(q)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 # Serve single-page UI: "/" -> index.html, other static files from graph_agent/web/static

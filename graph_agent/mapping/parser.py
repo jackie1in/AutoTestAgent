@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
+import os
 import re
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import urlparse
 
 from graph_agent.models import (
     ActionType,
@@ -61,6 +65,42 @@ _THOUGHT_NOISE_HINTS = (
     "output file",
     "document",
 )
+
+# ---------------------------------------------------------------------------
+# Phase 1 optimizations: skip switches + intent cache
+# ---------------------------------------------------------------------------
+
+_intent_cache: dict[str, tuple[Intent, str]] = {}
+
+
+def _should_skip_refine() -> bool:
+    return (os.getenv("MAPPING_SKIP_REFINE") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _should_skip_distill() -> bool:
+    return (os.getenv("MAPPING_SKIP_DISTILL") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _make_intent_cache_key(
+    action: ActionType,
+    selector: str,
+    source_url: str,
+    target_url: str,
+    param_name: str | None,
+) -> str:
+    src_path = urlparse(source_url).path if source_url else ""
+    tgt_path = urlparse(target_url).path if target_url else ""
+    raw = f"{action.value}|{selector}|{src_path}|{tgt_path}|{param_name or ''}"
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def clear_intent_cache() -> None:
+    """Reset the in-memory intent cache (useful in tests)."""
+    _intent_cache.clear()
 
 
 def _get_next_goal(thought: dict | object) -> str:
@@ -122,6 +162,15 @@ async def infer_intent_for_context(
     playback_error_hint: str | None = None,
 ) -> tuple[Intent | None, str | None]:
     """Infer intent from context using AI only."""
+    # Cache lookup (skip when doing repair inference with playback hints)
+    if not playback_error_hint:
+        cache_key = _make_intent_cache_key(action, selector, source_url, target_url, param_name)
+        cached = _intent_cache.get(cache_key)
+        if cached is not None:
+            return cached[0], None
+    else:
+        cache_key = ""
+
     llm = get_llm()
     neighbor_section = ""
     if neighbor_steps:
@@ -174,6 +223,9 @@ Rules:
 """
     try:
         response = await ainvoke_prompt(llm, prompt)
+    except asyncio.TimeoutError:
+        timeout_ms = os.getenv("MAPPING_INTENT_TIMEOUT_MS", "?")
+        return None, f"llm_error:timeout({timeout_ms}ms)"
     except Exception as exc:  # noqa: BLE001
         return None, f"llm_error:{exc}"
 
@@ -219,6 +271,8 @@ Rules:
         key=key,
         confidence=confidence,
     )
+    if cache_key:
+        _intent_cache[cache_key] = (intent, context_level)
     return intent, None
 
 
@@ -235,6 +289,8 @@ async def _refine_non_business_key_if_needed(
 ) -> str:
     """AI-only refinement to reduce over-broad navigation keys on click/fill."""
     raw_key = (key or "").strip()
+    if _should_skip_refine():
+        return raw_key
     if action not in (ActionType.CLICK, ActionType.FILL):
         return raw_key
     if not raw_key.startswith("navigation."):
@@ -365,16 +421,27 @@ async def infer_intent_progressive(
     neighbor_steps: list[dict[str, str]] | None = None,
     page_signals: dict[str, str] | None = None,
 ) -> tuple[Intent | None, str | None, str]:
-    """Progressive disclosure inference: L0 -> L1 -> L2."""
-    attempts: list[tuple[str, list[dict[str, str]] | None, dict[str, str] | None]] = [
-        ("L0", None, None),
-        ("L1", neighbor_steps, None),
-        ("L2", neighbor_steps, page_signals),
-    ]
-    last_reason: str | None = None
-    last_level = "L0"
-    for level, ns, ps in attempts:
-        last_level = level
+    """Single-pass inference with all context; retry once on low confidence or conflict."""
+    intent, reason = await infer_intent_for_context(
+        action=action,
+        selector=selector,
+        source_url=source_url,
+        target_url=target_url,
+        param_name=param_name,
+        thought_text=thought_text,
+        neighbor_steps=neighbor_steps,
+        page_signals=page_signals,
+        context_level="full",
+    )
+    if intent is not None:
+        if not _action_intent_conflict(
+            action, intent, selector=selector,
+            source_url=source_url, target_url=target_url,
+        ):
+            return intent, None, "full"
+        reason = "semantic_conflict:action_intent_mismatch"
+
+    if reason and ("low_confidence" in reason or "semantic_conflict" in reason):
         intent, reason = await infer_intent_for_context(
             action=action,
             selector=selector,
@@ -382,24 +449,17 @@ async def infer_intent_progressive(
             target_url=target_url,
             param_name=param_name,
             thought_text=thought_text,
-            neighbor_steps=ns,
-            page_signals=ps,
-            context_level=level,
+            neighbor_steps=neighbor_steps,
+            page_signals=page_signals,
+            context_level="full_retry",
         )
-        if intent is None:
-            last_reason = reason
-            continue
-        if _action_intent_conflict(
-            action,
-            intent,
-            selector=selector,
-            source_url=source_url,
-            target_url=target_url,
+        if intent is not None and not _action_intent_conflict(
+            action, intent, selector=selector,
+            source_url=source_url, target_url=target_url,
         ):
-            last_reason = "semantic_conflict:action_intent_mismatch"
-            continue
-        return intent, None, level
-    return None, (last_reason or "intent_inference_failed"), last_level
+            return intent, None, "full_retry"
+
+    return None, (reason or "intent_inference_failed"), "full"
 
 
 async def distill_ui_thought(
@@ -419,6 +479,8 @@ async def distill_ui_thought(
         return ""
     lowered = raw.lower()
     if not any(hint in lowered for hint in _THOUGHT_NOISE_HINTS):
+        return raw
+    if _should_skip_distill():
         return raw
 
     prompt = f"""
@@ -836,6 +898,87 @@ async def parse_browser_use_step(
         intent=intent,
         context_level_used=context_level_used,
         intent_failure_reason=intent_failure_reason,
+        param_name=param_name,
+        action_value=action_value,
+        element=element,
+        constraints=constraints,
+    )
+
+
+def parse_browser_use_step_lite(
+    action: dict,
+    thought: dict | object,
+    source_url: str,
+    target_url: str,
+) -> GraphEdge:
+    """No-LLM parse: extracts action/selector/element only. Intent is left as None/pending."""
+    if not isinstance(action, dict):
+        if hasattr(action, "model_dump"):
+            action = action.model_dump()
+        elif hasattr(action, "dict"):
+            action = action.dict()
+        elif hasattr(action, "__dict__"):
+            action = action.__dict__
+        else:
+            action = {}
+
+    interacted = action.get("interacted_element") or {}
+    element = _element_snapshot_from_interacted(interacted)
+    selector = (
+        element.selector if element is not None else _selector_from_element(interacted)
+    )
+
+    play_action = ActionType.UNKNOWN
+    for key, action_type in ACTION_MAPPING.items():
+        if key in action:
+            play_action = action_type
+            break
+
+    if play_action == ActionType.FILL and _is_contenteditable(element):
+        play_action = ActionType.RICH_TEXT
+
+    is_fill = play_action in (ActionType.FILL, ActionType.RICH_TEXT, ActionType.SELECT)
+    param_name: str | None = None
+    if is_fill and element is not None:
+        param_name = element.name or element.id or None
+
+    action_value: str | None = None
+    if play_action in (ActionType.FILL, ActionType.RICH_TEXT, ActionType.SELECT):
+        for action_key in ("input_text", "input", "send_keys", "select_dropdown"):
+            payload = action.get(action_key)
+            if not isinstance(payload, Mapping):
+                continue
+            for candidate_key in ("text", "value", "selected", "option", "label"):
+                value = payload.get(candidate_key)
+                if value is not None:
+                    action_value = str(value)
+                    break
+            if action_value is not None:
+                break
+
+    constraints = _infer_constraints(param_name, element)
+    tab_id = str(action.get("tab_id") or "tab-0")
+    target_tab_id = (
+        str(action.get("target_tab_id"))
+        if action.get("target_tab_id") is not None
+        else None
+    )
+    tab_action = _extract_tab_action(action)
+    tab = _extract_tab_snapshot(action)
+
+    return GraphEdge(
+        source=source_url,
+        target=target_url,
+        selector=selector,
+        action=play_action,
+        tab_id=tab_id,
+        target_tab_id=target_tab_id,
+        tab_action=tab_action,
+        tab=tab,
+        frame_path=element.frame_path if element is not None else [],
+        intent=None,
+        context_level_used=None,
+        intent_failure_reason="pending",
         param_name=param_name,
         action_value=action_value,
         element=element,

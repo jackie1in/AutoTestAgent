@@ -15,6 +15,7 @@ from graph_agent.mapping.run import (
     FILTERED_ACTION_KEYS,
     _resolve_mapping_channel,
     _resolve_mapping_headless,
+    _resolve_intent_context_window,
     re_infer_missing_intents,
     re_infer_with_feedback,
     _resolve_snapshot_path,
@@ -295,7 +296,7 @@ async def test_build_graph_preserves_intent_and_failure_reason():
         new_callable=AsyncMock,
         return_value=edge_with_null_intent,
     ):
-        G = await _build_graph_from_history(history)
+        G = await _build_graph_from_history(history, intent_mode="sync")
 
     assert G.number_of_edges() == 1
     u, v, data = next(iter(G.edges(data=True)))
@@ -303,6 +304,66 @@ async def test_build_graph_preserves_intent_and_failure_reason():
     assert data["intent_failure_reason"] == "parse_error:invalid_json"
     assert data["selector"] == "xpath=//button[@id='x']"
     assert data["action"] == ActionType.CLICK
+
+
+@pytest.mark.asyncio
+async def test_build_graph_uses_configurable_neighbor_window():
+    history = _make_mock_history(
+        actions=[
+            {"click": {"element": "a"}, "interacted_element": {"xpath": "//a[@id='a']"}},
+            {"click": {"element": "b"}, "interacted_element": {"xpath": "//a[@id='b']"}},
+            {"click": {"element": "c"}, "interacted_element": {"xpath": "//a[@id='c']"}},
+        ],
+        thoughts=[
+            {"next_goal": "Open module"},
+            {"next_goal": "Open detail"},
+            {"next_goal": "Open tab"},
+        ],
+        urls=[
+            "https://a.com/home",
+            "https://a.com/module",
+            "https://a.com/detail",
+            "https://a.com/tab",
+        ],
+    )
+
+    async def _fake_parse(action, thought, source_url, target_url, **kwargs):
+        selector = "xpath=" + str(
+            (action.get("interacted_element") or {}).get("xpath") or ""
+        )
+        return type(
+            "EdgeModel",
+            (),
+            {
+                "selector": selector,
+                "action": ActionType.CLICK,
+                "intent": None,
+                "intent_failure_reason": "missing",
+                "param_name": None,
+                "action_value": None,
+                "element": None,
+                "constraints": None,
+                "frame_path": [],
+            },
+        )()
+
+    with (
+        patch.dict("os.environ", {"MAPPING_INTENT_CONTEXT_WINDOW": "2"}, clear=False),
+        patch(
+            "graph_agent.mapping.run.parse_browser_use_step",
+            new_callable=AsyncMock,
+            side_effect=_fake_parse,
+        ) as mock_parse,
+    ):
+        await _build_graph_from_history(history, intent_mode="sync")
+
+    assert len(mock_parse.await_args_list) == 3
+    first_neighbors = mock_parse.await_args_list[0].kwargs["neighbor_steps"]
+    third_neighbors = mock_parse.await_args_list[2].kwargs["neighbor_steps"]
+    assert first_neighbors == []
+    assert len(third_neighbors) == 2
+    assert third_neighbors[0]["thought"] == "Open module"
+    assert third_neighbors[1]["thought"] == "Open detail"
 
 
 @pytest.mark.asyncio
@@ -340,7 +401,7 @@ async def test_build_graph_filtered_non_ui_edges_in_metadata():
         new_callable=AsyncMock,
         return_value=valid_edge,
     ):
-        G = await _build_graph_from_history(history)
+        G = await _build_graph_from_history(history, intent_mode="sync")
 
     assert G.graph["filtered_non_ui_edges"] == 2  # read_file, write_file
     assert G.number_of_edges() == 1
@@ -363,7 +424,7 @@ async def test_build_graph_filters_unknown_action_key():
         "graph_agent.mapping.run.parse_browser_use_step",
         new_callable=AsyncMock,
     ):
-        G = await _build_graph_from_history(history)
+        G = await _build_graph_from_history(history, intent_mode="sync")
 
     assert G.number_of_edges() == 0
     assert G.graph["filtered_non_ui_edges"] == 1
@@ -404,7 +465,7 @@ async def test_build_graph_records_context_level_used():
         new_callable=AsyncMock,
         return_value=edge_with_level,
     ):
-        G = await _build_graph_from_history(history)
+        G = await _build_graph_from_history(history, intent_mode="sync")
 
     assert G.number_of_edges() == 1
     _u, _v, data = next(iter(G.edges(data=True)))
@@ -461,7 +522,7 @@ async def test_build_graph_tab_context_preserved_on_edge():
         new_callable=AsyncMock,
         return_value=edge_with_tab_context,
     ):
-        G = await _build_graph_from_history(history)
+        G = await _build_graph_from_history(history, intent_mode="sync")
 
     assert G.number_of_edges() == 1
     _u, _v, data = next(iter(G.edges(data=True)))
@@ -548,7 +609,7 @@ async def test_build_graph_uses_opaque_state_ids_for_same_url_steps():
         new_callable=AsyncMock,
         side_effect=[fill_user, fill_pass],
     ):
-        G = await _build_graph_from_history(history)
+        G = await _build_graph_from_history(history, intent_mode="sync")
 
     assert G.number_of_edges() == 2
     assert G.number_of_nodes() >= 3
@@ -662,6 +723,7 @@ async def test_re_infer_with_feedback_updates_targeted_edge(tmp_path: Path):
 
     assert stats["total"] == 1
     assert stats["succeeded"] == 1
+    assert mock_infer.await_args is not None
     kwargs = mock_infer.await_args.kwargs
     assert kwargs["playback_error_hint"] == "selector: timeout"
     G = load_graph(graph_path)
@@ -874,6 +936,63 @@ async def test_re_infer_missing_intents_uses_node_url_metadata(tmp_path: Path):
     kwargs = mock_infer.await_args.kwargs
     assert kwargs["source_url"] == "https://example.com/login"
     assert kwargs["target_url"] == "https://example.com/login"
+
+
+@pytest.mark.asyncio
+async def test_re_infer_missing_intents_uses_edge_thought_and_neighbors(tmp_path: Path):
+    G: nx.MultiDiGraph = nx.MultiDiGraph()
+    G.add_node("s1", url="https://example.com/a")
+    G.add_node("s2", url="https://example.com/b")
+    G.add_node("s3", url="https://example.com/c")
+    G.add_edge(
+        "s1",
+        "s2",
+        key="step-1",
+        edge_id="step-1",
+        step_index=1,
+        selector="#first",
+        action=ActionType.CLICK,
+        intent=None,
+        intent_failure_reason="missing",
+        thought="open first section",
+    )
+    G.add_edge(
+        "s2",
+        "s3",
+        key="step-2",
+        edge_id="step-2",
+        step_index=2,
+        selector="#second",
+        action=ActionType.CLICK,
+        intent=None,
+        intent_failure_reason="missing",
+        thought="open second section",
+    )
+    graph_path = tmp_path / "graph.json"
+    save_graph(G, graph_path)
+
+    with (
+        patch.dict("os.environ", {"MAPPING_INTENT_CONTEXT_WINDOW": "1"}, clear=False),
+        patch(
+            "graph_agent.mapping.run.infer_intent_for_context",
+            new_callable=AsyncMock,
+            return_value=(None, "parse_error"),
+        ) as mock_infer,
+        patch(
+            "graph_agent.mapping.run._refresh_business_templates",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        await re_infer_missing_intents(graph_path)
+
+    calls = {c.kwargs["selector"]: c.kwargs for c in mock_infer.await_args_list}
+    assert calls["#first"]["thought_text"] == "open first section"
+    assert calls["#first"]["neighbor_steps"] == []
+    assert calls["#second"]["thought_text"] == "open second section"
+    assert len(calls["#second"]["neighbor_steps"]) == 1
+    assert calls["#second"]["neighbor_steps"][0]["selector"] == "#first"
+    assert calls["#second"]["page_signals"]["action_key"] == "click"
 
 
 @pytest.mark.asyncio
@@ -1155,6 +1274,19 @@ def test_resolve_mapping_channel_from_env():
         assert _resolve_mapping_channel() == "chrome"
 
 
+def test_resolve_intent_context_window_from_env():
+    with patch.dict("os.environ", {}, clear=True):
+        assert _resolve_intent_context_window() == 1
+    with patch.dict("os.environ", {"MAPPING_INTENT_CONTEXT_WINDOW": "3"}, clear=True):
+        assert _resolve_intent_context_window() == 3
+    with patch.dict("os.environ", {"MAPPING_INTENT_CONTEXT_WINDOW": "-2"}, clear=True):
+        assert _resolve_intent_context_window() == 0
+    with patch.dict("os.environ", {"MAPPING_INTENT_CONTEXT_WINDOW": "99"}, clear=True):
+        assert _resolve_intent_context_window() == 5
+    with patch.dict("os.environ", {"MAPPING_INTENT_CONTEXT_WINDOW": "abc"}, clear=True):
+        assert _resolve_intent_context_window() == 1
+
+
 def test_task_template_includes_derived_exploration_hint():
     """Task 2: Default task template should encourage exploring derived pages."""
     from graph_agent.mapping.run import DEFAULT_TASK_TEMPLATE
@@ -1228,7 +1360,7 @@ async def test_mapping_save_load_preserves_recording_context(tmp_path: Path):
         new_callable=AsyncMock,
         return_value=edge_with_full_context,
     ):
-        G = await _build_graph_from_history(history)
+        G = await _build_graph_from_history(history, intent_mode="sync")
 
     graph_path = tmp_path / "graph.json"
     save_graph(G, graph_path)
@@ -1424,6 +1556,7 @@ async def test_run_mapping_produces_graph_with_required_metadata(tmp_path: Path)
         _edge("button[type=submit]", "submit_login", ActionType.CLICK),
     ]
     with (
+        patch.dict("os.environ", {"MAPPING_INTENT_MODE": "sync"}, clear=False),
         patch("browser_use.Agent", MockAgent),
         patch("browser_use.Browser", mock_browser),
         patch(
