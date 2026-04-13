@@ -44,7 +44,7 @@ class PlaybackAcceptanceResult:
     """Task 7 回放验收汇总。"""
 
     graph_path: str
-    data_source: str = "uv run python -m graph_agent.mapping.run"
+    data_source: str = "uv run python -m graph_agent.cartography.runner"
     total_attempted: int = 0
     total_succeeded: int = 0
     with_iframe_or_tab_succeeded: int = 0
@@ -101,12 +101,12 @@ def is_graph_from_mapping_run(graph_path: str | Path) -> tuple[bool, str]:
     if ds != "mapping.run":
         return False, (
             f"graph metadata data_source={ds!r}, expected 'mapping.run'. "
-            "请先运行: uv run python -m graph_agent.mapping.run"
+            "请先运行: uv run python -m graph_agent.cartography.runner"
         )
     if not ga:
         return False, (
             "graph metadata missing generated_at. "
-            "请先运行: uv run python -m graph_agent.mapping.run"
+            "请先运行: uv run python -m graph_agent.cartography.runner"
         )
     return True, ""
 

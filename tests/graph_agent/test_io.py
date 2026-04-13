@@ -10,9 +10,9 @@ from graph_agent.models import (
     ActionType,
     BusinessTemplate,
     BusinessTemplateStep,
+    Intent,
     ElementSnapshot,
     FrameLocatorSnapshot,
-    Intent,
     TabActionType,
     TabSnapshot,
 )

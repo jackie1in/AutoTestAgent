@@ -1,0 +1,369 @@
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from neo4j import AsyncDriver
+
+from graph_agent.models import Checkpoint, State, Transition, Zone
+
+logger = logging.getLogger(__name__)
+
+# Fingerprint changes within this window (seconds) don't degrade confidence,
+# protecting against pages with dynamic content (timestamps, counters, etc.).
+_FP_GRACE_PERIOD_SECONDS = 300
+
+
+@dataclass
+class CartographyResult:
+    """Output of a single exploration task."""
+
+    states: list[State] = field(default_factory=list)
+    transitions: list[Transition] = field(default_factory=list)
+    zones: list[Zone] = field(default_factory=list)
+    checkpoints: list[Checkpoint] = field(default_factory=list)
+    zone_state_map: dict[str, str] = field(default_factory=dict)
+    checkpoint_transition_map: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class MergeReport:
+    """Summary of a merge operation."""
+
+    states_created: int = 0
+    states_updated: int = 0
+    transitions_created: int = 0
+    transitions_updated: int = 0
+    transitions_confidence_boosted: int = 0
+    zones_created: int = 0
+    checkpoints_created: int = 0
+
+
+class GraphMerger:
+    """Merges exploration findings into the Neo4j graph.
+
+    All writes within a single ``merge()`` call share one Neo4j transaction
+    so that partial failures are rolled back automatically.
+    """
+
+    def __init__(self, driver: AsyncDriver):
+        self._driver = driver
+
+    async def merge(
+        self,
+        findings: CartographyResult,
+        session_id: str,
+        app_id: str | None = None,
+    ) -> MergeReport:
+        report = MergeReport()
+
+        async with self._driver.session() as neo_session:
+            tx = await neo_session.begin_transaction()
+            try:
+                for state in findings.states:
+                    created = await self._merge_state(tx, state, session_id)
+                    if created:
+                        report.states_created += 1
+                    else:
+                        report.states_updated += 1
+                    if app_id:
+                        await tx.run(
+                            "MATCH (a:App {id: $app_id}), (s:State {id: $state_id}) "
+                            "MERGE (a)-[:HAS_STATE]->(s)",
+                            app_id=app_id, state_id=state.id,
+                        )
+
+                for transition in findings.transitions:
+                    result = await self._merge_transition(tx, transition, session_id)
+                    if result == "created":
+                        report.transitions_created += 1
+                    elif result == "boosted":
+                        report.transitions_confidence_boosted += 1
+                    else:
+                        report.transitions_updated += 1
+
+                for zone in findings.zones:
+                    state_id = findings.zone_state_map.get(zone.id)
+                    created = await self._merge_zone(tx, zone, state_id)
+                    if created:
+                        report.zones_created += 1
+
+                for cp in findings.checkpoints:
+                    transition_id = findings.checkpoint_transition_map.get(cp.id)
+                    await self._merge_checkpoint(tx, cp, session_id, transition_id)
+                    report.checkpoints_created += 1
+
+                await tx.commit()
+            except Exception:
+                await tx.rollback()
+                raise
+
+        logger.info(
+            "Merge complete: %d states (+%d new), %d transitions (+%d new, %d boosted), %d zones, %d checkpoints",
+            report.states_created + report.states_updated,
+            report.states_created,
+            report.transitions_created
+            + report.transitions_updated
+            + report.transitions_confidence_boosted,
+            report.transitions_created,
+            report.transitions_confidence_boosted,
+            report.zones_created,
+            report.checkpoints_created,
+        )
+        return report
+
+    # ── State ────────────────────────────────────────────────
+
+    async def _merge_state(self, tx, state: State, session_id: str) -> bool:
+        result = await tx.run(
+            "MATCH (s:State {id: $id}) RETURN s.id AS id, s.fingerprint AS fp, "
+            "s.last_visited AS lv",
+            id=state.id,
+        )
+        existing = await result.single()
+        now = datetime.utcnow().isoformat()
+
+        if existing is None:
+            await tx.run(
+                "CREATE (s:State {id: $id, url: $url, title: $title, "
+                "fingerprint: $fp, first_discovered: $now, last_visited: $now, "
+                "visit_count: 1, menu_path: $menu_path, is_modal: $is_modal})",
+                id=state.id,
+                url=state.url,
+                title=state.title,
+                fp=state.fingerprint,
+                now=now,
+                menu_path=state.menu_path,
+                is_modal=state.is_modal,
+            )
+            await tx.run(
+                "MATCH (sess:Session {id: $sid}), (s:State {id: $state_id}) "
+                "MERGE (sess)-[:DISCOVERED]->(s)",
+                sid=session_id,
+                state_id=state.id,
+            )
+            return True
+
+        # Existing state — decide whether fingerprint change is significant
+        fp_changed = (
+            existing["fp"] != state.fingerprint
+            and state.fingerprint
+            and existing["fp"]
+        )
+        if fp_changed:
+            last_visited = existing.get("lv") or ""
+            should_degrade = True
+            if last_visited:
+                try:
+                    lv_dt = datetime.fromisoformat(last_visited)
+                    now_dt = datetime.fromisoformat(now)
+                    elapsed = (now_dt - lv_dt).total_seconds()
+                    if elapsed < _FP_GRACE_PERIOD_SECONDS:
+                        should_degrade = False
+                except (ValueError, TypeError):
+                    pass
+
+            if should_degrade:
+                await tx.run(
+                    "MATCH (s:State {id: $id})<-[:FROM]-(t:Transition) "
+                    "SET t.confidence = CASE WHEN t.confidence - 0.1 < 0 THEN 0.0 "
+                    "ELSE t.confidence - 0.1 END",
+                    id=state.id,
+                )
+
+        await tx.run(
+            "MATCH (s:State {id: $id}) "
+            "SET s.last_visited = $now, s.visit_count = s.visit_count + 1"
+            + (", s.fingerprint = $fp" if state.fingerprint else ""),
+            id=state.id,
+            now=now,
+            fp=state.fingerprint,
+        )
+        return False
+
+    # ── Transition ───────────────────────────────────────────
+
+    async def _merge_transition(self, tx, transition: Transition, session_id: str) -> str:
+        action_val = (
+            transition.action.value
+            if hasattr(transition.action, "value")
+            else str(transition.action)
+        )
+        result = await tx.run(
+            "MATCH (s1:State)<-[:FROM]-(t:Transition)-[:TO]->(s2:State) "
+            "WHERE s1.id = $from_id AND s2.id = $to_id "
+            "AND t.action = $action AND t.selector = $selector "
+            "RETURN t.id AS id, t.confidence AS confidence",
+            from_id=transition.from_state_id,
+            to_id=transition.to_state_id,
+            action=action_val,
+            selector=transition.selector,
+        )
+        existing = await result.single()
+        now = datetime.utcnow().isoformat()
+
+        if existing is None:
+            initial_conf = max(0.5, transition.confidence)
+            await tx.run(
+                "CREATE (t:Transition {id: $id, selector: $selector, action: $action, "
+                "action_value: $action_value, param_name: $param_name, thought: $thought, "
+                "confidence: $conf, first_discovered: $now, session_id: $sid, "
+                "step_index: $step_index, element_snapshot: $elem, frame_path: $fp, "
+                "tab_id: $tab_id, validation_count: 0})",
+                id=transition.id,
+                selector=transition.selector,
+                action=action_val,
+                action_value=transition.action_value,
+                param_name=transition.param_name,
+                thought=transition.thought,
+                conf=initial_conf,
+                now=now,
+                sid=session_id,
+                step_index=transition.step_index,
+                elem=transition.element_snapshot,
+                fp=transition.frame_path,
+                tab_id=transition.tab_id,
+            )
+            if transition.from_state_id:
+                await tx.run(
+                    "MATCH (t:Transition {id: $tid}), (s:State {id: $sid}) "
+                    "MERGE (t)-[:FROM]->(s)",
+                    tid=transition.id,
+                    sid=transition.from_state_id,
+                )
+            if transition.to_state_id:
+                await tx.run(
+                    "MATCH (t:Transition {id: $tid}), (s:State {id: $sid}) "
+                    "MERGE (t)-[:TO]->(s)",
+                    tid=transition.id,
+                    sid=transition.to_state_id,
+                )
+            await tx.run(
+                "MATCH (sess:Session {id: $sess_id}), (t:Transition {id: $tid}) "
+                "MERGE (sess)-[:DISCOVERED]->(t)",
+                sess_id=session_id,
+                tid=transition.id,
+            )
+            return "created"
+
+        new_conf = min(1.0, existing["confidence"] + 0.2)
+        await tx.run(
+            "MATCH (t:Transition {id: $id}) "
+            "SET t.confidence = $conf, t.last_validated = $now, "
+            "    t.validation_count = t.validation_count + 1",
+            id=existing["id"],
+            conf=new_conf,
+            now=now,
+        )
+        await tx.run(
+            "MATCH (sess:Session {id: $sess_id}), (t:Transition {id: $tid}) "
+            "MERGE (sess)-[:VALIDATED]->(t)",
+            sess_id=session_id,
+            tid=existing["id"],
+        )
+        return "boosted"
+
+    # ── Zone ─────────────────────────────────────────────────
+
+    async def _merge_zone(self, tx, zone: Zone, state_id: str | None = None) -> bool:
+        result = await tx.run(
+            "MATCH (z:Zone {id: $id}) RETURN z.id",
+            id=zone.id,
+        )
+        existing = await result.single()
+        if existing is None:
+            zone_type = (
+                zone.zone_type.value
+                if hasattr(zone.zone_type, "value")
+                else str(zone.zone_type)
+            )
+            await tx.run(
+                "CREATE (z:Zone {id: $id, zone_type: $zt, root_selector: $rs, "
+                "summary: $summary, interactive_count: $ic, "
+                "exploration_status: 'discovered'})",
+                id=zone.id,
+                zt=zone_type,
+                rs=zone.root_selector,
+                summary=zone.summary,
+                ic=zone.interactive_count,
+            )
+            if state_id:
+                await tx.run(
+                    "MATCH (s:State {id: $sid}), (z:Zone {id: $zid}) "
+                    "MERGE (s)-[:HAS_ZONE]->(z)",
+                    sid=state_id,
+                    zid=zone.id,
+                )
+            return True
+        return False
+
+    # ── Checkpoint ───────────────────────────────────────────
+
+    async def _merge_checkpoint(
+        self, tx, cp: Checkpoint, session_id: str, transition_id: str | None = None
+    ) -> None:
+        layer = cp.layer.value if hasattr(cp.layer, "value") else str(cp.layer)
+        timing = cp.timing.value if hasattr(cp.timing, "value") else str(cp.timing)
+        expect = cp.expect.value if hasattr(cp.expect, "value") else str(cp.expect)
+        severity = cp.severity.value if hasattr(cp.severity, "value") else str(cp.severity)
+        origin = (
+            cp.origin_type.value if hasattr(cp.origin_type, "value") else str(cp.origin_type)
+        )
+        await tx.run(
+            "MERGE (c:Checkpoint {id: $id}) "
+            "SET c.layer = $layer, c.timing = $timing, c.expect = $expect, "
+            "c.severity = $severity, c.rule_type = $rt, c.rule = $rule, "
+            "c.description = $desc, c.origin_type = $origin, c.session_id = $sid",
+            id=cp.id,
+            layer=layer,
+            timing=timing,
+            expect=expect,
+            severity=severity,
+            rt=cp.rule_type,
+            rule=cp.rule,
+            desc=cp.description,
+            origin=origin,
+            sid=session_id,
+        )
+        await tx.run(
+            "MATCH (sess:Session {id: $sess_id}), (c:Checkpoint {id: $cid}) "
+            "MERGE (sess)-[:GENERATED]->(c)",
+            sess_id=session_id,
+            cid=cp.id,
+        )
+        if transition_id:
+            rel_type = "CHECK_AFTER" if timing == "after" else "CHECK_BEFORE"
+            await tx.run(
+                f"MATCH (t:Transition {{id: $tid}}), (c:Checkpoint {{id: $cid}}) "
+                f"MERGE (t)-[:{rel_type}]->(c)",
+                tid=transition_id,
+                cid=cp.id,
+            )
+
+    # ── Validation (standalone, outside merge tx) ────────────
+
+    async def update_transition_confidence(
+        self, transition_id: str, passed: bool, session_id: str
+    ) -> None:
+        delta = 0.2 if passed else -0.3
+        async with self._driver.session() as session:
+            await session.run(
+                "MATCH (t:Transition {id: $id}) "
+                "SET t.confidence = CASE "
+                "  WHEN t.confidence + $delta > 1.0 THEN 1.0 "
+                "  WHEN t.confidence + $delta < 0.0 THEN 0.0 "
+                "  ELSE t.confidence + $delta END, "
+                "t.last_validated = $now, "
+                "t.validation_count = t.validation_count + 1",
+                id=transition_id,
+                delta=delta,
+                now=datetime.utcnow().isoformat(),
+            )
+            rel = "VALIDATED" if passed else "INVALIDATED"
+            await session.run(
+                f"MATCH (sess:Session {{id: $sid}}), (t:Transition {{id: $tid}}) "
+                f"MERGE (sess)-[:{rel}]->(t)",
+                sid=session_id,
+                tid=transition_id,
+            )

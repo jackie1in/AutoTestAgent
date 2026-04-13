@@ -20,7 +20,7 @@
 
 **1. 测绘（Scout + Mapping 一条命令）**
 ```bash
-uv run python -m graph_agent.mapping.run --url https://the-internet.herokuapp.com/login
+uv run python -m graph_agent.cartography.runner --url https://the-internet.herokuapp.com/login
 ```
 默认生成 `graph_agent/data/element_inventory.json` 和 `graph_agent/data/graph.json`，可通过 `.env` 或 `--inventory` / `--output` 覆盖。
 

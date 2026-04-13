@@ -5,12 +5,12 @@ from graph_agent.models import (
     ActionType,
     BusinessTemplate,
     BusinessTemplateStep,
+    Intent,
     ElementSnapshot,
     FrameLocatorSnapshot,
     GraphEdge,
     GraphNode,
     GraphData,
-    Intent,
     TabActionType,
     TabSnapshot,
 )

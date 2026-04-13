@@ -9,9 +9,9 @@ import pytest
 
 from graph_agent.models import (
     ActionType,
+    Intent,
     FrameLocatorSnapshot,
     GraphEdge,
-    Intent,
     TabActionType,
 )
 from graph_agent.playback.engine import (

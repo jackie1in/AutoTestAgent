@@ -45,10 +45,10 @@ LLM_MODEL=google/gemini-2.5-pro-preview
 
 ```bash
 # 使用默认 URL（或 .env 中的 MAPPING_URL）
-uv run python -m graph_agent.mapping.run
+uv run python -m graph_agent.cartography.runner
 
 # 指定 URL 与路径
-uv run python -m graph_agent.mapping.run \
+uv run python -m graph_agent.cartography.runner \
   --url https://the-internet.herokuapp.com/login \
   --inventory graph_agent/data/element_inventory.json \
   --output graph_agent/data/graph.json

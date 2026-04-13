@@ -1,13 +1,16 @@
+from __future__ import annotations
+import json
+from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 
 class ActionType(str, Enum):
     CLICK = "click"
     FILL = "fill"
-    RICH_TEXT = "rich_text"
     SELECT = "select"
+    RICH_TEXT = "rich_text"
     NAVIGATE = "navigate"
     UNKNOWN = "unknown"
 
@@ -18,14 +21,302 @@ class TabActionType(str, Enum):
     CLOSE = "close"
 
 
+class ZoneType(str, Enum):
+    SEARCH_FORM = "search_form"
+    DATA_TABLE = "data_table"
+    DETAIL_FORM = "detail_form"
+    ACTION_BAR = "action_bar"
+    TAB_PANEL = "tab_panel"
+    TREE_PANEL = "tree_panel"
+    MODAL = "modal"
+
+
+class ExplorationStatus(str, Enum):
+    UNDISCOVERED = "undiscovered"
+    DISCOVERED = "discovered"
+    PARTIAL = "partial"
+    EXPLORED = "explored"
+    VALIDATED = "validated"
+    STALE = "stale"
+
+
+class CheckpointLayer(str, Enum):
+    STRUCTURAL = "structural"
+    DATA = "data"
+    BEHAVIORAL = "behavioral"
+    SEMANTIC = "semantic"
+    ENTITY = "entity"
+    LIFECYCLE = "lifecycle"
+
+
+class CheckpointTiming(str, Enum):
+    BEFORE = "before"
+    IMMEDIATE = "immediate"
+    AFTER_BLUR = "after_blur"
+    AFTER_SUBMIT = "after_submit"
+    AFTER = "after"
+
+
+class CheckpointExpect(str, Enum):
+    SHOULD_PASS = "should_pass"
+    SHOULD_FAIL = "should_fail"
+
+
+class Severity(str, Enum):
+    CRITICAL = "critical"
+    MAJOR = "major"
+    MINOR = "minor"
+    INFO = "info"
+
+
+class CheckpointOrigin(str, Enum):
+    CARTOGRAPHY = "cartography"
+    STRATEGY = "strategy"
+    MANUAL = "manual"
+    INFERRED = "inferred"
+
+
+class TestCaseCategory(str, Enum):
+    BOUNDARY = "boundary"
+    EQUIVALENCE = "equivalence"
+    NEGATIVE = "negative"
+    FORMAT = "format"
+    REQUIRED = "required"
+    POSITIVE = "positive"
+    CHAOS = "chaos"
+
+
+class SessionFocus(str, Enum):
+    BREADTH = "breadth"
+    DEPTH = "depth"
+    VALIDATION = "validation"
+
+
+# ===== Node Models =====
+
+class App(BaseModel):
+    """Top-level application node that owns all States, Sessions, etc."""
+    id: str
+    name: str = ""
+    entry_url: str = ""
+    description: str = ""
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    last_session_at: datetime | None = None
+    total_sessions: int = 0
+    total_states: int = 0
+    total_transitions: int = 0
+
+
+class State(BaseModel):
+    id: str
+    url: str
+    title: str = ""
+    fingerprint: str = ""
+    menu_path: list[str] = Field(default_factory=list)
+    first_discovered: datetime = Field(default_factory=datetime.utcnow)
+    last_visited: datetime = Field(default_factory=datetime.utcnow)
+    visit_count: int = 1
+    spa_route: str | None = None
+    is_modal: bool = False
+    parent_state_id: str | None = None
+    app_id: str | None = None
+
+
+class Transition(BaseModel):
+    id: str
+    selector: str = ""
+    action: ActionType = ActionType.CLICK
+    action_value: str | None = None
+    param_name: str | None = None
+    element_snapshot: str | None = None  # JSON
+    frame_path: str | None = None  # JSON
+    tab_id: str = "tab-0"
+    target_tab_id: str | None = None
+    tab_action: TabActionType | None = None
+    thought: str | None = None
+    confidence: float = 0.5
+    first_discovered: datetime = Field(default_factory=datetime.utcnow)
+    last_validated: datetime | None = None
+    session_id: str | None = None
+    validation_count: int = 0
+    step_index: int | None = None
+
+    # Intent inference (unified across cartography and mapping)
+    intent: "Intent | None" = None
+    intent_failure_reason: str | None = None
+
+    # Relationship endpoints (not stored as properties, used for graph construction)
+    from_state_id: str | None = None
+    to_state_id: str | None = None
+
+
+class Zone(BaseModel):
+    id: str
+    zone_type: ZoneType = ZoneType.SEARCH_FORM
+    root_selector: str = ""
+    summary: str = ""
+    interactive_count: int = 0
+    exploration_status: ExplorationStatus = ExplorationStatus.UNDISCOVERED
+    last_explored: datetime | None = None
+
+
+class FrameNode(BaseModel):
+    id: str
+    selector: str = ""
+    xpath: str | None = None
+    name: str | None = None
+    src: str | None = None
+    depth: int = 0
+    parent_frame_id: str | None = None
+
+
+class Entity(BaseModel):
+    id: str
+    name: str
+    key_fields: list[str] = Field(default_factory=list)
+    description: str = ""
+
+
+class EntityInstance(BaseModel):
+    id: str
+    data: str = "{}"  # JSON
+    status: str = "available"  # available | consumed | expired
+    session_id: str | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    def get_data(self) -> dict:
+        return json.loads(self.data)
+
+
+class Intent(BaseModel):
+    id: str = ""
+    name: str = ""
+    raw: str = ""
+    summary: str = ""
+    verb: str = ""
+    object: str = ""
+    key: str = ""
+    confidence: float | None = None
+
+
+class Checkpoint(BaseModel):
+    id: str
+    layer: CheckpointLayer = CheckpointLayer.STRUCTURAL
+    timing: CheckpointTiming = CheckpointTiming.AFTER
+    expect: CheckpointExpect = CheckpointExpect.SHOULD_PASS
+    severity: Severity = Severity.MAJOR
+    rule_type: str = ""
+    rule: str = "{}"  # JSON
+    description: str = ""
+    origin_type: CheckpointOrigin = CheckpointOrigin.CARTOGRAPHY
+    session_id: str | None = None
+    total_runs: int = 0
+    pass_count: int = 0
+    fail_count: int = 0
+    flaky: bool = False
+    last_result: str | None = None  # pass | fail | skip
+
+    def get_rule(self) -> dict:
+        return json.loads(self.rule)
+
+
+class FieldConstraint(BaseModel):
+    id: str
+    selector: str = ""
+    field_name: str = ""
+    input_type: str = "text"
+    required: bool = False
+    min_length: int | None = None
+    max_length: int | None = None
+    min_value: float | None = None
+    max_value: float | None = None
+    pattern: str | None = None
+    step: float | None = None
+    learned_constraints: str = "[]"  # JSON array
+    valid_examples: list[str] = Field(default_factory=list)
+
+
+class TestCase(BaseModel):
+    id: str
+    name: str = ""
+    category: TestCaseCategory = TestCaseCategory.POSITIVE
+    description: str = ""
+    field_overrides: str = "{}"  # JSON
+    total_runs: int = 0
+    pass_count: int = 0
+    fail_count: int = 0
+    last_run: datetime | None = None
+    last_result: str | None = None
+
+
+class Session(BaseModel):
+    id: str
+    app_id: str | None = None
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    duration_ms: int = 0
+    focus: SessionFocus = SessionFocus.BREADTH
+    states_discovered: int = 0
+    states_updated: int = 0
+    transitions_discovered: int = 0
+    transitions_validated: int = 0
+    transitions_invalidated: int = 0
+    checkpoints_generated: int = 0
+
+
+class Menu(BaseModel):
+    """Navigation menu item node - separate from State."""
+    id: str
+    label: str
+    level: int = 0
+    order_index: int = 0
+    selector: str = ""
+    menu_key: str | None = None
+    app_id: str = ""
+    stable_path: str | None = None
+    first_discovered: datetime = Field(default_factory=datetime.utcnow)
+    last_seen: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ===== Scope Model =====
+
+class ExplorationScope(BaseModel):
+    id: str
+    name: str
+    include_selectors: list[str] = Field(default_factory=list)
+    exclude_selectors: list[str] = Field(default_factory=list)
+    allow_navigation: bool = False
+    allow_iframe: bool = True
+    max_iframe_depth: int = 3
+
+
+# ===== Coverage Model =====
+
+class TransitionConfidenceDistribution(BaseModel):
+    high: int = 0  # >= 0.8
+    medium: int = 0  # 0.4 - 0.8
+    low: int = 0  # < 0.4
+
+
+class CoverageReport(BaseModel):
+    menu_coverage: float = 0.0
+    zone_coverage: float = 0.0
+    interaction_coverage: float = 0.0
+    transition_confidence: TransitionConfidenceDistribution = Field(
+        default_factory=TransitionConfidenceDistribution
+    )
+    overall_completeness: float = 0.0
+    recommendation: Literal["complete", "needs_more", "needs_validation"] = "needs_more"
+
+
+# ===== Mapping / Playback Models =====
+# (Migrated from the former graph_agent/models.py)
+
 class ElementConstraints(BaseModel):
-    format: str | None = None  # email, phone, password
+    format: str | None = None
     masked: bool = False
 
 
 class FrameLocatorSnapshot(BaseModel):
-    """Captured iframe locator metadata for nested frame replay."""
-
     selector: str
     xpath: str | None = None
     x_path: str | None = None
@@ -36,8 +327,6 @@ class FrameLocatorSnapshot(BaseModel):
 
 
 class ElementSnapshot(BaseModel):
-    """Captured interacted element metadata for replay/debugging."""
-
     selector: str
     xpath: str | None = None
     x_path: str | None = None
@@ -46,6 +335,14 @@ class ElementSnapshot(BaseModel):
     id: str | None = None
     class_name: str | None = None
     type: str | None = None
+    tag_name: str | None = None                 # HTML tag name (button, input, etc.)
+    text_content: str | None = None             # Element text content
+    inner_text: str | None = None               # Visible text (innerText)
+    placeholder: str | None = None              # Input placeholder
+    aria_label: str | None = None               # Accessibility label
+    value: str | None = None                    # Current value (for inputs)
+    href: str | None = None                     # For links
+    title: str | None = None                    # Title attribute
     attributes: dict[str, Any] = Field(default_factory=dict)
     frame_path: list[FrameLocatorSnapshot] = Field(default_factory=list)
 
@@ -57,25 +354,7 @@ class TabSnapshot(BaseModel):
     title: str | None = None
 
 
-class Intent(BaseModel):
-    """Structured business intent."""
-
-    raw: str = Field(..., description="Original thought from agent")
-    verb: str = Field(..., description="Action verb (e.g. Login, Submit, Search)")
-    object: str = Field(..., description="Target object (e.g. Form, Button, Item)")
-    summary: str = Field(..., description="Human-readable summary")
-    key: str | None = Field(
-        default=None,
-        description="Normalized intent key (e.g. fill_username, submit_login)",
-    )
-    confidence: float | None = Field(
-        default=None, description="Intent confidence score in [0, 1]"
-    )
-
-
 class BusinessTemplateStep(BaseModel):
-    """One replayable step inside a higher-level business flow template."""
-
     edge_id: str | None = None
     source: str
     target: str
@@ -86,8 +365,6 @@ class BusinessTemplateStep(BaseModel):
 
 
 class BusinessTemplate(BaseModel):
-    """Derived high-level business path built from multiple atomic edges."""
-
     template_id: str
     business_key: str
     summary: str
@@ -102,8 +379,7 @@ class BusinessTemplate(BaseModel):
 
 
 class GraphEdge(BaseModel):
-    """Edge data representing an interaction."""
-
+    """Edge representing an interaction in the mapping graph."""
     edge_id: str | None = None
     step_index: int | None = None
     source: str
@@ -153,16 +429,12 @@ class GraphEdge(BaseModel):
 
 
 class GraphNode(BaseModel):
-    """Node data representing a page state."""
-
     id: str
     url: str
     title: str | None = None
 
 
 class GraphData(BaseModel):
-    """Full graph structure for serialization."""
-
     nodes: list[GraphNode]
     edges: list[GraphEdge]
     metadata: dict[str, Any] = {}

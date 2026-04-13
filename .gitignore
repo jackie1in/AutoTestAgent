@@ -11,3 +11,5 @@ vibetest-use
 .pytest_cache/*
 .mypy_cache/*
 **/data/*
+neo4j_data/
+.gitnexus

@@ -10,14 +10,25 @@ from datetime import datetime, timezone
 from typing import Any
 
 import networkx as nx
+from pydantic import BaseModel, Field
 
-from graph_agent.llm import ainvoke_prompt, get_llm
+from graph_agent.llm import ainvoke_structured, get_llm
 from graph_agent.models import (
     ActionType,
     BusinessTemplate,
     BusinessTemplateStep,
     Intent,
 )
+
+
+class BusinessFlowClassification(BaseModel):
+    """Classification of whether a path forms a meaningful business workflow."""
+    is_business_flow: bool = Field(description="Whether this path forms a coherent business workflow")
+    business_key: str = Field(default="", description="Dot-separated business key, e.g. auth.login")
+    summary: str = Field(default="", description="Short summary of the business flow")
+    slots: dict[str, Any] = Field(default_factory=dict, description="Slot mappings")
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="Confidence score 0-1")
+    evidence: dict[str, Any] = Field(default_factory=dict, description="Evidence including intent_keys and selectors")
 
 MIN_TEMPLATE_PATH_LENGTH = 2
 MAX_TEMPLATE_PATH_LENGTH = 6
@@ -244,34 +255,31 @@ async def _classify_candidate_with_llm(
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
     """Use the configured LLM to decide whether a path is a business flow."""
-    prompt = f"""
-You classify atomic browser interaction paths into higher-level business flows.
+    system_prompt = """You classify atomic browser interaction paths into higher-level business flows.
 
-Given the path JSON below, decide whether it forms one meaningful business workflow
-such as auth.login, auth.register, search.execute, checkout.submit.
+Given the path JSON, decide whether it forms one meaningful business workflow
+such as auth.login, auth.register, search.execute, checkout.submit."""
+    
+    user_prompt = f"""Classify the following path JSON:
 
-Return STRICT JSON only with this schema:
-{{
-  "is_business_flow": true or false,
-  "business_key": "dot.separated.key" or "",
-  "summary": "short summary" or "",
-  "slots": {{"slot_name": edge_index_or_edge_id}},
-  "confidence": 0.0,
-  "evidence": {{"intent_keys": [], "selectors": []}}
-}}
+{json.dumps(payload, ensure_ascii=False)}
 
 Rules:
 - Prefer high-level business concepts over atomic actions.
 - If the path is not a coherent business flow, return is_business_flow=false.
-- If true, confidence must be between 0 and 1.
-- Keep JSON valid and do not add markdown.
-
-Path JSON:
-{json.dumps(payload, ensure_ascii=False)}
-"""
+- If true, confidence must be between 0 and 1."""
+    
     llm = get_llm()
-    response = await ainvoke_prompt(llm, prompt)
-    return _extract_json_object(_response_to_text(response))
+    try:
+        result = await ainvoke_structured(
+            llm,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            output_format=BusinessFlowClassification,
+        )
+        return result.model_dump()
+    except Exception:
+        return None
 
 
 def _make_template(

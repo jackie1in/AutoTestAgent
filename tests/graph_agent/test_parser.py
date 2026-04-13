@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 from graph_agent.models import ActionType, Intent, TabActionType
-from graph_agent.mapping.parser import (
+from graph_agent.intent.parser import (
     _action_intent_conflict,
     clear_intent_cache,
     infer_intent_for_context,
@@ -37,7 +37,7 @@ async def test_infer_intent_success():
     mock_llm = AsyncMock()
     mock_llm.ainvoke = AsyncMock(return_value=mock_response)
 
-    with patch("graph_agent.mapping.parser.get_llm", return_value=mock_llm):
+    with patch("graph_agent.intent.parser.get_llm", return_value=mock_llm):
         intent, reason = await infer_intent_for_context(
             action=ActionType.FILL,
             selector="#username",
@@ -62,7 +62,7 @@ async def test_infer_intent_failure_llm_error():
     mock_llm = AsyncMock()
     mock_llm.ainvoke = AsyncMock(side_effect=RuntimeError("API timeout"))
 
-    with patch("graph_agent.mapping.parser.get_llm", return_value=mock_llm):
+    with patch("graph_agent.intent.parser.get_llm", return_value=mock_llm):
         intent, reason = await infer_intent_for_context(
             action=ActionType.CLICK,
             selector="#btn",
@@ -86,7 +86,7 @@ async def test_infer_intent_failure_invalid_json():
     mock_llm = AsyncMock()
     mock_llm.ainvoke = AsyncMock(return_value=mock_response)
 
-    with patch("graph_agent.mapping.parser.get_llm", return_value=mock_llm):
+    with patch("graph_agent.intent.parser.get_llm", return_value=mock_llm):
         intent, reason = await infer_intent_for_context(
             action=ActionType.CLICK,
             selector="#btn",
@@ -110,7 +110,7 @@ async def test_infer_intent_failure_low_confidence():
     mock_llm = AsyncMock()
     mock_llm.ainvoke = AsyncMock(return_value=mock_response)
 
-    with patch("graph_agent.mapping.parser.get_llm", return_value=mock_llm):
+    with patch("graph_agent.intent.parser.get_llm", return_value=mock_llm):
         intent, reason = await infer_intent_for_context(
             action=ActionType.CLICK,
             selector="#btn",
@@ -135,7 +135,7 @@ async def test_infer_intent_failure_missing_key_or_summary():
     mock_llm = AsyncMock()
     mock_llm.ainvoke = AsyncMock(return_value=mock_response)
 
-    with patch("graph_agent.mapping.parser.get_llm", return_value=mock_llm):
+    with patch("graph_agent.intent.parser.get_llm", return_value=mock_llm):
         intent, reason = await infer_intent_for_context(
             action=ActionType.CLICK,
             selector="#btn",
@@ -159,7 +159,7 @@ async def test_infer_intent_refines_navigation_key_for_click():
     mock_llm = AsyncMock()
     mock_llm.ainvoke = AsyncMock(side_effect=[first_pass, refined_pass])
 
-    with patch("graph_agent.mapping.parser.get_llm", return_value=mock_llm):
+    with patch("graph_agent.intent.parser.get_llm", return_value=mock_llm):
         intent, reason = await infer_intent_for_context(
             action=ActionType.CLICK,
             selector="a[href='/login']",
@@ -184,7 +184,7 @@ async def test_infer_intent_skip_refine_for_navigate_action():
     mock_llm = AsyncMock()
     mock_llm.ainvoke = AsyncMock(return_value=mock_response)
 
-    with patch("graph_agent.mapping.parser.get_llm", return_value=mock_llm):
+    with patch("graph_agent.intent.parser.get_llm", return_value=mock_llm):
         intent, reason = await infer_intent_for_context(
             action=ActionType.NAVIGATE,
             selector="",
@@ -211,17 +211,17 @@ async def test_parse_browser_use_step_ai_failure_no_fake_intent():
 
     with (
         patch(
-            "graph_agent.mapping.parser.infer_intent_for_context",
+            "graph_agent.intent.parser.infer_intent_for_context",
             new_callable=AsyncMock,
             return_value=(None, "parse_error:invalid_json"),
         ),
         patch(
-            "graph_agent.mapping.parser._infer_param_name",
+            "graph_agent.intent.parser._infer_param_name",
             new_callable=AsyncMock,
             return_value=None,
         ),
         patch(
-            "graph_agent.mapping.parser._extract_action_value",
+            "graph_agent.intent.parser._extract_action_value",
             new_callable=AsyncMock,
             return_value=None,
         ),
@@ -261,17 +261,17 @@ async def test_parse_browser_use_step_ai_success():
 
     with (
         patch(
-            "graph_agent.mapping.parser.infer_intent_for_context",
+            "graph_agent.intent.parser.infer_intent_for_context",
             new_callable=AsyncMock,
             return_value=(expected_intent, None),
         ),
         patch(
-            "graph_agent.mapping.parser._infer_param_name",
+            "graph_agent.intent.parser._infer_param_name",
             new_callable=AsyncMock,
             return_value=None,
         ),
         patch(
-            "graph_agent.mapping.parser._extract_action_value",
+            "graph_agent.intent.parser._extract_action_value",
             new_callable=AsyncMock,
             return_value=None,
         ),
@@ -306,7 +306,7 @@ async def test_infer_intent_progressive_retries_on_low_confidence():
     )
 
     with patch(
-        "graph_agent.mapping.parser.infer_intent_for_context",
+        "graph_agent.intent.parser.infer_intent_for_context",
         new_callable=AsyncMock,
         side_effect=[low_confidence, (high_confidence_intent, None)],
     ) as mock_infer:
@@ -340,7 +340,7 @@ async def test_infer_intent_progressive_succeeds_on_first_pass():
     )
 
     with patch(
-        "graph_agent.mapping.parser.infer_intent_for_context",
+        "graph_agent.intent.parser.infer_intent_for_context",
         new_callable=AsyncMock,
         return_value=(intent_ok, None),
     ) as mock_infer:
@@ -452,7 +452,7 @@ async def test_parse_browser_use_step_fill_extracts_param_name_element_and_actio
     )
 
     with patch(
-        "graph_agent.mapping.parser.infer_intent_for_context",
+        "graph_agent.intent.parser.infer_intent_for_context",
         new_callable=AsyncMock,
         return_value=(expected_intent, None),
     ):
@@ -504,7 +504,7 @@ async def test_parse_browser_use_step_extracts_nested_frame_path():
     )
 
     with patch(
-        "graph_agent.mapping.parser.infer_intent_progressive",
+        "graph_agent.intent.parser.infer_intent_progressive",
         new_callable=AsyncMock,
         return_value=(expected_intent, None, "L0"),
     ):
@@ -549,7 +549,7 @@ async def test_parse_browser_use_step_extracts_tab_context():
     )
 
     with patch(
-        "graph_agent.mapping.parser.infer_intent_progressive",
+        "graph_agent.intent.parser.infer_intent_progressive",
         new_callable=AsyncMock,
         return_value=(expected_intent, None, "L0"),
     ):
@@ -592,7 +592,7 @@ async def test_parse_browser_use_step_detects_contenteditable_as_rich_text():
     )
 
     with patch(
-        "graph_agent.mapping.parser.infer_intent_progressive",
+        "graph_agent.intent.parser.infer_intent_progressive",
         new_callable=AsyncMock,
         return_value=(expected_intent, None, "L0"),
     ):
@@ -608,7 +608,7 @@ async def test_parse_browser_use_step_detects_contenteditable_as_rich_text():
 
 
 def test_is_contenteditable_true_for_contenteditable_attr():
-    from graph_agent.mapping.parser import _is_contenteditable
+    from graph_agent.intent.parser import _is_contenteditable
     from graph_agent.models import ElementSnapshot
 
     elem = ElementSnapshot(
@@ -619,7 +619,7 @@ def test_is_contenteditable_true_for_contenteditable_attr():
 
 
 def test_is_contenteditable_false_for_input():
-    from graph_agent.mapping.parser import _is_contenteditable
+    from graph_agent.intent.parser import _is_contenteditable
     from graph_agent.models import ElementSnapshot
 
     elem = ElementSnapshot(
@@ -631,7 +631,7 @@ def test_is_contenteditable_false_for_input():
 
 
 def test_is_contenteditable_true_for_tinymce_selector():
-    from graph_agent.mapping.parser import _is_contenteditable
+    from graph_agent.intent.parser import _is_contenteditable
     from graph_agent.models import ElementSnapshot
 
     elem = ElementSnapshot(
@@ -642,7 +642,7 @@ def test_is_contenteditable_true_for_tinymce_selector():
 
 
 def test_is_contenteditable_true_for_ql_editor_class():
-    from graph_agent.mapping.parser import _is_contenteditable
+    from graph_agent.intent.parser import _is_contenteditable
     from graph_agent.models import ElementSnapshot
 
     elem = ElementSnapshot(
@@ -713,7 +713,7 @@ async def test_intent_cache_hit():
     mock_llm = AsyncMock()
     mock_llm.ainvoke = AsyncMock(return_value=mock_response)
 
-    with patch("graph_agent.mapping.parser.get_llm", return_value=mock_llm):
+    with patch("graph_agent.intent.parser.get_llm", return_value=mock_llm):
         intent1, _ = await infer_intent_for_context(
             action=ActionType.FILL, selector="#user",
             source_url="https://a.com/login", target_url="https://a.com/login",
@@ -740,7 +740,7 @@ async def test_skip_refine_env(monkeypatch):
     mock_llm = AsyncMock()
     mock_llm.ainvoke = AsyncMock(return_value=mock_response)
 
-    with patch("graph_agent.mapping.parser.get_llm", return_value=mock_llm):
+    with patch("graph_agent.intent.parser.get_llm", return_value=mock_llm):
         intent, reason = await infer_intent_for_context(
             action=ActionType.CLICK, selector="a[href='/']",
             source_url="https://a.com", target_url="https://a.com/b",
@@ -756,7 +756,7 @@ async def test_skip_refine_env(monkeypatch):
 async def test_skip_distill_env(monkeypatch):
     """MAPPING_SKIP_DISTILL=true should skip the thought distillation LLM call."""
     monkeypatch.setenv("MAPPING_SKIP_DISTILL", "true")
-    from graph_agent.mapping.parser import distill_ui_thought
+    from graph_agent.intent.parser import distill_ui_thought
 
     result = await distill_ui_thought(
         thought_text="Write the report to csv file and then fill username",

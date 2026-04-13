@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from graph_agent.mapping.scout import (
+from graph_agent.cartography.scout import (
     _aggregate_elements_with_sources,
     _build_scout_metadata,
     _heuristic_extract_elements_from_text,
@@ -184,7 +184,7 @@ async def test_run_scout_multi_aggregates_and_writes_metadata(monkeypatch, tmp_p
             }
         ]
 
-    monkeypatch.setattr("graph_agent.mapping.scout.run_scout", _fake_run_scout)
+    monkeypatch.setattr("graph_agent.cartography.scout.run_scout", _fake_run_scout)
     output = tmp_path / "inventory.json"
     elements = await run_scout_multi(
         start_url="https://the-internet.herokuapp.com",

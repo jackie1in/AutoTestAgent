@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from graph_agent.graph.io import load_graph
 from graph_agent.graph.pathfinding import get_path_from_query
-from graph_agent.models import ElementConstraints, GraphEdge, Intent
+from graph_agent.models import Intent, ElementConstraints, GraphEdge
 from graph_agent.playback.engine import run_playback
 
 load_dotenv()

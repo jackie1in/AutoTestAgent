@@ -10,13 +10,13 @@ from pydantic import ValidationError
 
 from graph_agent.models import (
     ActionType,
+    Intent,
     ElementConstraints,
     ElementSnapshot,
     FrameLocatorSnapshot,
     GraphData,
     GraphEdge,
     GraphNode,
-    Intent,
 )
 
 

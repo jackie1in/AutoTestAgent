@@ -39,7 +39,7 @@ def test_load_registry_returns_default_when_file_missing(tmp_path):
     """当注册表文件不存在时，load_registry 应返回默认注册表。"""
     registry = load_registry(tmp_path / "nonexistent.json")
     assert isinstance(registry, FailureChainRegistry)
-    assert registry.default_graph_source == "uv run python -m graph_agent.mapping.run"
+    assert registry.default_graph_source == "uv run python -m graph_agent.cartography.runner"
     assert registry.default_graph_path == "graph_agent/data/graph.json"
     assert registry.target_chains == []
 
@@ -47,7 +47,7 @@ def test_load_registry_returns_default_when_file_missing(tmp_path):
 def test_load_registry_loads_existing_file(tmp_path):
     """当注册表文件存在时，应正确加载。"""
     data = {
-        "default_graph_source": "uv run python -m graph_agent.mapping.run",
+        "default_graph_source": "uv run python -m graph_agent.cartography.runner",
         "default_graph_path": "graph_agent/data/graph.json",
         "target_chains": [
             {
@@ -82,7 +82,7 @@ def test_load_registry_default_path():
         registry = load_registry()
         assert len(registry.target_chains) >= 1
         assert (
-            registry.default_graph_source == "uv run python -m graph_agent.mapping.run"
+            registry.default_graph_source == "uv run python -m graph_agent.cartography.runner"
         )
         assert registry.default_graph_path == "graph_agent/data/graph.json"
 

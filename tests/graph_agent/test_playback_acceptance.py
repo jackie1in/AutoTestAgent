@@ -20,7 +20,7 @@ from graph_agent.acceptance.playback_acceptance import (
 )
 from graph_agent.graph.io import save_graph
 from graph_agent.graph.pathfinding import get_path_from_query
-from graph_agent.models import ActionType, FrameLocatorSnapshot, Intent
+from graph_agent.models import ActionType, Intent, FrameLocatorSnapshot
 
 
 def _target_site_reachable() -> bool:

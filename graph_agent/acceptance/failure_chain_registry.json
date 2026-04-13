@@ -1,5 +1,5 @@
 {
-  "default_graph_source": "uv run python -m graph_agent.mapping.run",
+  "default_graph_source": "uv run python -m graph_agent.cartography.runner",
   "default_graph_path": "graph_agent/data/graph.json",
   "target_chains": [
     {

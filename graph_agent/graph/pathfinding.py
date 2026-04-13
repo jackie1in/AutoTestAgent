@@ -7,11 +7,11 @@ import networkx as nx
 from graph_agent.models import (
     ActionType,
     BusinessTemplate,
+    Intent,
     ElementConstraints,
     ElementSnapshot,
     FrameLocatorSnapshot,
     GraphEdge,
-    Intent,
     TabActionType,
 )
 

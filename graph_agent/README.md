@@ -32,7 +32,7 @@ playwright install chromium
 测绘流程为**先 Scout 再 Mapping**：先扫描页面得到可交互元素清单，再探索流程并仅保留清单内元素对应的边。在项目根目录执行：
 
 ```bash
-uv run python -m graph_agent.mapping.run
+uv run python -m graph_agent.cartography.runner
 uv run python graph_agent/run_mapping.py
 ```
 
@@ -43,7 +43,7 @@ uv run python graph_agent/run_mapping.py
 示例：指定 URL、图谱与清单路径
 
 ```bash
-uv run python -m graph_agent.mapping.run --url https://example.com/login --output graph_agent/data/graph.json --inventory graph_agent/data/element_inventory.json
+uv run python -m graph_agent.cartography.runner --url https://example.com/login --output graph_agent/data/graph.json --inventory graph_agent/data/element_inventory.json
 ```
 
 ## Start web

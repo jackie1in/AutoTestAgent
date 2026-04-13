@@ -3,7 +3,7 @@
 PRD 9.1: 梳理真实失败链路并固化验收样本。
 - 失败根因分类: dependency / tab / iframe / selector / async_load
 - 目标业务链说明
-- 验收默认使用 uv run python -m graph_agent.mapping.run 输出的数据文件
+- 验收默认使用 uv run python -m graph_agent.cartography.runner 输出的数据文件
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ class FailureChainRegistry(BaseModel):
     """失败链路注册表，固化可重复验收的样本。"""
 
     default_graph_source: str = Field(
-        default="uv run python -m graph_agent.mapping.run",
+        default="uv run python -m graph_agent.cartography.runner",
         description="本轮验收默认数据来源：mapping.run 输出",
     )
     default_graph_path: str = Field(
