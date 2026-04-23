@@ -40,7 +40,7 @@ def test_load_registry_returns_default_when_file_missing(tmp_path):
     registry = load_registry(tmp_path / "nonexistent.json")
     assert isinstance(registry, FailureChainRegistry)
     assert registry.default_graph_source == "uv run python -m graph_agent.cartography.runner"
-    assert registry.default_graph_path == "graph_agent/data/graph.json"
+    assert registry.default_graph_path == "neo4j://localhost:7687"
     assert registry.target_chains == []
 
 
@@ -48,7 +48,7 @@ def test_load_registry_loads_existing_file(tmp_path):
     """当注册表文件存在时，应正确加载。"""
     data = {
         "default_graph_source": "uv run python -m graph_agent.cartography.runner",
-        "default_graph_path": "graph_agent/data/graph.json",
+        "default_graph_path": "neo4j://localhost:7687",
         "target_chains": [
             {
                 "chain_id": "login-flow",
@@ -84,7 +84,7 @@ def test_load_registry_default_path():
         assert (
             registry.default_graph_source == "uv run python -m graph_agent.cartography.runner"
         )
-        assert registry.default_graph_path == "graph_agent/data/graph.json"
+        assert registry.default_graph_path == "neo4j://localhost:7687"
 
 
 def test_registry_roundtrip(tmp_path):

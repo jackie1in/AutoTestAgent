@@ -74,7 +74,7 @@ _NOISE_GOAL_PATTERNS = (
     r"^将.*记录到.*csv",
 )
 
-MIN_INTENT_CONFIDENCE = 0.4
+MIN_INTENT_CONFIDENCE = 0.2
 _THOUGHT_NOISE_HINTS = (
     "write_file",
     "read_file",
@@ -254,8 +254,10 @@ Rules:
         return None, f"llm_error:{exc}"
 
     if not key or not summary:
+        print(f"[Intent] parse_error: missing key or summary. key={key!r} summary={summary!r}")
         return None, "parse_error:missing_key_or_summary"
     if confidence < MIN_INTENT_CONFIDENCE:
+        print(f"[Intent] low_confidence: {confidence:.2f} < {MIN_INTENT_CONFIDENCE}. key={key!r} summary={summary!r}")
         return None, f"low_confidence:{confidence:.2f}"
     confidence = max(0.0, min(1.0, confidence))
 
@@ -356,7 +358,7 @@ def _action_intent_conflict(
     if action == ActionType.RICH_TEXT:
         return False
     if action == ActionType.FILL:
-        # If selector strongly indicates a fillable control, be tolerant to wording.
+        # If selector strongly indicates a fillable control, always accept.
         if any(
             token in sel
             for token in (
@@ -364,12 +366,15 @@ def _action_intent_conflict(
                 "textarea",
                 "select",
                 "password",
-                "#username",
-                "#email",
-                "#password",
+                "username",
+                "email",
+                "text",
+                "#user",
+                "#pwd",
             )
         ):
             return False
+        # Fallback: require at least one fill-related keyword in intent text
         return all(
             token not in text
             for token in (
@@ -383,16 +388,13 @@ def _action_intent_conflict(
             )
         )
     if action == ActionType.CLICK:
-        # Clicking links/buttons for navigation is valid click intent.
+        # Clicking links/buttons/checkboxes is always valid click intent.
         if any(
             token in sel
-            for token in ("a[", "xpath=(//a)", "/a", "href", "link", "button", "btn")
+            for token in ("a[", "/a", "href", "link", "button", "btn", "submit", "input[type=submit", "checkbox", "radio", "label", "span", "div", "li")
         ):
-            if any(
-                token in text
-                for token in ("navigate", "open", "visit", "go", "redirect", "route")
-            ):
-                return False
+            return False
+        # Fallback: require at least one click-related keyword in intent text
         return all(
             token not in text
             for token in (
@@ -445,7 +447,9 @@ async def infer_intent_progressive(
             action, intent, selector=selector,
             source_url=source_url, target_url=target_url,
         ):
+            print(f"[Intent] OK full: {intent.key!r} {intent.summary!r}")
             return intent, None, "full"
+        print(f"[Intent] conflict full: action={action.value} intent={intent.key!r} selector={selector!r}")
         reason = "semantic_conflict:action_intent_mismatch"
 
     if reason and ("low_confidence" in reason or "semantic_conflict" in reason):
@@ -464,8 +468,10 @@ async def infer_intent_progressive(
             action, intent, selector=selector,
             source_url=source_url, target_url=target_url,
         ):
+            print(f"[Intent] OK retry: {intent.key!r} {intent.summary!r}")
             return intent, None, "full_retry"
 
+    print(f"[Intent] FAILED: action={action.value} sel={selector!r} reason={reason!r}")
     return None, (reason or "intent_inference_failed"), "full"
 
 

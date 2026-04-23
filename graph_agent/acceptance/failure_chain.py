@@ -86,8 +86,8 @@ class FailureChainRegistry(BaseModel):
         description="本轮验收默认数据来源：mapping.run 输出",
     )
     default_graph_path: str = Field(
-        default="graph_agent/data/graph.json",
-        description="默认图谱路径",
+        default="neo4j://localhost:7687",
+        description="默认图谱数据源（Neo4j URI）",
     )
     target_chains: list[TargetChainDescription] = Field(
         default_factory=list,

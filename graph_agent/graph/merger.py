@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 from neo4j import AsyncDriver
 
@@ -25,6 +27,7 @@ class CartographyResult:
     checkpoints: list[Checkpoint] = field(default_factory=list)
     zone_state_map: dict[str, str] = field(default_factory=dict)
     checkpoint_transition_map: dict[str, str] = field(default_factory=dict)
+    history: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -127,12 +130,14 @@ class GraphMerger:
         if existing is None:
             await tx.run(
                 "CREATE (s:State {id: $id, url: $url, title: $title, "
-                "fingerprint: $fp, first_discovered: $now, last_visited: $now, "
-                "visit_count: 1, menu_path: $menu_path, is_modal: $is_modal})",
+                "fingerprint: $fp, spa_route: $spa_route, first_discovered: $now, last_visited: $now, "
+                "visit_count: 1, menu_path: $menu_path, is_modal: $is_modal, "
+                "name: coalesce($title, $url, $id)})",
                 id=state.id,
                 url=state.url,
                 title=state.title,
                 fp=state.fingerprint,
+                spa_route=state.spa_route or "",
                 now=now,
                 menu_path=state.menu_path,
                 is_modal=state.is_modal,
@@ -172,13 +177,21 @@ class GraphMerger:
                     id=state.id,
                 )
 
+        update_parts = [
+            "s.last_visited = $now",
+            "s.visit_count = s.visit_count + 1",
+        ]
+        if state.fingerprint:
+            update_parts.append("s.fingerprint = $fp")
+        if state.spa_route:
+            update_parts.append("s.spa_route = $spa_route")
+
         await tx.run(
-            "MATCH (s:State {id: $id}) "
-            "SET s.last_visited = $now, s.visit_count = s.visit_count + 1"
-            + (", s.fingerprint = $fp" if state.fingerprint else ""),
+            "MATCH (s:State {id: $id}) SET " + ", ".join(update_parts),
             id=state.id,
             now=now,
             fp=state.fingerprint,
+            spa_route=state.spa_route or "",
         )
         return False
 
@@ -205,12 +218,23 @@ class GraphMerger:
 
         if existing is None:
             initial_conf = max(0.5, transition.confidence)
+            failed_reqs_json = None
+            if transition.failed_requests:
+                try:
+                    failed_reqs_json = json.dumps(
+                        [fr.model_dump(mode="json") for fr in transition.failed_requests],
+                        ensure_ascii=False,
+                    )
+                except Exception:
+                    pass
+
             await tx.run(
                 "CREATE (t:Transition {id: $id, selector: $selector, action: $action, "
                 "action_value: $action_value, param_name: $param_name, thought: $thought, "
                 "confidence: $conf, first_discovered: $now, session_id: $sid, "
                 "step_index: $step_index, element_snapshot: $elem, frame_path: $fp, "
-                "tab_id: $tab_id, validation_count: 0})",
+                "tab_id: $tab_id, target_tab_id: $target_tab_id, tab_action: $tab_action, "
+                "name: $name, failed_requests: $failed_requests, validation_count: 0})",
                 id=transition.id,
                 selector=transition.selector,
                 action=action_val,
@@ -224,6 +248,10 @@ class GraphMerger:
                 elem=transition.element_snapshot,
                 fp=transition.frame_path,
                 tab_id=transition.tab_id,
+                target_tab_id=transition.target_tab_id,
+                tab_action=str(transition.tab_action) if transition.tab_action else None,
+                name=transition.selector or str(transition.action) or transition.id,
+                failed_requests=failed_reqs_json,
             )
             if transition.from_state_id:
                 await tx.run(
@@ -245,6 +273,71 @@ class GraphMerger:
                 sess_id=session_id,
                 tid=transition.id,
             )
+
+            # Create Intent node and REALIZES relationship if intent is present
+            if transition.intent:
+                intent = transition.intent
+                intent_id = intent.id or intent.key or f"intent:{intent.summary or session_id}"
+                await tx.run(
+                    "MERGE (i:Intent {id: $intent_id}) "
+                    "SET i.name = coalesce(i.name, $name, $summary, $key, $raw), "
+                    "    i.summary = coalesce(i.summary, $summary, $name, $raw), "
+                    "    i.key = coalesce(i.key, $key, $raw), "
+                    "    i.verb = coalesce(i.verb, $verb), "
+                    "    i.object = coalesce(i.object, $object), "
+                    "    i.raw = coalesce(i.raw, $raw), "
+                    "    i.confidence = CASE WHEN i.confidence IS NULL OR $confidence > i.confidence "
+                    "                        THEN $confidence ELSE i.confidence END",
+                    intent_id=intent_id,
+                    name=intent.name or "",
+                    summary=intent.summary or "",
+                    key=intent.key or "",
+                    verb=intent.verb or "",
+                    object=intent.object or "",
+                    raw=intent.raw or "",
+                    confidence=intent.confidence if intent.confidence is not None else 0.5,
+                )
+                await tx.run(
+                    "MATCH (t:Transition {id: $tid}), (i:Intent {id: $intent_id}) "
+                    "MERGE (t)-[:REALIZES]->(i)",
+                    tid=transition.id,
+                    intent_id=intent_id,
+                )
+
+            # Conflict resolution: prefer shorter selector among same (from, to) pair
+            conflict_result = await tx.run(
+                "MATCH (s1:State)<-[:FROM]-(t:Transition)-[:TO]->(s2:State) "
+                "WHERE s1.id = $from_id AND s2.id = $to_id "
+                "AND t.id <> $tid "
+                "RETURN t.id AS id, t.selector AS sel, t.confidence AS conf",
+                from_id=transition.from_state_id,
+                to_id=transition.to_state_id,
+                tid=transition.id,
+            )
+            conflicts = [record async for record in conflict_result]
+            new_sel_len = len(transition.selector or "")
+            for rec in conflicts:
+                old_sel_len = len(rec["sel"] or "")
+                if new_sel_len < old_sel_len:
+                    # New transition has shorter selector: boost new, degrade old
+                    await tx.run(
+                        "MATCH (t:Transition {id: $tid}) SET t.confidence = CASE "
+                        "WHEN t.confidence + 0.1 > 1.0 THEN 1.0 ELSE t.confidence + 0.1 END",
+                        tid=transition.id,
+                    )
+                    await tx.run(
+                        "MATCH (t:Transition {id: $oid}) SET t.confidence = CASE "
+                        "WHEN t.confidence - 0.1 < 0 THEN 0.0 ELSE t.confidence - 0.1 END",
+                        oid=rec["id"],
+                    )
+                elif new_sel_len > old_sel_len:
+                    # Old transition has shorter selector: degrade new
+                    await tx.run(
+                        "MATCH (t:Transition {id: $tid}) SET t.confidence = CASE "
+                        "WHEN t.confidence - 0.1 < 0 THEN 0.0 ELSE t.confidence - 0.1 END",
+                        tid=transition.id,
+                    )
+
             return "created"
 
         new_conf = min(1.0, existing["confidence"] + 0.2)

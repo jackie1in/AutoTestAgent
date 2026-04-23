@@ -10,7 +10,6 @@ dependencies = [
     "langchain-core>=0.2.0",
     "langchain-openai>=0.1.0",
     "langchain-anthropic>=0.1.0",
-    "networkx>=3.0",
     "openai>=1.0.0",
     "numpy>=1.24.0",
     "fastapi>=0.110.0",
@@ -35,13 +34,11 @@ packages = ["graph_agent", "retriever", "skills"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
-    "types-networkx>=3.6.1.20260210",
     "ruff>=0.8.0",
 ]
 graph_agent = [
     "browser-use==0.12.6",
     "playwright",
-    "networkx",
     "fastapi",
     "uvicorn",
 ]

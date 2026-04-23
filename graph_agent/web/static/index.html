@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Graph Agent — 图谱 · 意图 · 回放</title>
+  <title>Graph Agent — 图谱探索</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/standalone/umd/vis-network.min.js"></script>
   <style>
     :root {
@@ -14,6 +14,7 @@
       --accent: #7aa2f7;
       --success: #9ece6a;
       --error: #f7768e;
+      --chat-bg: #16161e;
     }
     * { box-sizing: border-box; }
     body {
@@ -21,23 +22,84 @@
       background: var(--bg);
       color: var(--text);
       margin: 0;
-      padding: 1rem;
-      min-height: 100vh;
+      padding: 0;
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
     }
-    h1 { font-size: 1.25rem; margin: 0 0 1rem 0; color: var(--accent); }
-    section { margin-bottom: 1.5rem; }
-    label { display: block; margin-bottom: 0.25rem; color: var(--muted); font-size: 0.85rem; }
-    select {
+    header {
+      padding: 0.5rem 1rem;
+      border-bottom: 1px solid var(--muted);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+    h1 { font-size: 1rem; margin: 0; color: var(--accent); }
+    #status { font-size: 0.75rem; color: var(--muted); }
+    main {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+    /* Graph panel */
+    #graph-panel {
+      flex: 1;
+      position: relative;
+      min-width: 0;
+    }
+    #graph {
       width: 100%;
-      max-width: 320px;
+      height: 100%;
+      background: var(--surface);
+    }
+    /* Chat panel */
+    #chat-panel {
+      width: 380px;
+      min-width: 300px;
+      border-left: 1px solid var(--muted);
+      display: flex;
+      flex-direction: column;
+      background: var(--chat-bg);
+    }
+    #chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0.75rem;
+      font-size: 0.8rem;
+      line-height: 1.5;
+    }
+    .msg { margin-bottom: 0.6rem; }
+    .msg-system { color: var(--muted); }
+    .msg-user { color: var(--accent); }
+    .msg-bot { color: var(--text); }
+    .msg-success { color: var(--success); }
+    .msg-error { color: var(--error); }
+    .msg-time {
+      color: var(--muted);
+      font-size: 0.7rem;
+      margin-right: 0.3rem;
+    }
+    #chat-input-area {
+      padding: 0.75rem;
+      border-top: 1px solid var(--muted);
+      display: flex;
+      gap: 0.5rem;
+    }
+    #chat-input {
+      flex: 1;
       padding: 0.5rem 0.75rem;
       background: var(--surface);
       border: 1px solid var(--muted);
       border-radius: 6px;
       color: var(--text);
       font: inherit;
+      font-size: 0.85rem;
+      outline: none;
     }
-    button {
+    #chat-input:focus { border-color: var(--accent); }
+    #chat-send {
       padding: 0.5rem 1rem;
       background: var(--accent);
       color: var(--bg);
@@ -45,141 +107,169 @@
       border-radius: 6px;
       font: inherit;
       cursor: pointer;
+      white-space: nowrap;
     }
-    button:hover { filter: brightness(1.1); }
-    button:disabled { opacity: 0.6; cursor: not-allowed; }
-    #graph {
-      width: 100%;
-      height: 360px;
+    #chat-send:hover { filter: brightness(1.1); }
+    #chat-send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Suggestion chips */
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      padding: 0.5rem 0.75rem;
+      border-top: 1px solid var(--muted);
+    }
+    .chip {
+      padding: 0.25rem 0.6rem;
       background: var(--surface);
-      border-radius: 8px;
       border: 1px solid var(--muted);
-    }
-    #log {
-      font-size: 0.8rem;
-      background: var(--surface);
-      border: 1px solid var(--muted);
-      border-radius: 8px;
-      padding: 0.75rem;
-      min-height: 120px;
-      max-height: 280px;
-      overflow-y: auto;
-      white-space: pre-wrap;
-      word-break: break-all;
-    }
-    #log .line { margin: 0.2em 0; }
-    #log .info { color: var(--text); }
-    #log .success { color: var(--success); }
-    #log .error { color: var(--error); }
-    #log .final { font-weight: bold; margin-top: 0.5em; }
-    .form-row { margin-bottom: 0.75rem; }
-    .form-row:last-of-type { margin-bottom: 1rem; }
-    .diagnostics {
-      margin-top: 0.5rem;
-      font-size: 0.8rem;
-      color: var(--muted);
-      padding: 0.5rem;
-      background: var(--surface);
-      border-radius: 6px;
-      border: 1px solid var(--muted);
-    }
-    .diagnostics .missing { color: var(--error); }
-    #template-links {
-      font-size: 0.85rem;
+      border-radius: 12px;
+      font-size: 0.75rem;
       color: var(--text);
+      cursor: pointer;
+    }
+    .chip:hover { border-color: var(--accent); }
+
+    /* Graph overlay controls */
+    .graph-controls {
+      position: absolute;
+      top: 0.5rem;
+      right: 0.5rem;
+      display: flex;
+      gap: 0.3rem;
+    }
+    .graph-btn {
+      padding: 0.3rem 0.6rem;
       background: var(--surface);
       border: 1px solid var(--muted);
-      border-radius: 8px;
-      padding: 0.75rem;
-      min-height: 72px;
+      border-radius: 4px;
+      color: var(--text);
+      font-size: 0.75rem;
+      cursor: pointer;
     }
-    #template-links .empty {
-      color: var(--muted);
+    .graph-btn:hover { border-color: var(--accent); }
+
+    /* Playback indicator */
+    .playing #status::after {
+      content: " ●";
+      color: var(--success);
+      animation: pulse 1s infinite;
     }
-    #template-links .item {
-      margin: 0.35rem 0;
-    }
-    #template-links .summary {
-      color: var(--muted);
-      margin-left: 0.5rem;
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
     }
   </style>
 </head>
 <body>
-  <h1>Graph Agent — 图谱 · 意图 · 回放</h1>
-  <nav style="margin-bottom:1rem;">
-    <a href="/" style="color:var(--accent);text-decoration:none;margin-right:1rem;">图谱 · 意图 · 回放</a>
-    <a href="/dashboard.html" style="color:var(--accent);text-decoration:none;">Dashboard</a>
-  </nav>
-
-  <section>
-    <label>图谱</label>
-    <div id="graph"></div>
-    <div id="diagnostics" class="diagnostics" style="display:none;"></div>
-  </section>
-
-  <section>
-    <label>前置业务关联</label>
-    <div id="template-links"></div>
-  </section>
-
-  <section>
-    <label>意图</label>
-    <select id="intents" aria-label="选择意图">
-      <option value="">加载中…</option>
-    </select>
-  </section>
-
-  <section>
-    <button type="button" id="playback">回放</button>
-  </section>
-
-  <section>
-    <label>回放日志</label>
-    <div id="log"></div>
-  </section>
+  <header>
+    <h1>Graph Agent</h1>
+    <span id="status">就绪</span>
+  </header>
+  <main>
+    <div id="graph-panel">
+      <div id="graph"></div>
+      <div class="graph-controls">
+        <button class="graph-btn" id="btn-reload" title="刷新图谱">刷新</button>
+        <button class="graph-btn" id="btn-fit" title="适配视图">适配</button>
+      </div>
+    </div>
+    <div id="chat-panel">
+      <div id="chat-messages"></div>
+      <div class="chips" id="quick-actions">
+        <span class="chip" data-cmd="播放登录流程">登录流程</span>
+        <span class="chip" data-cmd="播放创建任务">创建任务</span>
+        <span class="chip" data-cmd="显示所有意图">显示意图</span>
+        <span class="chip" data-cmd="帮助">帮助</span>
+      </div>
+      <div id="chat-input-area">
+        <input type="text" id="chat-input" placeholder="输入命令，如：播放登录流程 / 探索新页面 / 显示所有节点…" />
+        <button id="chat-send">发送</button>
+      </div>
+    </div>
+  </main>
 
   <script>
     (function () {
       const graphEl = document.getElementById("graph");
-      const intentsSelect = document.getElementById("intents");
-      const playbackBtn = document.getElementById("playback");
-      const logEl = document.getElementById("log");
-      const templateLinksEl = document.getElementById("template-links");
+      const chatMessagesEl = document.getElementById("chat-messages");
+      const chatInput = document.getElementById("chat-input");
+      const chatSendBtn = document.getElementById("chat-send");
+      const statusEl = document.getElementById("status");
+      const quickActionsEl = document.getElementById("quick-actions");
 
       let network = null;
+      let isPlaying = false;
 
-      function log(msg, level) {
-        level = level || "info";
-        const line = document.createElement("div");
-        line.className = "line " + level;
-        line.textContent = msg;
-        logEl.appendChild(line);
-        logEl.scrollTop = logEl.scrollHeight;
+      function now() {
+        const d = new Date();
+        return d.getHours().toString().padStart(2, "0") + ":" +
+               d.getMinutes().toString().padStart(2, "0") + ":" +
+               d.getSeconds().toString().padStart(2, "0");
       }
 
-      function clearLog() {
-        logEl.innerHTML = "";
+      function addMessage(text, cls) {
+        cls = cls || "msg-bot";
+        const div = document.createElement("div");
+        div.className = "msg " + cls;
+        div.innerHTML = '<span class="msg-time">[' + now() + ']</span>' + escapeHtml(text);
+        chatMessagesEl.appendChild(div);
+        chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
       }
+
+      function escapeHtml(s) {
+        return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      }
+
+      function setStatus(text, playing) {
+        statusEl.textContent = text;
+        isPlaying = !!playing;
+        document.body.classList.toggle("playing", isPlaying);
+      }
+
+      const NODE_COLORS = {
+        State:    { background: "#7aa2f7", border: "#565f89" },
+        Zone:     { background: "#e0af68", border: "#565f89" },
+        Menu:     { background: "#bb9af7", border: "#565f89" },
+        Entity:   { background: "#2ac3de", border: "#565f89" },
+        Intent:   { background: "#9ece6a", border: "#565f89" },
+        App:      { background: "#f7768e", border: "#565f89" },
+        Session:  { background: "#565f89", border: "#7aa2f7" },
+        default:  { background: "#24283b", border: "#7aa2f7" },
+      };
 
       function renderGraph(nodes, edges) {
         const visNodes = new vis.DataSet(
           (nodes || []).map(function (n) {
-            return { id: n.id, label: n.label || n.id, title: n.url || n.id };
+            const nodeType = n.type || "default";
+            const colors = NODE_COLORS[nodeType] || NODE_COLORS.default;
+            const labelText = n.label || n.title || n.name || n.summary || n.text || n.menu_key || "";
+            var titleParts = ["类型: " + nodeType];
+            if (n.url) titleParts.push("URL: " + n.url);
+            if (n.title) titleParts.push("标题: " + n.title);
+            if (n.summary) titleParts.push("摘要: " + n.summary);
+            if (n.zone_type) titleParts.push("区域类型: " + n.zone_type);
+            if (n.name) titleParts.push("名称: " + n.name);
+            return {
+              id: n.id,
+              label: labelText,
+              title: titleParts.join("\n"),
+              color: colors,
+            };
           })
         );
 
         const visEdges = new vis.DataSet(
           (edges || []).map(function (e) {
             const summary = e.intent ? (e.intent.summary || e.intent.raw || "") : (e.semantic_label || "");
-            const fallback = e.intent_failure_reason ? "[缺失] " + (e.intent_failure_reason.length > 40 ? e.intent_failure_reason.slice(0, 40) + "…" : e.intent_failure_reason) : "[无意图]";
+            const fallback = e.intent_failure_reason ? "[缺失] " + e.intent_failure_reason : "[无意图]";
             const label = summary || fallback || e.selector || "";
-            const title = summary ? ((summary || "") + (e.selector ? " " + e.selector : "")) : (e.intent_failure_reason || fallback) + (e.selector ? " " + e.selector : "");
             return {
               from: e.source,
               to: e.target,
               label: label,
-              title: title,
+              title: label + (e.selector ? " " + e.selector : ""),
               arrows: "to",
               color: { color: e.intent ? "#565f89" : "#f7768e" }
             };
@@ -188,24 +278,21 @@
 
         const data = { nodes: visNodes, edges: visEdges };
         const options = {
-          nodes: { 
-            shape: "box", 
+          nodes: {
+            shape: "box",
             font: { color: "#c0caf5", face: "monospace" },
-            color: { background: "#24283b", border: "#7aa2f7" }
           },
-          edges: { 
+          edges: {
             font: { color: "#c0caf5", size: 10, align: "middle" },
             smooth: { type: "cubicBezier" }
           },
-          physics: { 
-            enabled: true, 
-            stabilization: { iterations: 100 } 
+          physics: {
+            enabled: true,
+            stabilization: { iterations: 100 }
           },
-          layout: {
-            randomSeed: 2
-          }
+          layout: { randomSeed: 2 }
         };
-        
+
         if (!network) {
           network = new vis.Network(graphEl, data, options);
         } else {
@@ -213,47 +300,17 @@
         }
       }
 
-      function renderTemplateLinks(templates) {
-        templateLinksEl.innerHTML = "";
-        const list = (templates || []).filter(function (template) {
-          return Array.isArray(template.depends_on) && template.depends_on.length > 0;
-        });
-        if (!list.length) {
-          templateLinksEl.innerHTML = "<div class=\"empty\">无前置业务模板关联</div>";
-          return;
-        }
-
-        list.forEach(function (template) {
-          const row = document.createElement("div");
-          row.className = "item";
-          const businessKey = template.business_key || template.summary || "unknown";
-          const deps = (template.depends_on || []).join(" <- ");
-          const summary = template.summary ? "<span class=\"summary\">" + template.summary + "</span>" : "";
-          row.innerHTML = "<strong>" + businessKey + "</strong> <- " + deps + summary;
-          templateLinksEl.appendChild(row);
-        });
-      }
-
       function loadGraph() {
         fetch("/api/graph")
           .then(function (r) { return r.json(); })
           .then(function (data) {
             renderGraph(data.nodes || [], data.edges || []);
-            renderTemplateLinks(data.business_templates || []);
-            const diagEl = document.getElementById("diagnostics");
-            const missing = data.missing_count || 0;
-            const reasons = data.failure_reasons || [];
-            if (missing > 0) {
-              diagEl.style.display = "block";
-              diagEl.innerHTML = "<span class=\"missing\">" + missing + " 条边缺失意图</span>" +
-                (reasons.length ? "<br><details><summary>失败原因</summary><ul>" +
-                  reasons.map(function (r) { return "<li>" + r + "</li>"; }).join("") + "</ul></details>" : "");
-            } else {
-              diagEl.style.display = "none";
-            }
+            const nodeCount = (data.nodes || []).length;
+            const edgeCount = (data.edges || []).length;
+            setStatus("节点: " + nodeCount + " | 边: " + edgeCount);
           })
           .catch(function (err) {
-            log("加载图谱失败: " + err.message, "error");
+            addMessage("加载图谱失败: " + err.message, "msg-error");
           });
       }
 
@@ -261,119 +318,253 @@
         fetch("/api/intents")
           .then(function (r) { return r.json(); })
           .then(function (list) {
-            intentsSelect.innerHTML = "";
-            const empty = document.createElement("option");
-            empty.value = "";
-            empty.textContent = list.length ? "请选择意图" : "（无意图）";
-            intentsSelect.appendChild(empty);
-            (list || []).forEach(function (intent) {
-              const opt = document.createElement("option");
-              if (typeof intent === "string") {
-                opt.value = intent;
-                opt.textContent = intent;
-              } else {
-                opt.value = intent.value || "";
-                const confidence = typeof intent.confidence === "number"
-                  ? " (" + intent.confidence.toFixed(2) + ")"
-                  : "";
-                opt.textContent = (intent.label || intent.summary || intent.value || "") + confidence;
-              }
-              intentsSelect.appendChild(opt);
+            const chips = list.map(function (intent) {
+              const label = intent.label || intent.summary || intent.value || "";
+              return '<span class="chip" data-cmd="播放 ' + escapeHtml(label) + '">' + escapeHtml(label) + '</span>';
             });
+            // Keep the static chips and append dynamic ones
+            const staticChips = [
+              '<span class="chip" data-cmd="显示所有意图">显示意图</span>',
+              '<span class="chip" data-cmd="帮助">帮助</span>',
+            ];
+            quickActionsEl.innerHTML = chips.join("") + staticChips.join("");
+            bindChipListeners();
           })
-          .catch(function (err) {
-            intentsSelect.innerHTML = "<option value=''>加载失败</option>";
-            log("加载意图失败: " + err.message, "error");
+          .catch(function () {
+            // silently fail
           });
       }
 
-      function runPlayback() {
-        const intent = intentsSelect.value;
-        if (!intent) {
-          log("请先选择意图", "error");
-          return;
+      // --- SSE playback stream ---
+      function handlePlaybackStream(response) {
+        if (!response.ok) {
+          return response.json().then(function (body) {
+            throw new Error(body.error || "请求失败 " + response.status);
+          });
         }
-        const test_data = {};
-        clearLog();
-        log("开始回放: " + intent + " …");
-        playbackBtn.disabled = true;
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        function processEvent(ev) {
+          const msg = ev.message || ev.error || "";
+          const level = ev.level || "info";
+          if (level === "success") {
+            addMessage(msg, "msg-success");
+            setStatus("回放完成");
+          } else if (level === "error") {
+            addMessage(msg, "msg-error");
+            setStatus("回放失败");
+          } else if (msg) {
+            addMessage(msg, "msg-system");
+          }
+        }
+
+        function flushBlock(block) {
+          const lines = block.split("\n");
+          for (const line of lines) {
+            if (line.startsWith("data:")) {
+              const jsonStr = line.slice(5).trim();
+              if (!jsonStr) continue;
+              try { processEvent(JSON.parse(jsonStr)); }
+              catch (e) { console.error("SSE parse error", e); }
+            }
+          }
+        }
+
+        function read() {
+          return reader.read().then(function (result) {
+            if (result.done) {
+              if (buffer.trim()) flushBlock(buffer);
+              setStatus(isPlaying ? "回放完成" : statusEl.textContent, false);
+              return;
+            }
+            buffer += decoder.decode(result.value, { stream: true });
+            let idx = buffer.indexOf("\n\n");
+            while (idx !== -1) {
+              flushBlock(buffer.slice(0, idx));
+              buffer = buffer.slice(idx + 2);
+              idx = buffer.indexOf("\n\n");
+            }
+            return read();
+          });
+        }
+        return read();
+      }
+
+      function runPlayback(intent) {
+        setStatus("正在回放: " + intent, true);
+        addMessage("开始回放: " + intent, "msg-system");
+        chatSendBtn.disabled = true;
 
         fetch("/api/playback", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ intent: intent, test_data: test_data }),
+          body: JSON.stringify({ intent: intent, test_data: {} }),
         })
           .then(function (response) {
-            if (!response.ok) {
-              return response.json().then(function (body) {
-                throw new Error(body.error || "请求失败 " + response.status);
-              });
-            }
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-            let buffer = "";
-
-            function processEvent(ev) {
-              const msg = ev.message || ev.error || JSON.stringify(ev);
-              const level = ev.level || "info";
-              
-              // Only log if it's not a raw object dump, or format it nicely
-              if (ev.message) {
-                  log(ev.message, level);
-              } else if (ev.error) {
-                  log(ev.error, level);
-              }
-
-              if (level === "success" || level === "error") {
-                const finalMsg = level === "success"
-                  ? "回放成功"
-                  : "回放失败: " + (ev.error || msg);
-                log(finalMsg, "final " + level);
-                playbackBtn.disabled = false;
-              }
-            }
-
-            function flushBlock(block) {
-              const lines = block.split("\n");
-              for (const line of lines) {
-                  if (line.startsWith("data:")) {
-                      const jsonStr = line.slice(5).trim();
-                      if (!jsonStr) continue;
-                      try {
-                        processEvent(JSON.parse(jsonStr));
-                      } catch (e) {
-                          console.error("JSON parse error", e);
-                      }
-                  }
-              }
-            }
-
-            function read() {
-              return reader.read().then(function (result) {
-                if (result.done) {
-                  if (buffer.trim()) flushBlock(buffer);
-                  playbackBtn.disabled = false;
-                  return;
-                }
-                buffer += decoder.decode(result.value, { stream: true });
-                // Process complete blocks separated by double newline
-                let idx = buffer.indexOf("\n\n");
-                while (idx !== -1) {
-                  flushBlock(buffer.slice(0, idx));
-                  buffer = buffer.slice(idx + 2);
-                  idx = buffer.indexOf("\n\n");
-                }
-                return read();
-              });
-            }
-            return read();
+            return handlePlaybackStream(response);
           })
           .catch(function (err) {
-            log("回放请求错误: " + err.message, "error");
-            playbackBtn.disabled = false;
+            addMessage("回放请求错误: " + err.message, "msg-error");
+            setStatus("回放失败");
+          })
+          .finally(function () {
+            chatSendBtn.disabled = false;
           });
       }
 
+      function runNLPlayback(query) {
+        setStatus("正在解析并回放: " + query, true);
+        addMessage("正在解析: " + query, "msg-system");
+        chatSendBtn.disabled = true;
+
+        fetch("/api/nl-playback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: query, test_data: {} }),
+        })
+          .then(function (response) {
+            return handlePlaybackStream(response);
+          })
+          .catch(function (err) {
+            addMessage("回放请求错误: " + err.message, "msg-error");
+            setStatus("回放失败");
+          })
+          .finally(function () {
+            chatSendBtn.disabled = false;
+          });
+      }
+
+      function resolveNL(query) {
+        addMessage("正在解析: " + query, "msg-system");
+        chatSendBtn.disabled = true;
+
+        fetch("/api/nl-resolve", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: query, top_k: 3 }),
+        })
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            chatSendBtn.disabled = false;
+            if (!data.resolved) {
+              addMessage("未找到匹配: " + (data.error || ""), "msg-error");
+              return;
+            }
+            var best = (data.intents && data.intents[0]) || {};
+            addMessage("匹配意图: " + (best.key || best.summary || "") + " (来源: " + (data.source || "") + ")", "msg-success");
+            if (data.path_preview) {
+              addMessage("路径预览: 共 " + data.path_preview.step_count + " 步", "msg-system");
+            }
+            // Auto-playback after resolve
+            runNLPlayback(query);
+          })
+          .catch(function (err) {
+            chatSendBtn.disabled = false;
+            addMessage("解析请求错误: " + err.message, "msg-error");
+          });
+      }
+
+      // --- Command parser ---
+      function handleCommand(text) {
+        text = text.trim();
+        if (!text) return;
+
+        addMessage(text, "msg-user");
+
+        const lower = text.toLowerCase();
+
+        // Playback commands
+        if (lower.startsWith("播放") || lower.startsWith("回放")) {
+          const intent = text.slice(2).trim();
+          if (intent) {
+            runPlayback(intent);
+          } else {
+            addMessage("请指定要播放的意图，例如：播放登录流程", "msg-error");
+          }
+          return;
+        }
+
+        // NL playback
+        if (lower.startsWith("执行") || lower.startsWith("运行")) {
+          const query = text.slice(2).trim();
+          resolveNL(query);
+          return;
+        }
+
+        // Info commands
+        if (lower === "帮助" || lower === "help") {
+          addMessage(
+            "可用命令:\n" +
+            "  播放 <意图名称> — 执行意图对应的回放路径\n" +
+            "  执行 <自然语言描述> — 解析并执行（GraphRAG）\n" +
+            "  刷新图谱 — 重新加载图谱数据\n" +
+            "  显示意图 — 列出所有可用意图\n" +
+            "  帮助 — 显示此帮助信息",
+            "msg-system"
+          );
+          return;
+        }
+
+        if (lower === "刷新" || lower === "刷新图谱" || lower === "reload") {
+          loadGraph();
+          addMessage("图谱已刷新", "msg-success");
+          return;
+        }
+
+        if (lower === "显示意图" || lower === "intents") {
+          fetch("/api/intents")
+            .then(function (r) { return r.json(); })
+            .then(function (list) {
+              if (!list.length) {
+                addMessage("暂无可用意图", "msg-system");
+                return;
+              }
+              var lines = list.map(function (i, idx) {
+                return (idx + 1) + ". " + (i.label || i.summary || i.value || "");
+              });
+              addMessage("可用意图:\n" + lines.join("\n"), "msg-system");
+            });
+          return;
+        }
+
+        // Default: try NL resolve
+        addMessage("尝试解析: " + text, "msg-system");
+        resolveNL(text);
+      }
+
+      function bindChipListeners() {
+        quickActionsEl.querySelectorAll(".chip").forEach(function (chip) {
+          chip.addEventListener("click", function () {
+            handleCommand(chip.dataset.cmd);
+          });
+        });
+      }
+
+      // --- Event bindings ---
+      chatSendBtn.addEventListener("click", function () {
+        handleCommand(chatInput.value);
+        chatInput.value = "";
+      });
+
+      chatInput.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") {
+          handleCommand(chatInput.value);
+          chatInput.value = "";
+        }
+      });
+
+      document.getElementById("btn-reload").addEventListener("click", function () {
+        loadGraph();
+        addMessage("图谱已刷新", "msg-success");
+      });
+
+      document.getElementById("btn-fit").addEventListener("click", function () {
+        if (network) network.fit();
+      });
+
+      // --- SSE graph update stream ---
       function connectIntentStream() {
         var es = new EventSource("/api/graph/stream");
         es.onmessage = function (event) {
@@ -381,9 +572,8 @@
             var data = JSON.parse(event.data);
             if (data.edge_id && data.status === "resolved") {
               loadGraph();
-              loadIntents();
             }
-          } catch (e) { /* ignore parse errors from keepalive */ }
+          } catch (e) {}
         };
         es.onerror = function () {
           es.close();
@@ -391,10 +581,12 @@
         };
       }
 
-      playbackBtn.addEventListener("click", runPlayback);
+      // Init
+      addMessage("Graph Agent 已就绪。输入命令开始探索，或点击快捷标签。", "msg-system");
       loadGraph();
       loadIntents();
       connectIntentStream();
+      bindChipListeners();
     })();
   </script>
 </body>

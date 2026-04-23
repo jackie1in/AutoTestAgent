@@ -1793,15 +1793,6 @@ wheels = [
 ]
 
 [[package]]
-name = "networkx"
-version = "3.6.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/6a/51/63fe664f3908c97be9d2e4f1158eb633317598cfa6e1fc14af5383f17512/networkx-3.6.1.tar.gz", hash = "sha256:26b7c357accc0c8cde558ad486283728b65b6a95d85ee1cd66bafab4c8168509", size = 2517025, upload-time = "2025-12-08T17:02:39.908Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/9e/c9/b2622292ea83fbb4ec318f5b9ab867d0a28ab43c5717bb85b0a5f6b3b0a4/networkx-3.6.1-py3-none-any.whl", hash = "sha256:d47fbf302e7d9cbbb9e2555a0d267983d2aa476bac30e90dfbe5669bd57f3762", size = 2068504, upload-time = "2025-12-08T17:02:38.159Z" },
-]
-
-[[package]]
 name = "numpy"
 version = "2.4.2"
 source = { registry = "https://pypi.org/simple" }
@@ -6119,18 +6110,6 @@ wheels = [
 ]
 
 [[package]]
-name = "types-networkx"
-version = "3.6.1.20260210"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/4f/d9/7ddf6afb27246998ae41f7ad19da410d83e24623b4db065b5a46888d327e/types_networkx-3.6.1.20260210.tar.gz", hash = "sha256:9864affb01ed53d6bf41c1042fbced155ac409ae02ca505e0a3fffe48901b6e1", size = 73702, upload-time = "2026-02-10T04:22:17.641Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/55/b0/1c45681a8b8d3ccf25cebaa296b06d5240518bd7a7d861cf14a15bf9dd20/types_networkx-3.6.1.20260210-py3-none-any.whl", hash = "sha256:075ccb9f2e2b370c3a9eae9636f2f38890e7c494e6323cb72a0207f104f8225e", size = 162684, upload-time = "2026-02-10T04:22:16.055Z" },
-]
-
-[[package]]
 name = "typing-extensions"
 version = "4.15.0"
 source = { registry = "https://pypi.org/simple" }
@@ -6171,7 +6150,6 @@ dependencies = [
     { name = "langchain-core" },
     { name = "langchain-openai" },
     { name = "neo4j" },
-    { name = "networkx" },
     { name = "numpy" },
     { name = "openai" },
     { name = "playwright" },
@@ -6196,12 +6174,10 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
-    { name = "types-networkx" },
 ]
 graph-agent = [
     { name = "browser-use" },
     { name = "fastapi" },
-    { name = "networkx" },
     { name = "playwright" },
     { name = "uvicorn" },
 ]
@@ -6215,7 +6191,6 @@ requires-dist = [
     { name = "langchain-core", specifier = ">=0.2.0" },
     { name = "langchain-openai", specifier = ">=0.1.0" },
     { name = "neo4j", specifier = ">=5.0.0" },
-    { name = "networkx", specifier = ">=3.0" },
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "openai", specifier = ">=1.0.0" },
     { name = "playwright", specifier = ">=1.40.0" },
@@ -6232,12 +6207,10 @@ dev = [
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.23.0" },
     { name = "ruff", specifier = ">=0.8.0" },
-    { name = "types-networkx", specifier = ">=3.6.1.20260210" },
 ]
 graph-agent = [
     { name = "browser-use", specifier = "==0.12.6" },
     { name = "fastapi" },
-    { name = "networkx" },
     { name = "playwright" },
     { name = "uvicorn" },
 ]

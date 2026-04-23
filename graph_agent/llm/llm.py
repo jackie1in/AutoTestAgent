@@ -19,7 +19,34 @@ if TYPE_CHECKING:
     from graph_agent.llm.zhipu.chat import ChatZhiPu
 
 
-def get_llm(use_thinking: bool = True) -> "BaseChatModel":
+def _track_llm(llm: "BaseChatModel") -> "BaseChatModel":
+    """Monkey-patch llm.ainvoke to record token usage globally.
+
+    Similar to browser-use's TokenCost.register_llm().
+    """
+    from graph_agent.lib.token_tracker import get_global_tracker
+
+    if getattr(llm, "_graph_agent_token_tracking", False):
+        return llm
+
+    original_ainvoke = llm.ainvoke
+    model_name = getattr(llm, "model", "") or getattr(llm, "name", "")
+
+    async def tracked_ainvoke(messages, output_format=None, **kwargs):
+        result = await original_ainvoke(messages, output_format, **kwargs)
+        tracker = get_global_tracker()
+        usage = tracker.extract_usage(result, model=model_name)
+        if usage:
+            tracker.record(usage)
+        return result
+
+    # Use object.__setattr__ to bypass Pydantic model protection
+    object.__setattr__(llm, "ainvoke", tracked_ainvoke)
+    object.__setattr__(llm, "_graph_agent_token_tracking", True)
+    return llm
+
+
+def get_llm(use_thinking: bool = False) -> "BaseChatModel":
     """Create LLM instance from environment configuration.
     
     Args:
@@ -51,11 +78,11 @@ def get_llm(use_thinking: bool = True) -> "BaseChatModel":
     openai_key = os.getenv("OPENAI_API_KEY")
     if openai_key:
         from browser_use import ChatOpenAI
-        return ChatOpenAI(
+        return _track_llm(ChatOpenAI(
             model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
             api_key=openai_key,
-            temperature=0.6,
-        )
+            temperature=0.2,
+        ))
     
     raise RuntimeError(
         "No valid LLM configuration found. "
@@ -75,36 +102,37 @@ def _create_from_config(
     is_bigmodel = "bigmodel.cn" in base_url.lower()
     is_openrouter = "openrouter" in base_url.lower()
     
-    if is_glm and is_bigmodel:
+    if is_glm or is_bigmodel:
         # Use native GLM provider with thinking support
         from graph_agent.llm.zhipu.chat import ChatZhiPu
-        return ChatZhiPu(
+        return _track_llm(ChatZhiPu(
             model=model,
             api_key=api_key,
             base_url=base_url,
-            temperature=0.6,
+            temperature=0.2,
             thinking="enabled" if use_thinking else "disabled",
             clear_thinking=False,  # Preserve thinking across turns by default
-        )
-    
+            stream=False,  # Structured output (AgentOutput) must be non-stream for reliability
+        ))
+
     if is_openrouter:
         # Use browser-use's built-in ChatOpenRouter
         from browser_use.llm.openrouter.chat import ChatOpenRouter
-        return ChatOpenRouter(
+        return _track_llm(ChatOpenRouter(
             model=model,
             api_key=api_key,
             base_url=base_url,
-            temperature=0.6,
-        )
-    
+            temperature=0.2,
+        ))
+
     # Generic OpenAI-compatible provider
     from browser_use import ChatOpenAI
-    return ChatOpenAI(
+    return _track_llm(ChatOpenAI(
         model=model,
         api_key=api_key,
         base_url=base_url,
-        temperature=0.6,
-    )
+        temperature=0.2,
+    ))
 
 
 def create_zhipu_llm(
@@ -129,10 +157,10 @@ def create_zhipu_llm(
     from graph_agent.llm.zhipu.chat import ChatZhiPu
     
     api_key = api_key or os.getenv("GLM_API_KEY") or os.getenv("LLM_API_KEY")
-    return ChatZhiPu(
+    return _track_llm(ChatZhiPu(
         model=model,
         api_key=api_key,
         thinking="enabled" if enable_thinking else "disabled",
         clear_thinking=not preserve_thinking,
         **kwargs,
-    )
+    ))

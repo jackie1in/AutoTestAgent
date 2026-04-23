@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from graph_agent.neo4j import Neo4jDriver, GraphRepository
+from graph_agent.neo4j_client import Neo4jDriver, GraphRepository
 from graph_agent.models import (
     App, State, Transition, Zone, Intent, Checkpoint, Session,
 )
@@ -66,6 +66,14 @@ class Neo4jGraphManager:
     async def get_transitions_from_state(self, state_id: str) -> list[tuple[Transition, State]]:
         """Get transitions from a state."""
         return await self.repo.get_transitions_from_state(state_id)
+    
+    async def get_all_transitions(self, app_id: str) -> list[dict]:
+        """Get all transitions for an app."""
+        return await self.repo.get_all_transitions(app_id)
+    
+    async def get_states_with_intents(self, app_id: str) -> list[dict]:
+        """Get all states and their intents for an app."""
+        return await self.repo.get_states_with_intents(app_id)
     
     async def shortest_path(self, from_state_id: str, to_state_id: str) -> list[State] | None:
         """Find shortest path between two states."""

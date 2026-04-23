@@ -51,26 +51,29 @@ class ChatZhiPu(BaseChatModel):
     model: str
 
     # Model params (standard OpenAI)
-    temperature: float | None = 0.6
+    temperature: float | None = 0.2
     max_tokens: int | None = 4096
     top_p: float | None = None
 
     # GLM-specific: Thinking mode
-    thinking: Literal["enabled", "disabled"] | None = None
+    # WARNING: thinking='enabled' causes timeouts with long prompts
+    thinking: Literal["enabled", "disabled"] | None = "disabled"
     clear_thinking: bool = True  # False = Preserved Thinking
 
     # Client params
     api_key: str | None = None
     base_url: str = "https://open.bigmodel.cn/api/paas/v4/"
-    timeout: float | httpx.Timeout | None = 60.0
+    timeout: float | httpx.Timeout | None = 3600  # Increased for thinking mode
     max_retries: int = 3
     http_client: httpx.AsyncClient | None = None
+
+    stream: bool = False
 
     _client: AsyncOpenAI | None = None
 
     @property
     def provider(self) -> str:
-        return "glm"
+        return "zhipu"
 
     @property
     def name(self) -> str:
@@ -101,10 +104,14 @@ class ChatZhiPu(BaseChatModel):
         extra: dict[str, Any] = {}
         
         if self.thinking is not None:
-            extra["thinking"] = {"type": self.thinking}
-            if self.thinking == "enabled":
-                extra["thinking"]["clear_thinking"] = self.clear_thinking
-        
+            if self.model.lower() == "glm-5":
+                extra["thinking"] = {"type": self.thinking}
+                if self.thinking == "enabled":
+                    extra["thinking"]["clear_thinking"] = self.clear_thinking
+            elif self.model.lower().startswith("glm-5.1"):
+                extra['chat_template_kwargs'] = {
+                    "enable_thinking": self.thinking == "enabled"
+                }
         return extra if extra else None
 
     def _build_model_params(self) -> dict[str, Any]:
@@ -112,11 +119,14 @@ class ChatZhiPu(BaseChatModel):
         params: dict[str, Any] = {}
         
         if self.temperature is not None:
-            params["temperature"] = self.temperature
+            params["temperature"] = max(0.01, min(0.99, self.temperature))
+        
+        # Adjust max_tokens for thinking mode to avoid timeout
         if self.max_tokens is not None:
             params["max_tokens"] = self.max_tokens
+        
         if self.top_p is not None:
-            params["top_p"] = self.top_p
+            params["top_p"] = max(0.01, min(0.99, self.top_p))
         
         # Add GLM-specific extra_body
         extra_body = self._build_extra_body()
@@ -143,15 +153,32 @@ class ChatZhiPu(BaseChatModel):
         )
 
     def _extract_thinking(self, response: ChatCompletion) -> str | None:
-        """Extract reasoning_content from response."""
+        """Extract reasoning_content from response.
+        
+        GLM-5.1 uses message.model_extra['reasoning'] or message.model_extra['reasoning_content']
+        """
         if not response.choices:
             return None
         
         message = response.choices[0].message
+        
+        # Method 1: Direct attribute (some providers)
         if hasattr(message, "reasoning_content") and message.reasoning_content:
             thinking = message.reasoning_content
             logger.debug(f"[GLM Thinking] {thinking[:200]}...")
             return thinking
+        
+        # Method 2: model_extra['reasoning'] (GLM-5.1 vLLM)
+        if hasattr(message, "model_extra") and message.model_extra:
+            if "reasoning" in message.model_extra:
+                thinking = message.model_extra["reasoning"]
+                logger.debug(f"[GLM Thinking] {thinking[:200]}...")
+                return thinking
+            if "reasoning_content" in message.model_extra:
+                thinking = message.model_extra["reasoning_content"]
+                logger.debug(f"[GLM Thinking] {thinking[:200]}...")
+                return thinking
+        
         return None
 
     def _inject_format_instructions(
@@ -243,9 +270,9 @@ class ChatZhiPu(BaseChatModel):
                 try:
                     data = json.loads(content[start:end+1])
                 except json.JSONDecodeError as e:
-                    raise ValidationError(f"Could not parse JSON from output: {content[:200]}") from e
+                    raise ValueError(f"Could not parse JSON from output: {content[:200]}") from e
             else:
-                raise ValidationError(f"No JSON object found in output: {content[:200]}")
+                raise ValueError(f"No JSON object found in output: {content[:200]}")
         
         # Filter out extra fields not defined in the model schema
         # This handles models with extra="forbid" that reject unknown fields
@@ -361,6 +388,106 @@ class ChatZhiPu(BaseChatModel):
         # No matching option found, return data as-is
         return data
 
+    async def _parse_stream_response(
+        self,
+        stream: Any,
+        output_format: type[T] | None = None,
+    ) -> ChatInvokeCompletion[T] | ChatInvokeCompletion[str]:
+        """Parse streaming response from GLM.
+        
+        Collects all chunks and assembles the final response.
+        
+        Args:
+            stream: Async iterator of ChatCompletionChunk
+            output_format: Optional Pydantic model for structured output
+            
+        Returns:
+            ChatInvokeCompletion with assembled completion
+        """
+        content_parts: list[str] = []
+        thinking_parts: list[str] = []
+        finish_reason: str | None = None
+        
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+                
+            delta = chunk.choices[0].delta
+            
+            # Collect content
+            if delta.content:
+                content_parts.append(delta.content)
+            
+            # Collect thinking/reasoning (GLM-specific)
+            # GLM-5.1 vLLM uses delta.reasoning
+            if hasattr(delta, "reasoning") and delta.reasoning:
+                thinking_parts.append(delta.reasoning)
+            elif hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                thinking_parts.append(delta.reasoning_content)
+            
+            # Capture finish reason from last chunk
+            if chunk.choices[0].finish_reason:
+                finish_reason = chunk.choices[0].finish_reason
+        
+        full_content = "".join(content_parts)
+        full_thinking = "".join(thinking_parts) if thinking_parts else None
+        
+        if output_format is not None:
+            # Parse structured output
+            parsed = self._parse_json_output(full_content, output_format)
+            return ChatInvokeCompletion[T](
+                completion=parsed,
+                thinking=full_thinking,
+                usage=None,  # Stream mode doesn't have usage info
+                stop_reason=finish_reason,
+            )
+        else:
+            return ChatInvokeCompletion(
+                completion=full_content,
+                thinking=full_thinking,
+                usage=None,  # Stream mode doesn't have usage info
+                stop_reason=finish_reason,
+            )
+
+    def _parse_non_stream_response(
+        self,
+        response: ChatCompletion,
+        output_format: type[T] | None = None,
+    ) -> ChatInvokeCompletion[T] | ChatInvokeCompletion[str]:
+        """Parse non-streaming response from GLM."""
+        choice = response.choices[0] if response.choices else None
+        if choice is None:
+            raise ModelProviderError(
+                message="GLM response missing choices",
+                status_code=502,
+                model=self.name,
+            )
+        
+        if output_format is not None:
+            # Structured output
+            if choice.message.content is None:
+                raise ModelProviderError(
+                    message="GLM response missing content",
+                    status_code=500,
+                    model=self.name,
+                )
+            
+            parsed = self._parse_json_output(choice.message.content, output_format)
+            return ChatInvokeCompletion[T](
+                completion=parsed,
+                thinking=self._extract_thinking(response),
+                usage=self._get_usage(response),
+                stop_reason=choice.finish_reason,
+            )
+        else:
+            # Non-structured output
+            return ChatInvokeCompletion(
+                completion=choice.message.content or "",
+                thinking=self._extract_thinking(response),
+                usage=self._get_usage(response),
+                stop_reason=choice.finish_reason,
+            )
+
     @overload
     async def ainvoke(
         self,
@@ -383,7 +510,7 @@ class ChatZhiPu(BaseChatModel):
         output_format: type[T] | None = None,
         **kwargs: Any,
     ) -> ChatInvokeCompletion[T] | ChatInvokeCompletion[str]:
-        """Invoke GLM API.
+        """Invoke GLM API with stream or non-stream mode.
         
         Args:
             messages: List of chat messages
@@ -395,87 +522,41 @@ class ChatZhiPu(BaseChatModel):
         """
         # Build model params
         model_params = self._build_model_params()
+        print(f"[DEBUG] model_params: {model_params}, stream={self.stream}")
         
         try:
+            # Prepare messages
             if output_format is None:
-                # Non-structured output - use original messages
                 glm_messages = OpenAIMessageSerializer.serialize_messages(messages)
-                
-                # DEBUG: Log messages being sent
-                print(f"\n[GLM DEBUG] ===== SENDING {len(glm_messages)} MESSAGES =====")
-                for i, msg in enumerate(glm_messages):
-                    content = msg.get('content', '')
-                    if isinstance(content, str):
-                        print(f"[GLM DEBUG] Message {i} ({msg.get('role')}):")
-                        print(f"{content[:1000]}...")
-                        print()
-                    else:
-                        print(f"[GLM DEBUG] Message {i} ({msg.get('role')}): [complex content]")
-                print("[GLM DEBUG] ===== END MESSAGES =====\n")
-                
-                response = await self.get_client().chat.completions.create(
-                    model=self.model,
-                    messages=glm_messages,
-                    **model_params,
-                )
-                
-                choice = response.choices[0] if response.choices else None
-                if choice is None:
-                    raise ModelProviderError(
-                        message="GLM response missing choices",
-                        status_code=502,
-                        model=self.name,
-                    )
-                
-                return ChatInvokeCompletion(
-                    completion=choice.message.content or "",
-                    thinking=self._extract_thinking(response),
-                    usage=self._get_usage(response),
-                    stop_reason=choice.finish_reason,
-                )
-            
+                response_format = None
             else:
-                # Structured output - inject format_instructions into prompt
                 modified_messages = self._inject_format_instructions(messages, output_format)
                 glm_messages = OpenAIMessageSerializer.serialize_messages(modified_messages)
-                
-                # DEBUG: Log messages being sent
-                print(f"\n[GLM DEBUG] ===== SENDING {len(glm_messages)} MESSAGES (STRUCTURED) =====")
-                for i, msg in enumerate(glm_messages):
-                    content = msg.get('content', '')
-                    if isinstance(content, str):
-                        print(f"[GLM DEBUG] Message {i} ({msg.get('role')}):")
-                        print(f"{content[:1000]}...")
-                        print()
-                    else:
-                        print(f"[GLM DEBUG] Message {i} ({msg.get('role')}): [complex content]")
-                print("[GLM DEBUG] ===== END MESSAGES =====\n")
-                
-                # Use json_object mode to encourage JSON output
+                response_format = {"type": "json_object"}
+            
+            # Make API call (stream or non-stream)
+            if self.stream:
+                # ===== STREAM MODE =====
+                print("[GLM DEBUG] Using STREAM mode")
+                stream = await self.get_client().chat.completions.create(
+                    model=self.model,
+                    messages=glm_messages,
+                    response_format=response_format,
+                    stream=True,
+                    **model_params,
+                )
+                return await self._parse_stream_response(stream, output_format)
+            else:
+                # ===== NON-STREAM MODE =====
+                print("[GLM DEBUG] Using NON-STREAM mode")
                 response = await self.get_client().chat.completions.create(
                     model=self.model,
                     messages=glm_messages,
-                    response_format={"type": "json_object"},
+                    response_format=response_format,
+                    stream=False,
                     **model_params,
                 )
-                
-                choice = response.choices[0] if response.choices else None
-                if choice is None or choice.message.content is None:
-                    raise ModelProviderError(
-                        message="GLM response missing content",
-                        status_code=500,
-                        model=self.name,
-                    )
-                
-                # Parse and validate the output
-                parsed = self._parse_json_output(choice.message.content, output_format)
-                
-                return ChatInvokeCompletion[T](
-                    completion=parsed,
-                    thinking=self._extract_thinking(response),
-                    usage=self._get_usage(response),
-                    stop_reason=choice.finish_reason,
-                )
+                return self._parse_non_stream_response(response, output_format)
         
         except RateLimitError as e:
             raise ModelRateLimitError(message=e.message, model=self.name) from e
@@ -492,32 +573,3 @@ class ChatZhiPu(BaseChatModel):
             ) from e
         except Exception as e:
             raise ModelProviderError(message=str(e), model=self.name) from e
-
-
-def create_glm_llm(
-    model: str = "glm-5",
-    api_key: str | None = None,
-    enable_thinking: bool = False,
-    preserve_thinking: bool = True,
-    **kwargs,
-) -> ChatZhiPu:
-    """Create a ChatGLM instance.
-    
-    Args:
-        model: Model name
-        api_key: API key (falls back to GLM_API_KEY or LLM_API_KEY env var)
-        enable_thinking: Enable thinking mode
-        preserve_thinking: Preserve thinking across turns
-        **kwargs: Additional args for ChatGLM
-    """
-    import os
-    
-    api_key = api_key or os.getenv("GLM_API_KEY") or os.getenv("LLM_API_KEY")
-    
-    return ChatZhiPu(
-        model=model,
-        api_key=api_key,
-        thinking="enabled" if enable_thinking else "disabled",
-        clear_thinking=not preserve_thinking,
-        **kwargs,
-    )

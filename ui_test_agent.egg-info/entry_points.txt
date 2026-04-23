@@ -1,2 +1,0 @@
-[console_scripts]
-ui-test = ui_test_agent:main

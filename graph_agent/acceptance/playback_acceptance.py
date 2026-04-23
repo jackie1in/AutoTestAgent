@@ -3,7 +3,6 @@
 PRD 8.3 / 9.7: 基于 mapping.run 产出的新图谱完成真实业务回放。
 - 至少 3 个真实业务意图成功回放
 - 至少 1 个成功意图包含多标签页或 iframe 场景（若图谱中存在）
-- 测试数据来自最新 mapping.run 输出 (graph_agent/data/graph.json)
 """
 
 from __future__ import annotations
@@ -18,8 +17,12 @@ from pathlib import Path
 from typing import Any
 
 from graph_agent.acceptance.failure_chain import classify_root_cause_detail
-from graph_agent.graph.io import load_graph
-from graph_agent.graph.pathfinding import get_path_from_query
+from graph_agent.graph.pathfinding import (
+    get_path_from_query,
+    neo4j_transition_to_edge_data,
+    _edge_to_model,
+)
+from graph_agent.models import GraphEdge
 from graph_agent.playback.engine import run_playback
 
 
@@ -63,18 +66,17 @@ class PlaybackAcceptanceResult:
 
 
 # 优先回放的意图（PRD 9.7 建议）- 按成功概率排序
-# 真实图谱 (the-internet.herokuapp.com) 中可解析的意图
 PRIORITY_INTENTS = [
     "auth.login",
     "登录",
-    "auth.fill.username",  # 原子意图，可单独回放
+    "auth.fill.username",
     "auth.fill.password",
-    "elements.iframe.type",  # 意图 A: 包含 iframe 的业务动作
-    "navigation.module.select",  # 意图 B: 登录后进入目标模块（依赖 auth.login）
-    "登录后进入目标模块",  # 意图 B 中文别名
-    "elements.navigation.select",  # 进入 Add/Remove 模块（依赖 auth.login）
-    "项目列表进入子项目并打开概览",  # 意图 C: 项目列表 -> 子项目 -> 概览
-    "elements.management.add",  # 意图 C 英文 key
+    "elements.iframe.type",
+    "navigation.module.select",
+    "登录后进入目标模块",
+    "elements.navigation.select",
+    "项目列表进入子项目并打开概览",
+    "elements.management.add",
     "elements.add",
 ]
 
@@ -85,30 +87,45 @@ THE_INTERNET_CREDENTIALS = {
 }
 
 
-def is_graph_from_mapping_run(graph_path: str | Path) -> tuple[bool, str]:
-    """PRD 8.3 / 9.7: 验证图谱是否来自 mapping.run 输出。
+async def _load_edges_from_neo4j() -> list[GraphEdge]:
+    """Query transitions from Neo4j and build GraphEdge list."""
+    from graph_agent.neo4j_client.driver import Neo4jDriver
 
-    Returns:
-        (True, "") 若图谱 metadata 含 data_source=mapping.run 且 generated_at 存在；
-        (False, reason) 否则。
-    """
-    path_obj = Path(graph_path)
-    if not path_obj.exists():
-        return False, f"graph not found: {graph_path}"
-    graph = load_graph(path_obj)
-    ds = graph.graph.get("data_source")
-    ga = graph.graph.get("generated_at")
-    if ds != "mapping.run":
-        return False, (
-            f"graph metadata data_source={ds!r}, expected 'mapping.run'. "
-            "请先运行: uv run python -m graph_agent.cartography.runner"
-        )
-    if not ga:
-        return False, (
-            "graph metadata missing generated_at. "
-            "请先运行: uv run python -m graph_agent.cartography.runner"
-        )
-    return True, ""
+    driver = Neo4jDriver()
+    await driver.connect()
+    try:
+        async with driver.driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (a:App)
+                WITH a ORDER BY coalesce(a.last_session_at, a.created_at) DESC LIMIT 1
+                MATCH (a)-[:HAS_STATE]->(s:State)<-[:FROM]-(t:Transition)-[:TO]->(target:State)
+                OPTIONAL MATCH (t)-[:REALIZES]->(i:Intent)
+                RETURN t.id AS id, t.step_index AS step_index,
+                       s.id AS from_state_id, target.id AS to_state_id,
+                       t.source_url AS source_url, t.target_url AS target_url,
+                       t.selector AS selector, t.action AS action,
+                       t.tab_id AS tab_id, t.target_tab_id AS target_tab_id,
+                       t.tab_action AS tab_action,
+                       t.intent_failure_reason AS intent_failure_reason,
+                       t.param_name AS param_name, t.action_value AS action_value,
+                       t.thought AS thought, t.element_snapshot AS element_snapshot,
+                       t.frame_path AS frame_path,
+                       i{.*} AS intent
+                ORDER BY t.step_index
+                """
+            )
+            edges: list[GraphEdge] = []
+            async for record in result:
+                t = dict(record)
+                data = neo4j_transition_to_edge_data(t)
+                u = str(t.get("from_state_id", ""))
+                v = str(t.get("to_state_id", ""))
+                if u and v:
+                    edges.append(_edge_to_model(u, v, data))
+            return edges
+    finally:
+        await driver.close()
 
 
 def _has_iframe_or_tab(edges: list[Any]) -> bool:
@@ -122,7 +139,7 @@ def _has_iframe_or_tab(edges: list[Any]) -> bool:
 
 
 def _prioritize_iframe_intents(
-    queries: list[str], graph: Any
+    queries: list[str], edges: list[GraphEdge]
 ) -> list[tuple[str, list[Any]]]:
     """意图 A: 优先选择包含 iframe 的业务动作。
 
@@ -131,7 +148,7 @@ def _prioritize_iframe_intents(
     """
     resolved: list[tuple[str, list[Any], bool]] = []
     for q in queries:
-        path = get_path_from_query(q, graph)
+        path = get_path_from_query(q, edges)
         if len(path) < 2:
             continue
         has_iframe_tab = _has_iframe_or_tab(path)
@@ -142,7 +159,7 @@ def _prioritize_iframe_intents(
 
 
 async def run_playback_acceptance(
-    graph_path: str | Path,
+    graph_path: str | Path = "",
     start_url: str | None = None,
     test_data: dict[str, Any] | None = None,
     intent_queries: list[str] | None = None,
@@ -152,8 +169,8 @@ async def run_playback_acceptance(
     """执行 Task 7 真实回放验收。
 
     Args:
-        graph_path: 图谱 JSON 路径（默认来自 mapping.run 输出）
-        start_url: 回放起始 URL，默认从图 metadata 读取
+        graph_path: 保留参数以兼容旧 API，实际从 Neo4j 读取
+        start_url: 回放起始 URL，默认从 edges 中解析
         test_data: 回放用 test_data（如 username/password）
         intent_queries: 要尝试的意图查询列表，默认使用 PRIORITY_INTENTS
         min_success: 最少成功回放数
@@ -162,15 +179,8 @@ async def run_playback_acceptance(
     Returns:
         PlaybackAcceptanceResult 汇总
     """
-    path_obj = Path(graph_path)
-    if not path_obj.exists():
-        return PlaybackAcceptanceResult(
-            graph_path=str(graph_path),
-            results=[],
-        )
-
-    graph = load_graph(path_obj)
-    if graph.number_of_edges() == 0:
+    edges = await _load_edges_from_neo4j()
+    if not edges:
         return PlaybackAcceptanceResult(
             graph_path=str(graph_path),
             results=[],
@@ -178,13 +188,14 @@ async def run_playback_acceptance(
 
     url = start_url
     if not url:
-        url = graph.graph.get("start_url") if hasattr(graph, "graph") else None
-    if not url or not str(url).startswith("http"):
-        entries = [n for n in graph if graph.in_degree(n) == 0]
-        for n in entries:
-            u = graph.nodes[n].get("url") if isinstance(n, str) else None
-            if isinstance(u, str) and u.startswith("http"):
-                url = u
+        # Find entry node URL from edges
+        from collections import Counter as _Counter
+        in_degree = _Counter()
+        for e in edges:
+            in_degree[e.target] += 1
+        for e in edges:
+            if in_degree[e.source] == 0 and e.source_url and str(e.source_url).startswith("http"):
+                url = e.source_url
                 break
     if not url:
         url = "https://the-internet.herokuapp.com/"
@@ -193,7 +204,7 @@ async def run_playback_acceptance(
     queries = intent_queries or PRIORITY_INTENTS
 
     # 意图 A: 优先选择包含 iframe 的业务动作
-    prioritized = _prioritize_iframe_intents(queries, graph)
+    prioritized = _prioritize_iframe_intents(queries, edges)
 
     results: list[PlaybackResult] = []
     succeeded = 0
@@ -241,7 +252,7 @@ async def run_playback_acceptance(
         with_iframe_or_tab_succeeded=with_iframe_tab_succeeded,
         results=results,
     )
-    _write_acceptance_report(acceptance, Path(graph_path).parent)
+    _write_acceptance_report(acceptance, Path(graph_path).parent if graph_path else Path("."))
     return acceptance
 
 

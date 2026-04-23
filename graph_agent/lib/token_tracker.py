@@ -32,27 +32,29 @@ class TokenUsage:
         )
 
 
-@dataclass  
+@dataclass
 class UsageStats:
     """Cumulative token usage statistics."""
     total_calls: int = 0
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
     total_tokens: int = 0
+    total_embedding_calls: int = 0
+    total_embedding_tokens: int = 0
     start_time: float = field(default_factory=time.time)
-    
+
     @property
     def avg_tokens_per_call(self) -> float:
         return self.total_tokens / max(1, self.total_calls)
-    
+
     @property
     def elapsed_seconds(self) -> float:
         return time.time() - self.start_time
-    
+
     @property
     def tokens_per_second(self) -> float:
         return self.total_tokens / max(1, self.elapsed_seconds)
-    
+
     def __str__(self) -> str:
         elapsed = self.elapsed_seconds
         return (
@@ -60,6 +62,8 @@ class UsageStats:
             f"prompt={self.total_prompt_tokens}, "
             f"completion={self.total_completion_tokens}, "
             f"total={self.total_tokens}, "
+            f"embed_calls={self.total_embedding_calls}, "
+            f"embed_tokens={self.total_embedding_tokens}, "
             f"avg={self.avg_tokens_per_call:.0f}/call, "
             f"elapsed={elapsed:.1f}s, "
             f"rate={self.tokens_per_second:.1f}tok/s)"
@@ -150,13 +154,13 @@ class TokenUsageTracker:
         """Record a token usage entry."""
         if usage is None or usage.total_tokens == 0:
             return
-        
+
         self._usages.append(usage)
         self._stats.total_calls += 1
         self._stats.total_prompt_tokens += usage.prompt_tokens
         self._stats.total_completion_tokens += usage.completion_tokens
         self._stats.total_tokens += usage.total_tokens
-        
+
         # Log each call
         logger.info(
             "[TokenUsage] #%d: prompt=%d, completion=%d, total=%d, model=%s",
@@ -166,6 +170,21 @@ class TokenUsageTracker:
             usage.total_tokens,
             usage.model or "unknown"
         )
+
+    def record_embedding(self, total_tokens: int, model: str = "") -> None:
+        """Record embedding token usage."""
+        if total_tokens <= 0:
+            return
+
+        self._stats.total_embedding_calls += 1
+        self._stats.total_embedding_tokens += total_tokens
+
+        logger.info(
+            "[TokenUsage] embedding #%d: total=%d, model=%s",
+            self._stats.total_embedding_calls,
+            total_tokens,
+            model or "unknown"
+        )
     
     def get_stats(self) -> UsageStats:
         """Get current usage statistics."""
@@ -174,25 +193,27 @@ class TokenUsageTracker:
     def log_summary(self) -> None:
         """Log a summary of all token usage."""
         stats = self.get_stats()
-        
-        if stats.total_calls == 0:
+
+        if stats.total_calls == 0 and stats.total_embedding_calls == 0:
             logger.info("[TokenUsage] No LLM calls recorded")
             return
-        
+
         # Calculate cost (approximate, based on OpenAI pricing)
         # GPT-4: $0.03/1K prompt, $0.06/1K completion
         # GPT-3.5: $0.0015/1K prompt, $0.002/1K completion
         prompt_cost = stats.total_prompt_tokens * 0.00003  # Assume GPT-4 pricing
         completion_cost = stats.total_completion_tokens * 0.00006
         total_cost = prompt_cost + completion_cost
-        
+
         logger.info(
-            "[TokenUsage] Summary: %d calls, %d prompt, %d completion, "
-            "%d total tokens, ~$%.4f estimated cost, %.1fs elapsed",
+            "[TokenUsage] Summary: LLM=%d calls (%d prompt + %d completion = %d tokens), "
+            "Embedding=%d calls (%d tokens), ~$%.4f estimated cost, %.1fs elapsed",
             stats.total_calls,
             stats.total_prompt_tokens,
             stats.total_completion_tokens,
             stats.total_tokens,
+            stats.total_embedding_calls,
+            stats.total_embedding_tokens,
             total_cost,
             stats.elapsed_seconds
         )
@@ -211,6 +232,8 @@ class TokenUsageTracker:
             "total_prompt_tokens": stats.total_prompt_tokens,
             "total_completion_tokens": stats.total_completion_tokens,
             "total_tokens": stats.total_tokens,
+            "total_embedding_calls": stats.total_embedding_calls,
+            "total_embedding_tokens": stats.total_embedding_tokens,
             "avg_tokens_per_call": stats.avg_tokens_per_call,
             "elapsed_seconds": stats.elapsed_seconds,
             "tokens_per_second": stats.tokens_per_second,

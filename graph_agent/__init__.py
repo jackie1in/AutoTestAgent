@@ -1,3 +1,3 @@
-"""Graph Agent: browser automation driven by a state graph (graph.json)."""
+"""Graph Agent: browser automation driven by a Neo4j state graph."""
 
 __all__: list[str] = []

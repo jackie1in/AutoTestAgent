@@ -1,45 +1,30 @@
-"""ReAct-based page explorer — LLM-guided observe→think→act loop.
+"""ReAct-based page explorer — inherits BaseAgent ReAct loop.
 
-Aligned with page-agent's PageAgentCore architecture:
-- Structured output via Pydantic schema (equivalent to page-agent's Zod macro tool)
-- System observations (wait time, URL changes, remaining steps)
-- LLM retry with configurable attempts
-
-All browser interactions go through browser-use's BrowserSession / Page / Element APIs.
+Eliminates duplicated loop code by reusing BaseAgent's observe→think→act
+infrastructure, while keeping PageController for browser interactions and
+CartographyResult for output.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections import deque
-import json
+import hashlib
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import Any
 
-if TYPE_CHECKING:
-    from browser_use.browser.session import BrowserSession
+from browser_use.browser.session import BrowserSession as Browser
 
+from graph_agent.cartography.base_agent import BaseAgent
 from graph_agent.cartography.react_prompts import (
     build_system_prompt,
     build_user_prompt,
 )
-from graph_agent.cartography.react_schema import (
-    AgentOutput,
-    agent_output_to_dict,
-)
-
-# Import tools to ensure registration
-try:
-    from graph_agent import tools  # noqa: F401 - registers tools via @action
-except ImportError:
-    pass
-from graph_agent.cartography.snapshot import capture_dom_fingerprint
+from graph_agent.cartography.react_schema import AgentOutput
 from graph_agent.graph.merger import CartographyResult
-from graph_agent.lib.page_controller import PageController
 from graph_agent.intent.parser import infer_intent_progressive, distill_ui_thought
-from graph_agent.llm import ainvoke_structured, get_llm
-from graph_agent.lib.token_tracker import get_global_tracker
+from graph_agent.lib.page_controller import PageController
+from graph_agent.llm import get_llm
 from graph_agent.models import (
     ActionType,
     Checkpoint,
@@ -55,334 +40,196 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_STEPS = 500
 _LLM_MAX_RETRIES = 3
-_LLM_TIMEOUT_MS = 60_000  # 增加到60秒，适应长上下文
-_MAX_HISTORY_LENGTH = 20  # 限制历史记录长度，防止内存泄漏
+_LLM_TIMEOUT_MS = 60_000
 
 
-class ReActExplorer:
-    """LLM-driven ReAct explorer for a single page/zone.
+class ReActExplorer(BaseAgent):
+    """Lightweight page/zone explorer using BaseAgent's ReAct loop.
 
-    Architecture mirrors page-agent PageAgentCore:
-    - observe (getBrowserState) → think (LLM with Pydantic schema) → act → loop
-    - Structured output via ``AgentOutput`` Pydantic schema (≈ Zod macro tool)
-    - System observations injected before each step
-    - LLM retry on failure
+    Overrides:
+    - Prompt construction (via react_prompts builders)
+    - Action execution (via PageController instead of browser-use Tools)
+    - State-change recording (transitions + intent inference)
+    - History format (evaluation/memory/next_goal fields)
     """
 
     def __init__(
         self,
         max_steps: int = _DEFAULT_MAX_STEPS,
-        browser_session: "BrowserSession | None" = None,
+        browser_session: "Browser | None" = None,
+        initial_actions: list[dict[str, Any]] | None = None,
+        initial_history: list[dict[str, Any]] | None = None,
+        extra_system_prompt: str = "",
     ):
-        self._max_steps = max_steps
-        self._llm = get_llm()
+        llm = get_llm()
+        super().__init__(
+            task="Explore the page and record all interactive elements and transitions.",
+            llm=llm,
+            browser=browser_session,
+            max_steps=max_steps,
+            total_max_steps=max_steps,
+            initial_history=initial_history,
+            initial_actions=initial_actions,
+            start_url="",
+        )
         self._browser_session = browser_session
+        self._controller: PageController | None = None
+        self._explored_indices: set[int] = set()
+        self._total_wait_time = 0.0
+        self._last_url = ""
+        self._page_title = ""
+        self._state_id = ""
+        self._result = CartographyResult()
+        self._extra_system_prompt = extra_system_prompt
 
-    async def _health_check(self, page) -> bool:
-        """Check if browser page is still healthy."""
-        try:
-            await page.evaluate("() => 1")
-            return True
-        except Exception as e:
-            logger.warning("Browser health check failed: %s", e)
-            return False
+        # Extra actions supported by PageController but not in BaseAgent defaults
+        self._supported_actions.update({
+            "scroll_horizontally",
+            "close_overlay",
+            "execute_javascript",
+        })
+        self._dynamic_action_model = self._build_dynamic_action_model()
 
-    async def explore_page(
+    # ------------------------------------------------------------------
+    # Prompt hooks
+    # ------------------------------------------------------------------
+
+    def _build_system_prompt(self) -> str:
+        prompt = build_system_prompt(max_steps=self.max_steps)
+        if self._extra_system_prompt:
+            prompt += f"\n\n{self._extra_system_prompt}"
+        return prompt
+
+    def _build_user_prompt(
         self,
-        session: "BrowserSession",
-        state_id: str,
+        dom_text: str,
+        history: list[dict],
+        step: int,
+        current_url: str,
         page_title: str = "",
-    ) -> CartographyResult:
-        bs = session or self._browser_session
-        if bs is None:
-            raise RuntimeError("ReActExplorer requires a BrowserSession")
-
-        controller = PageController(bs)
-        result = CartographyResult()
-        
-        # Reset global token tracker for this exploration session
-        from graph_agent.lib.token_tracker import reset_global_tracker
-        reset_global_tracker()
-        token_tracker = get_global_tracker()
-
-        try:
-            bu_page = await bs.must_get_current_page()
-            history: deque[dict] = deque(maxlen=_MAX_HISTORY_LENGTH)
-            explored_indices: set[int] = set()
-            observations: list[str] = []
-            total_wait_time = 0.0
-            last_url = ""
-            last_checkpoint_time = time.monotonic()
-            system_prompt = build_system_prompt(max_steps=self._max_steps)
-
-            for step in range(self._max_steps):
-                # Health check every 10 steps
-                if step % 10 == 0:
-                    if not await self._health_check(bu_page):
-                        logger.error("Browser health check failed at step %d, stopping", step)
-                        break
-
-                # Observe
-                try:
-                    browser_state = await controller.get_browser_state()
-                except Exception as e:
-                    logger.warning("Failed to get browser state at step %d: %s", step, e)
-                    break
-
-                fp_before = await capture_dom_fingerprint(bu_page)
-                url_before = await bu_page.get_url()
-                observations.clear()
-
-                if total_wait_time >= 3:
-                    observations.append(
-                        f"You have waited {total_wait_time:.0f} seconds accumulatively. "
-                        "DO NOT wait any longer unless you have a good reason."
-                    )
-
-                if url_before != last_url:
-                    if last_url:
-                        observations.append(f"Page navigated to → {url_before}")
-                    last_url = url_before
-                    await asyncio.sleep(0.5)
-
-                remaining = self._max_steps - step
-                if remaining == 5:
-                    observations.append(
-                        f"Only {remaining} steps remaining. "
-                        "Consider wrapping up or calling done with partial results."
-                    )
-                elif remaining == 2:
-                    observations.append(
-                        f"Critical: Only {remaining} steps left! "
-                        "You must finish the task or call done immediately."
-                    )
-
-                user_prompt = build_user_prompt(
-                    browser_state_text=(
-                        f"{browser_state.header}\n{browser_state.content}\n{browser_state.footer}"
-                    ),
-                    history=history,
-                    explored_indices=explored_indices,
-                    step=step,
-                    max_steps=self._max_steps,
-                    page_title=page_title,
-                    observations=observations,
-                )
-
-                # Think
-                parsed = await self._invoke_llm_with_retry(system_prompt, user_prompt)
-
-                if parsed is None:
-                    history.append({
-                        "evaluation_previous_goal": "LLM failed after retries",
-                        "memory": "",
-                        "next_goal": "",
-                        "action_name": "error",
-                        "action_result": "LLM call failed after all retries",
-                    })
-                    continue
-
-                action = parsed.get("action", {})
-                action_name = next(iter(action), "done") if isinstance(action, dict) else "done"
-                action_params = action.get(action_name, {}) if isinstance(action, dict) else {}
-                if not isinstance(action_params, dict):
-                    action_params = {}
-
-                logger.info(
-                    "  [Step %d] %s | goal: %s",
-                    step,
-                    action_name,
-                    (parsed.get("next_goal") or "")[:60],
-                )
-
-                # Act
-                if action_name == "done":
-                    history.append({
-                        **{k: parsed.get(k, "") for k in ("evaluation_previous_goal", "memory", "next_goal")},
-                        "action_name": "done",
-                        "action_result": action_params.get("text", "completed"),
-                    })
-                    break
-
-                action_result = await self._execute_action(
-                    action_name, action_params, controller, bu_page
-                )
-
-                if action_name == "wait":
-                    total_wait_time += action_params.get("seconds", 1)
-                else:
-                    total_wait_time = 0
-
-                if action_name in ("click_element_by_index", "input_text", "select_dropdown_option"):
-                    idx = action_params.get("index")
-                    if idx is not None:
-                        explored_indices.add(idx)
-
-                # Record transition
-                await asyncio.sleep(0.5)
-                fp_after = await capture_dom_fingerprint(bu_page)
-                url_after = await bu_page.get_url()
-                changed = fp_after != fp_before or url_after != url_before
-
-                if changed and action_name in (
-                    "click_element_by_index", "input_text", "select_dropdown_option"
-                ):
-                    label = f"react-{action_name}-step{step}"
-                    from_state = State(
-                        id=state_id,
-                        url=url_before,
-                        title=page_title,
-                        fingerprint=fp_before,
-                    )
-                    to_state_id = f"{state_id}:react-{step}"
-                    to_state = State(
-                        id=to_state_id,
-                        url=url_after,
-                        fingerprint=fp_after,
-                        title=f"{page_title} after {action_name}",
-                    )
-                    act_type = {
-                        "click_element_by_index": ActionType.CLICK,
-                        "input_text": ActionType.FILL,
-                        "select_dropdown_option": ActionType.SELECT,
-                    }.get(action_name, ActionType.CLICK)
-
-                    thought_text = parsed.get("next_goal", "")
-                    intent = None
-                    try:
-                        distilled_thought = await distill_ui_thought(
-                            thought_text, act_type, f"[{action_params.get('index', '?')}]", "", ""
-                        )
-                        neighbor_steps = list(history)[-3:] if history else None
-                        page_signals = {"title": page_title, "url": url_before}
-                        intent, _reason, _level = await infer_intent_progressive(
-                            action=act_type,
-                            selector=f"[{action_params.get('index', '?')}]",
-                            source_url=url_before,
-                            target_url=url_after,
-                            param_name=None,
-                            thought_text=distilled_thought,
-                            neighbor_steps=neighbor_steps,
-                            page_signals=page_signals,
-                        )
-                        if intent:
-                            logger.debug("    → Intent inferred: %s", intent.key)
-                    except Exception as e:
-                        logger.debug("    → Intent inference skipped: %s", e)
-
-                    transition = Transition(
-                        id=f"t:{state_id}:{label}",
-                        selector=f"[{action_params.get('index', '?')}]",
-                        action=act_type,
-                        thought=thought_text,
-                        intent=intent,
-                        from_state_id=state_id,
-                        to_state_id=to_state_id,
-                        step_index=step,
-                    )
-                    cp = Checkpoint(
-                        id=f"cp:{transition.id}:after",
-                        layer=CheckpointLayer.STRUCTURAL,
-                        timing=CheckpointTiming.AFTER,
-                        expect=CheckpointExpect.SHOULD_PASS,
-                        severity=Severity.MAJOR,
-                        rule_type="url_changed" if url_after != url_before else "dom_changed",
-                        rule=json.dumps({
-                            "expected": url_after if url_after != url_before else "dom_fingerprint_changed"
-                        }),
-                        description=parsed.get("next_goal", f"After {action_name}, page should change"),
-                    )
-                    result.states.extend([from_state, to_state])
-                    result.transitions.append(transition)
-                    result.checkpoints.append(cp)
-                    result.checkpoint_transition_map[cp.id] = transition.id
-                    logger.info("    → Transition recorded: %s", label)
-
-                    if url_after != url_before:
-                        try:
-                            await bu_page.go_back()
-                        except Exception:
-                            pass
-                        await asyncio.sleep(0.5)
-
-                history.append({
-                    **{k: parsed.get(k, "") for k in ("evaluation_previous_goal", "memory", "next_goal")},
-                    "action_name": action_name,
-                    "action_result": action_result,
-                })
-
-                # Checkpoint every 30 minutes
-                if time.monotonic() - last_checkpoint_time > 1800:
-                    logger.info("  [Checkpoint] Step %d, transitions: %d", step, len(result.transitions))
-                    last_checkpoint_time = time.monotonic()
-
-        except Exception as e:
-            logger.error("  ReAct exploration failed: %s", e, exc_info=True)
-            raise
-        finally:
-            logger.info(
-                "  ReAct exploration complete: %d steps, %d transitions, %d checkpoints",
-                len(history),
-                len(result.transitions),
-                len(result.checkpoints),
-            )
-            # Log token usage summary
-            token_tracker.log_summary()
-            try:
-                controller.dispose()
-            except Exception as e:
-                logger.warning("  Failed to dispose controller: %s", e)
-
-        return result
-
-    async def _invoke_llm_with_retry(
-        self, system_prompt: str, user_prompt: str
-    ) -> dict | None:
-        """Invoke the LLM with Pydantic schema validation and retry."""
-        for attempt in range(1, _LLM_MAX_RETRIES + 1):
-            try:
-                output: AgentOutput = await ainvoke_structured(
-                    self._llm,
-                    system_prompt,
-                    user_prompt,
-                    AgentOutput,
-                    timeout_ms=_LLM_TIMEOUT_MS,
-                )
-                return agent_output_to_dict(output)
-            except asyncio.TimeoutError:
-                logger.warning("LLM timeout (attempt %d/%d)", attempt, _LLM_MAX_RETRIES)
-            except Exception as e:
-                logger.warning("LLM error (attempt %d/%d): %s", attempt, _LLM_MAX_RETRIES, str(e)[:150])
-            if attempt < _LLM_MAX_RETRIES:
-                await asyncio.sleep(1.0 * attempt)
-        return None
-
-    async def _execute_action(
-        self,
-        name: str,
-        params: dict,
-        controller: PageController,
-        bu_page,
     ) -> str:
+        observations: list[str] = []
+
+        if self._total_wait_time >= 3:
+            observations.append(
+                f"You have waited {self._total_wait_time:.0f} seconds accumulatively. "
+                "DO NOT wait any longer unless you have a good reason."
+            )
+
+        if current_url != self._last_url:
+            if self._last_url:
+                observations.append(f"Page navigated to → {current_url}")
+            self._last_url = current_url
+
+        remaining = self.total_max_steps - step
+        if remaining == 5:
+            observations.append(
+                f"Only {remaining} steps remaining. "
+                "Consider wrapping up or calling done with partial results."
+            )
+        elif remaining == 2:
+            observations.append(
+                f"Critical: Only {remaining} steps left! "
+                "You must finish the task or call done immediately."
+            )
+
+        return build_user_prompt(
+            browser_state_text=dom_text,
+            history=history,
+            explored_indices=self._explored_indices,
+            step=step,
+            max_steps=self.total_max_steps,
+            page_title=page_title,
+            observations=observations,
+        )
+
+    # ------------------------------------------------------------------
+    # History hook — capture LLM reasoning fields
+    # ------------------------------------------------------------------
+
+    def _make_history_entry(
+        self,
+        step: int,
+        action_type: str,
+        result_text: str,
+        output: AgentOutput | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "evaluation_previous_goal": (
+                getattr(output, "evaluation_previous_goal", "") if output else ""
+            ),
+            "memory": getattr(output, "memory", "") if output else "",
+            "next_goal": getattr(output, "next_goal", "") if output else "",
+            "action_name": action_type,
+            "action_result": result_text,
+        }
+
+    # ------------------------------------------------------------------
+    # Observation — use PageController as the single source of truth so
+    # the DOM the LLM sees and the selector_map we click against come
+    # from the SAME update_tree() call. Otherwise PageController's
+    # _is_indexed flag is never set and every click fails with
+    # "DOM tree not indexed. Call update_tree() first.".
+    # ------------------------------------------------------------------
+
+    async def _get_browser_snapshot(self) -> tuple[str, str, dict]:
+        controller = self._controller
+        if controller is None:
+            return await super()._get_browser_snapshot()
         try:
-            match name:
-                case "click_element_by_index":
+            dom_text = await controller.update_tree()
+        except Exception as e:
+            logger.warning("PageController.update_tree() failed, falling back to browser_use snapshot: %s", e)
+            return await super()._get_browser_snapshot()
+
+        title = ""
+        try:
+            page = await self.browser.get_current_page()
+            if page is not None:
+                title = await page.get_title() or ""
+        except Exception:
+            pass
+
+        selector_map = getattr(controller, "selector_map", {}) or {}
+        return dom_text, title, dict(selector_map)
+
+    # ------------------------------------------------------------------
+    # Action execution — delegate to PageController
+    # ------------------------------------------------------------------
+
+    async def _execute_action(self, action_type: str, params: dict[str, Any]) -> str:
+        controller = self._controller
+        if controller is None:
+            return "Controller not initialized"
+
+        # Track explored indices for click/input/select
+        if action_type in ("click", "input", "select_dropdown"):
+            idx = params.get("index")
+            if idx is not None:
+                self._explored_indices.add(idx)
+
+        try:
+            match action_type:
+                case "click":
                     idx = params.get("index", 0)
                     r = await controller.click_element(idx)
                     return r.message
-                case "input_text":
+                case "input":
                     idx = params.get("index", 0)
                     text = params.get("text", "")
                     r = await controller.input_text(idx, text)
                     return r.message
-                case "select_dropdown_option":
+                case "select_dropdown":
                     idx = params.get("index", 0)
                     opt = params.get("option_text", params.get("text", ""))
                     r = await controller.select_option(idx, opt)
                     return r.message
                 case "scroll":
-                    direction = params.get("direction", "down")
-                    amount = params.get("amount", 500)
+                    # Schema uses down (bool) + pages (float)
+                    down = params.get("down", True)
+                    pages = params.get("pages", 1.0)
+                    direction = "down" if down else "up"
+                    amount = int(pages * 500)
                     idx = params.get("index")
                     r = await controller.scroll(direction, amount, idx)
                     return r.message
@@ -394,6 +241,7 @@ class ReActExplorer:
                     return r.message
                 case "wait":
                     seconds = min(params.get("seconds", 1), 10)
+                    self._total_wait_time += seconds
                     last_update = await controller.get_last_update_time()
                     elapsed = time.time() - last_update if last_update > 0 else 0
                     actual = max(0, seconds - elapsed)
@@ -401,25 +249,255 @@ class ReActExplorer:
                     return f"Waited {seconds}s (actual {actual:.1f}s)"
                 case "go_back":
                     try:
-                        await bu_page.go_back()
+                        page = await self.browser.get_current_page()
+                        await page.go_back()
                         return "Navigated back"
                     except Exception as e:
                         return f"Go back failed: {e}"
                 case "close_overlay":
-                    closed = await self._close_overlays(bu_page)
-                    return f"Closed {closed} overlay(s)"
+                    try:
+                        page = await self.browser.get_current_page()
+                        closed = await self._close_overlays(page)
+                        return f"Closed {closed} overlay(s)"
+                    except Exception as e:
+                        return f"Close overlay failed: {e}"
                 case "execute_javascript":
                     script = params.get("script", "")
                     r = await controller.execute_javascript(script)
                     return r.message
                 case _:
-                    return f"Unknown action: {name}"
+                    return f"Unknown action: {action_type}"
         except Exception as e:
-            return f"Action {name} failed: {e}"
+            return f"Action {action_type} failed: {e}"
 
-    async def _close_overlays(self, bu_page) -> int:
+    # ------------------------------------------------------------------
+    # Lifecycle hooks
+    # ------------------------------------------------------------------
+
+    async def _on_before_step(self, step: int) -> None:
+        # Health check every 10 steps
+        if step % 10 == 0:
+            try:
+                page = await self.browser.get_current_page()
+                await page.evaluate("() => 1")
+            except Exception as e:
+                logger.warning("Browser health check failed at step %d: %s", step, e)
+
+    async def _on_after_step(
+        self,
+        step: int,
+        action_type: str,
+        result_text: str,
+        changed: bool,
+        url_before: str,
+        url_after: str,
+    ) -> None:
+        if action_type != "wait":
+            self._total_wait_time = 0
+
+    async def _on_state_changed(
+        self,
+        step: int,
+        url_before: str,
+        url_after: str,
+        action_type: str,
+        output: AgentOutput,
+        fp_before: str = "",
+        fp_after: str = "",
+    ) -> None:
+        """Record transition for CartographyResult when state changes."""
+        if action_type not in ("click", "input", "select_dropdown"):
+            return
+
         try:
-            result = await bu_page.evaluate(
+            dom_text_after, title_after, selector_map_after = (
+                await self._get_browser_snapshot()
+            )
+            fp_after = self._compute_page_fingerprint(
+                dom_text_after, title_after, selector_map_after
+            )
+        except Exception:
+            return
+
+        # Use URL-based state IDs
+        from_fp = hashlib.md5(url_before.encode("utf-8")).hexdigest()[:10]
+        to_fp = hashlib.md5(url_after.encode("utf-8")).hexdigest()[:10]
+        from_state_id = f"state:{from_fp}:{self._state_id or 'root'}"
+        to_state_id = f"state:{to_fp}:react-{step}"
+
+        from_state = State(
+            id=from_state_id,
+            url=url_before,
+            title=self._page_title or title_after,
+        )
+        to_state = State(
+            id=to_state_id,
+            url=url_after,
+            fingerprint=fp_after,
+            title=f"{self._page_title or title_after} after {action_type}",
+        )
+
+        act_type = {
+            "click": ActionType.CLICK,
+            "input": ActionType.FILL,
+            "select_dropdown": ActionType.SELECT,
+        }.get(action_type, ActionType.CLICK)
+
+        idx = getattr(output.action, "index", None)
+        selector = f"[{idx}]" if idx is not None else "[?]"
+        thought_text = output.next_goal or ""
+
+        # Intent inference
+        intent = None
+        try:
+            distilled = await distill_ui_thought(
+                thought_text, act_type, selector, url_before, url_after
+            )
+            neighbor_steps = self._result.history[-3:] if self._result.history else None
+            page_signals = {"title": self._page_title or title_after, "url": url_before}
+            intent, _reason, _level = await infer_intent_progressive(
+                action=act_type,
+                selector=selector,
+                source_url=url_before,
+                target_url=url_after,
+                param_name=None,
+                thought_text=distilled,
+                neighbor_steps=neighbor_steps,
+                page_signals=page_signals,
+            )
+            if intent:
+                logger.debug("    → Intent inferred: %s", intent.key)
+        except Exception as e:
+            logger.debug("    → Intent inference skipped: %s", e)
+
+        transition = Transition(
+            id=f"t:{self._state_id or 'root'}:react-{action_type}-{step}",
+            selector=selector,
+            action=act_type,
+            thought=thought_text,
+            intent=intent,
+            from_state_id=from_state_id,
+            to_state_id=to_state_id,
+            step_index=step,
+        )
+        cp = Checkpoint(
+            id=f"cp:{transition.id}:after",
+            layer=CheckpointLayer.STRUCTURAL,
+            timing=CheckpointTiming.AFTER,
+            expect=CheckpointExpect.SHOULD_PASS,
+            severity=Severity.MAJOR,
+            rule_type="url_changed" if url_after != url_before else "dom_changed",
+            description=thought_text or f"After {action_type}, page should change",
+        )
+
+        self._result.states.extend([from_state, to_state])
+        self._result.transitions.append(transition)
+        self._result.checkpoints.append(cp)
+        self._result.checkpoint_transition_map[cp.id] = transition.id
+        logger.info("    → Transition recorded: %s", transition.id)
+
+        if url_after != url_before:
+            try:
+                page = await self.browser.get_current_page()
+                await page.go_back()
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+
+    # ------------------------------------------------------------------
+    # Run override — return CartographyResult
+    # ------------------------------------------------------------------
+
+    async def explore_page(
+        self,
+        session: "Browser | None" = None,
+        state_id: str = "",
+        page_title: str = "",
+        *,
+        start_url: str = "",
+        max_steps: int | None = None,
+    ) -> CartographyResult:
+        """Explore a page/zone and return CartographyResult.
+
+        Supports two calling conventions:
+        1. ``explore_page(session, state_id, page_title)`` — used by orchestrator.
+        2. ``explore_page(start_url=url, max_steps=n)`` — used by maximal explorer.
+        """
+        # Handle maximal-explorer keyword convention
+        if start_url:
+            if self._browser_session is None:
+                raise RuntimeError(
+                    "ReActExplorer requires a BrowserSession when start_url is given"
+                )
+            bs = self._browser_session
+            # Navigate to start_url if provided
+            try:
+                await bs.navigate_to(start_url)
+            except Exception as e:
+                logger.warning("Failed to navigate to start_url %s: %s", start_url, e)
+            self._state_id = f"state:{start_url}"
+        else:
+            if session is None and self._browser_session is None:
+                raise RuntimeError("ReActExplorer requires a BrowserSession")
+            bs = session or self._browser_session
+            self._state_id = state_id
+
+        self._controller = PageController(bs)
+        self._page_title = page_title
+        self._result = CartographyResult()
+        self._explored_indices.clear()
+        self._total_wait_time = 0.0
+        self._last_url = ""
+
+        # Temporarily override max_steps if requested
+        original_max_steps = self.max_steps
+        if max_steps is not None:
+            self.max_steps = max_steps
+            self.total_max_steps = max_steps
+
+        # Reset token tracker
+        from graph_agent.lib.token_tracker import reset_global_tracker
+        reset_global_tracker()
+
+        try:
+            # Run the BaseAgent loop
+            agent_result = await self.run()
+
+            # Attach history to result
+            self._result.history = agent_result.history
+        finally:
+            # Restore max_steps
+            if max_steps is not None:
+                self.max_steps = original_max_steps
+                self.total_max_steps = original_max_steps
+
+        # Log token usage
+        from graph_agent.lib.token_tracker import get_global_tracker
+        get_global_tracker().log_summary()
+
+        logger.info(
+            "ReAct exploration complete: %d steps, %d transitions, %d checkpoints",
+            len(agent_result.history),
+            len(self._result.transitions),
+            len(self._result.checkpoints),
+        )
+
+        # Dispose controller
+        if self._controller:
+            try:
+                self._controller.dispose()
+            except Exception as e:
+                logger.warning("Failed to dispose controller: %s", e)
+
+        return self._result
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    async def _close_overlays(self, page) -> int:
+        try:
+            result = await page.evaluate(
                 """() => {
                     let closed = 0;
                     document.querySelectorAll(

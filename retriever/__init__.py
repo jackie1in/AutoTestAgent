@@ -3,13 +3,21 @@ from retriever.base import EmbeddingProvider, VectorRetriever
 from retriever.embedding import OpenAIEmbeddingProvider, CachedEmbeddingProvider
 from retriever.memory import InMemoryVectorRetriever
 from retriever.config import VectorConfig, CollectionConfig
-from retriever.graphrag import (
-    GraphRAGQuery,
-    GraphRAGQueryEngine,
-    GraphRAGIndexManager,
-    GraphRAGEmbedder,
-    IntentBasedRetriever,
-)
+
+try:
+    from retriever.graphrag import (
+        GraphRAGQuery,
+        GraphRAGQueryEngine,
+        GraphRAGIndexManager,
+        GraphRAGEmbedder,
+        IntentBasedRetriever,
+    )
+except Exception:
+    GraphRAGQuery = None  # type: ignore[misc,assignment]
+    GraphRAGQueryEngine = None  # type: ignore[misc,assignment]
+    GraphRAGIndexManager = None  # type: ignore[misc,assignment]
+    GraphRAGEmbedder = None  # type: ignore[misc,assignment]
+    IntentBasedRetriever = None  # type: ignore[misc,assignment]
 
 # Optional external Vector DB adapters
 # Usage:

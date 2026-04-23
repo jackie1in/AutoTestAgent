@@ -233,7 +233,7 @@ async def ainvoke_structured(
                 result = await asyncio.wait_for(coro, timeout=timeout_s)
             else:
                 result = await llm.ainvoke(messages, output_format=output_format, **kwargs)
-            
+
             # Return the parsed completion
             if isinstance(result, ChatInvokeCompletion):
                 return result.completion
@@ -282,7 +282,7 @@ async def ainvoke_prompt(llm: BaseChatModel, prompt: str) -> str:
     from browser_use.llm.messages import UserMessage
 
     result = await llm.ainvoke([UserMessage(content=prompt)])
-    
+
     if isinstance(result, ChatInvokeCompletion):
         return result.completion
     return str(result)

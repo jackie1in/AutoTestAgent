@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "skills": {
+    "neo4j-cli-tools-skill": {
+      "source": "neo4j-contrib/neo4j-skills",
+      "sourceType": "github",
+      "computedHash": "85f7a36c124c501d097326c33fa18cb3a23d912b0ff91a37ab2b461dba14f026"
+    },
+    "neo4j-cypher-skill": {
+      "source": "neo4j-contrib/neo4j-skills",
+      "sourceType": "github",
+      "computedHash": "43943de21b5a9641b2b9fd7e3452ed73efdcbd1fa2ab691211ef00d5a3db440c"
+    },
+    "neo4j-migration-skill": {
+      "source": "neo4j-contrib/neo4j-skills",
+      "sourceType": "github",
+      "computedHash": "322d4061a79f727ed958b104fd5ed0b595ef610fcaec028afaad1a2031bfc33c"
+    }
+  }
+}

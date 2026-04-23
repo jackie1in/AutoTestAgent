@@ -17,14 +17,29 @@ import logging
 from typing import Any
 
 from neo4j import AsyncDriver
-from neo4j_graphrag.embeddings import OpenAIEmbeddings as Neo4jOpenAIEmbeddings
-from neo4j_graphrag.retrievers import (
-    VectorRetriever,
-    HybridRetriever,
-    VectorCypherRetriever,
-)
+
+try:
+    from neo4j_graphrag.embeddings import OpenAIEmbeddings as Neo4jOpenAIEmbeddings
+    from neo4j_graphrag.retrievers import (
+        VectorRetriever,
+        HybridRetriever,
+        VectorCypherRetriever,
+    )
+except Exception:
+    Neo4jOpenAIEmbeddings = None  # type: ignore[misc,assignment]
+    VectorRetriever = None  # type: ignore[misc,assignment]
+    HybridRetriever = None  # type: ignore[misc,assignment]
+    VectorCypherRetriever = None  # type: ignore[misc,assignment]
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_vector_index_name(base_name: str, model: str | None = None) -> str:
+    """Append sanitized model slug to index name to avoid dimension collisions."""
+    if model:
+        slug = model.replace("-", "_").replace("/", "_").lower()
+        return f"{base_name}_{slug}"
+    return base_name
 
 
 class GraphRAGEmbedder:
@@ -282,6 +297,8 @@ class IntentBasedRetriever:
             List of matching intents with related transitions
         """
         engine = GraphRAGQueryEngine(self._driver, self._embedder)
+        model = getattr(self._embedder, "model", None)
+        resolved_index = resolve_vector_index_name(intent_index, model)
         
         # Custom query to get intent with related transitions
         retrieval_query = """
@@ -304,7 +321,7 @@ class IntentBasedRetriever:
         
         return await engine.vector_cypher_search(
             query_text=description,
-            index_name=intent_index,
+            index_name=resolved_index,
             retrieval_query=retrieval_query,
             top_k=top_k,
         )
@@ -408,14 +425,18 @@ class GraphRAGQuery:
         Returns:
             List of results with node info, scores, and graph context
         """
+        model = getattr(self._neo4j_embedder, "model", None)
+        intent_index = resolve_vector_index_name("intent_embeddings", model)
+        state_index = resolve_vector_index_name("state_fingerprints", model)
+
         # Search intent embeddings
         intent_results = await self._engine.vector_search(
-            question, "intent_embeddings", top_k
+            question, intent_index, top_k
         )
         
         # Search state embeddings
         state_results = await self._engine.vector_search(
-            question, "state_fingerprints", top_k
+            question, state_index, top_k
         )
         
         # Combine and deduplicate
@@ -480,6 +501,11 @@ class _EmbedderAdapter:
     
     def __init__(self, provider):
         self._provider = provider
+    
+    @property
+    def model(self) -> str:
+        inner = getattr(self._provider, "_inner", self._provider)
+        return getattr(inner, "_model", "unknown")
     
     async def aembed(self, text: str) -> list[float]:
         """Embed single text."""

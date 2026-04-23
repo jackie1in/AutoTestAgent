@@ -6,7 +6,7 @@ Graph Agent 是一个基于图谱的 UI 自动化测试框架，通过「侦察 
 
 1. **Scout（侦察）**：扫描目标页面，识别可交互元素，生成元素清单 `element_inventory.json`。
 2. **Mapping（测绘）**：使用 AI Agent 探索业务流程（如登录），记录操作步骤并构建有向图。
-3. **Graph（图谱）**：节点为页面/URL，边为交互动作（点击、输入），持久化为 JSON。
+3. **Graph（图谱）**：节点为页面/URL，边为交互动作（点击、输入），持久化为 Neo4j 图数据库。
 4. **Playback（回放）**：按业务意图寻径，用 Playwright 执行回放。
 
 ## 快速开始
@@ -31,7 +31,6 @@ LLM_MODEL=google/gemini-2.5-pro-preview
 
 # 可选：测绘与回放
 # MAPPING_URL=https://the-internet.herokuapp.com/login
-# MAPPING_OUTPUT=graph_agent/data/graph.json
 # MAPPING_INVENTORY=graph_agent/data/element_inventory.json
 # MAPPING_USERNAME=tomsmith
 # MAPPING_PASSWORD=SuperSecretPassword!
@@ -41,20 +40,19 @@ LLM_MODEL=google/gemini-2.5-pro-preview
 
 ### 2. 一键测绘（Scout + Mapping）
 
-一条命令会先执行 Scout 生成元素清单，再执行 Mapping 探索流程并生成图谱。默认输出为 `graph_agent/data/element_inventory.json` 和 `graph_agent/data/graph.json`，也可通过 `.env` 或命令行覆盖：
+一条命令会先执行 Scout 生成元素清单，再执行 Mapping 探索流程并构建 Neo4j 图谱：
 
 ```bash
 # 使用默认 URL（或 .env 中的 MAPPING_URL）
 uv run python -m graph_agent.cartography.runner
 
-# 指定 URL 与路径
+# 指定 URL 与清单路径
 uv run python -m graph_agent.cartography.runner \
   --url https://the-internet.herokuapp.com/login \
-  --inventory graph_agent/data/element_inventory.json \
-  --output graph_agent/data/graph.json
+  --inventory graph_agent/data/element_inventory.json
 ```
 
-**参数**：`--url` 起始页；`--inventory` 元素清单路径；`--output` 图谱 JSON 路径。
+**参数**：`--url` 起始页；`--inventory` 元素清单路径。图谱直接写入 Neo4j，无需 `--output`。
 
 ### 3. 可视化与回放（Web UI）
 
@@ -83,15 +81,46 @@ uv run uvicorn graph_agent.web.app:app --reload
 
 ```python
 import asyncio
-from graph_agent.graph.io import load_graph
-from graph_agent.graph.pathfinding import get_path_from_intent
+from graph_agent.graph.pathfinding import get_path_from_query
+from graph_agent.models import GraphEdge
 from graph_agent.playback.engine import run_playback
 
+async def _load_edges_from_neo4j() -> list[GraphEdge]:
+    from graph_agent.neo4j_client.driver import Neo4jDriver
+    from graph_agent.graph.pathfinding import neo4j_transition_to_edge_data, _edge_to_model
+
+    driver = Neo4jDriver()
+    await driver.connect()
+    try:
+        async with driver.driver.session() as session:
+            result = await session.run("""
+                MATCH (a:App)
+                WITH a ORDER BY coalesce(a.last_session_at, a.created_at) DESC LIMIT 1
+                MATCH (a)-[:HAS_STATE]->(s:State)<-[:FROM]-(t:Transition)-[:TO]->(target:State)
+                OPTIONAL MATCH (t)-[:REALIZES]->(i:Intent)
+                RETURN t.id AS id, t.step_index AS step_index,
+                       s.id AS from_state_id, target.id AS to_state_id,
+                       t.selector AS selector, t.action AS action,
+                       i{.*} AS intent
+                ORDER BY t.step_index
+            """)
+            edges: list[GraphEdge] = []
+            async for record in result:
+                t = dict(record)
+                data = neo4j_transition_to_edge_data(t)
+                u = str(t.get("from_state_id", ""))
+                v = str(t.get("to_state_id", ""))
+                if u and v:
+                    edges.append(_edge_to_model(u, v, data))
+            return edges
+    finally:
+        await driver.close()
+
 async def main():
-    G = load_graph("graph_agent/data/graph.json")
-    path = get_path_from_intent("login_success", G)
+    edges = await _load_edges_from_neo4j()
+    path = get_path_from_query("login_success", edges)
     test_data = {"username": "tomsmith", "password": "SuperSecretPassword!"}
-    
+
     result = await run_playback(
         path, test_data,
         start_url="https://the-internet.herokuapp.com/login",

@@ -587,6 +587,62 @@ class PageController:
         except Exception as e:
             return ActionResult(success=False, message=f"JS error: {e}")
 
+    # ── Captcha helpers ─────────────────────────────────────────
+
+    async def extract_captcha_image(self, index: int) -> ActionResult:
+        """Extract captcha image bytes from an <img> element.
+
+        Supports both base64 data URI and standalone image URLs.
+        Returns the raw image bytes (PNG/JPEG) in the message as base64.
+        """
+        try:
+            self._assert_indexed()
+            element = await self._get_element(index)
+            if not element:
+                return ActionResult(
+                    success=False, message=f"No element at index {index}"
+                )
+
+            src = await element.evaluate("el => el.src")
+            if not src or not isinstance(src, str):
+                return ActionResult(
+                    success=False, message="Captcha image has no src attribute"
+                )
+
+            page = await self._get_page()
+            b64 = await extract_image_base64_from_src(src, page)
+            return ActionResult(
+                success=True,
+                message=b64,
+                metadata={
+                    "format": "base64",
+                    "size": len(b64) * 3 // 4,  # approximate byte size
+                },
+            )
+        except Exception as e:
+            return ActionResult(
+                success=False, message=f"Captcha extraction failed: {e}"
+            )
+
+    async def refresh_captcha(self, index: int) -> ActionResult:
+        """Click a captcha image to refresh it."""
+        try:
+            self._assert_indexed()
+            element = await self._get_element(index)
+            if not element:
+                return ActionResult(
+                    success=False, message=f"No element at index {index}"
+                )
+            await element.click()
+            await asyncio.sleep(0.5)
+            return ActionResult(
+                success=True, message=f"Refreshed captcha at index {index}"
+            )
+        except Exception as e:
+            return ActionResult(
+                success=False, message=f"Captcha refresh failed: {e}"
+            )
+
     def dispose(self) -> None:
         """Clean up resources. Mirrors page-agent PageController.dispose()."""
         self._selector_map = {}
@@ -640,6 +696,47 @@ def _build_element_text_map(selector_map: DOMSelectorMap) -> dict[int, str]:
     for idx, node in selector_map.items():
         text_map[idx] = _node_short_desc(node)
     return text_map
+
+
+async def extract_image_base64_from_src(src: str, page) -> str:
+    """Convert an image src (data URI or standalone URL) to a base64 string.
+
+    Shared by PageController.extract_captcha_image and
+    CartographyAgent._resolve_captcha_from_page to avoid duplication.
+
+    Args:
+        src: The image src attribute (data:image/... or http://...)
+        page: A Playwright page object with .evaluate() available.
+
+    Returns:
+        Base64-encoded image bytes.
+
+    Raises:
+        ValueError: If src format is unsupported.
+        Exception: If fetch or decode fails.
+    """
+    import base64
+
+    if src.startswith("data:image"):
+        b64_part = src.split(",", 1)[1]
+        img_bytes = base64.b64decode(b64_part)
+    else:
+        # Fetch external URL via page JS context (bypasses CORS restrictions)
+        resp = await page.evaluate(
+            f"""async () => {{
+                const r = await fetch({json.dumps(src)});
+                const buf = await r.arrayBuffer();
+                const bytes = new Uint8Array(buf);
+                let binary = '';
+                for (let i = 0; i < bytes.byteLength; i++) {{
+                    binary += String.fromCharCode(bytes[i]);
+                }}
+                return btoa(binary);
+            }}"""
+        )
+        img_bytes = base64.b64decode(resp)
+
+    return base64.b64encode(img_bytes).decode()
 
 
 def _node_short_desc(node: "EnhancedDOMTreeNode") -> str:

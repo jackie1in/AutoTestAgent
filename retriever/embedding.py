@@ -7,6 +7,7 @@ import sqlite3
 from typing import Any
 
 from retriever.base import EmbeddingProvider
+from graph_agent.lib.token_tracker import get_global_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +22,25 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         base_url: str | None = None,
         batch_size: int = 100,
     ):
-        self._model = model or os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
         self._api_key = api_key or os.getenv("EMBEDDING_API_KEY") or os.getenv("LLM_API_KEY", "")
         self._base_url = base_url or os.getenv("EMBEDDING_BASE_URL") or os.getenv("LLM_BASE_URL")
         self._batch_size = batch_size
         self._client: Any = None
         self._dim: int | None = None
+
+        # Auto-detect default embedding model based on provider endpoint
+        if model:
+            self._model = model
+        elif os.getenv("EMBEDDING_MODEL"):
+            self._model = os.getenv("EMBEDDING_MODEL")
+        else:
+            base_url_lower = (self._base_url or "").lower()
+            if "bigmodel.cn" in base_url_lower:
+                self._model = "embedding-3"
+            elif "siliconflow" in base_url_lower:
+                self._model = "BAAI/bge-m3"
+            else:
+                self._model = "text-embedding-3-small"
 
     def _get_client(self):
         if self._client is None:
@@ -44,7 +58,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
     async def embed(self, texts: list[str]) -> list[list[float]]:
         client = self._get_client()
         all_vectors: list[list[float]] = []
-        
+
         for i in range(0, len(texts), self._batch_size):
             batch = texts[i : i + self._batch_size]
             response = await client.embeddings.create(
@@ -53,10 +67,19 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
             )
             batch_vectors = [item.embedding for item in response.data]
             all_vectors.extend(batch_vectors)
-            
+
             if self._dim is None and batch_vectors:
                 self._dim = len(batch_vectors[0])
-        
+
+            # Track embedding token usage
+            try:
+                if hasattr(response, "usage") and response.usage:
+                    total_tokens = getattr(response.usage, "total_tokens", 0)
+                    if total_tokens:
+                        get_global_tracker().record_embedding(total_tokens, model=self._model)
+            except Exception:
+                pass
+
         return all_vectors
 
     def dimension(self) -> int:
@@ -66,8 +89,12 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
             "text-embedding-3-small": 1536,
             "text-embedding-3-large": 3072,
             "text-embedding-ada-002": 1536,
+            "embedding-3": 2048,
+            "embedding-2": 1024,
+            "baaai/bge-m3": 1024,
+            "bge-m3": 1024,
         }
-        return model_dims.get(self._model, 1536)
+        return model_dims.get(self._model.lower(), 1536)
 
 
 class CachedEmbeddingProvider(EmbeddingProvider):

@@ -1,6 +1,6 @@
 {
   "default_graph_source": "uv run python -m graph_agent.cartography.runner",
-  "default_graph_path": "graph_agent/data/graph.json",
+  "default_graph_path": "neo4j://localhost:7687",
   "target_chains": [
     {
       "chain_id": "login-to-secure",
@@ -8,7 +8,7 @@
       "start_url": "https://the-internet.herokuapp.com/",
       "intent_keys": ["go_to_login", "fill_username", "fill_password", "submit_login"],
       "failure_root_causes": [],
-      "notes": "PRD Task 1 固化验收样本。真实验收默认使用 mapping.run 输出的 graph.json。"
+      "notes": "PRD Task 1 固化验收样本。真实验收默认使用 mapping.run 写入 Neo4j 的图谱数据。"
     }
   ],
   "metadata": {

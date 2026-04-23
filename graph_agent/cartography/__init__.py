@@ -1,35 +1,17 @@
-"""Cartography: web application exploration and mapping."""
+"""Cartography: LLM-first web application exploration and mapping.
 
-from graph_agent.cartography.maximal_config import ExplorationConfig
-from graph_agent.cartography.maximal_explorer import (
-    MaximalOrchestrator,
-    MaximalZoneExplorer,
-    MaximalExplorationResult,
-)
-from graph_agent.cartography.orchestrator import CartographyOrchestrator
-from graph_agent.cartography.scope import SCOPE_MENU_DISCOVERY, SCOPE_PAGE_EXPLORATION
-from graph_agent.cartography.menu_extractor import MenuExtractor
-from graph_agent.cartography.zone_discoverer import ZoneDiscoverer
-from graph_agent.cartography.scout import extract_derived_urls, run_scout, run_scout_multi
+Canonical entry point: :func:`run_mapping` orchestrates multi-page
+exploration using :class:`ReActExplorer` for in-page deep dives.
+:class:`NLResolver` is exposed for web/pathfinding consumers that need
+to resolve natural-language intents against the discovered graph.
+"""
+
 from graph_agent.cartography.runner import run_mapping
+from graph_agent.cartography.react_explorer import ReActExplorer
+from graph_agent.cartography.nl_resolver import NLResolver
 
 __all__ = [
-    # Maximal Exploration
-    "ExplorationConfig",
-    "MaximalOrchestrator",
-    "MaximalZoneExplorer",
-    "MaximalExplorationResult",
-    # Core orchestration
-    "CartographyOrchestrator",
-    "SCOPE_MENU_DISCOVERY",
-    "SCOPE_PAGE_EXPLORATION",
-    # Components
-    "MenuExtractor",
-    "ZoneDiscoverer",
-    # Scout
-    "extract_derived_urls",
-    "run_scout",
-    "run_scout_multi",
-    # Runner
     "run_mapping",
+    "ReActExplorer",
+    "NLResolver",
 ]
