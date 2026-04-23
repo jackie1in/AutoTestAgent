@@ -3,8 +3,6 @@
 import pytest
 from graph_agent.models import (
     ActionType,
-    BusinessTemplate,
-    BusinessTemplateStep,
     Intent,
     ElementSnapshot,
     FrameLocatorSnapshot,
@@ -293,112 +291,6 @@ def test_graph_edge_rejects_mismatched_element_frame_path():
                 frame_path=[FrameLocatorSnapshot(selector="iframe[name='inner']")],
             ),
         )
-
-
-def test_business_template_step_constructs():
-    """BusinessTemplateStep should capture replay-critical edge fields."""
-    step = BusinessTemplateStep(
-        edge_id="step-3",
-        source="login",
-        target="secure",
-        selector="button[type='submit']",
-        action=ActionType.CLICK,
-        intent_key="auth.submit.login",
-        param_name=None,
-    )
-    assert step.edge_id == "step-3"
-    assert step.action == ActionType.CLICK
-    assert step.intent_key == "auth.submit.login"
-
-
-def test_business_template_json_roundtrip():
-    """BusinessTemplate should round-trip nested steps, slots and confidence."""
-    template = BusinessTemplate(
-        template_id="tpl-auth-login-001",
-        business_key="auth.login",
-        summary="用户登录流程",
-        entry_node="https://example.com/login",
-        exit_node="https://example.com/secure",
-        path_length=3,
-        confidence=0.91,
-        steps=[
-            BusinessTemplateStep(
-                edge_id="step-1",
-                source="https://example.com/login",
-                target="State 1",
-                selector="#username",
-                action=ActionType.FILL,
-                intent_key="auth.fill.username",
-                param_name="username",
-            ),
-            BusinessTemplateStep(
-                edge_id="step-2",
-                source="State 1",
-                target="State 2",
-                selector="#password",
-                action=ActionType.FILL,
-                intent_key="auth.fill.password",
-                param_name="password",
-            ),
-            BusinessTemplateStep(
-                edge_id="step-3",
-                source="State 2",
-                target="https://example.com/secure",
-                selector="button[type='submit']",
-                action=ActionType.CLICK,
-                intent_key="auth.submit.login",
-                param_name=None,
-            ),
-        ],
-        slots={"username": 0, "password": 1, "submit": "step-3"},
-        evidence={
-            "selectors": ["#username", "#password", "button[type='submit']"],
-            "intent_keys": [
-                "auth.fill.username",
-                "auth.fill.password",
-                "auth.submit.login",
-            ],
-        },
-    )
-    restored = BusinessTemplate.model_validate_json(template.model_dump_json())
-    assert restored.business_key == "auth.login"
-    assert restored.path_length == 3
-    assert restored.confidence == 0.91
-    assert len(restored.steps) == 3
-    assert restored.steps[0].param_name == "username"
-    assert restored.slots["submit"] == "step-3"
-    assert restored.evidence["intent_keys"][-1] == "auth.submit.login"
-
-
-def test_business_template_json_roundtrip_preserves_dependencies():
-    """BusinessTemplate should preserve explicit prerequisite template keys."""
-    template = BusinessTemplate(
-        template_id="tpl-project-dashboard",
-        business_key="project.dashboard.open",
-        summary="进入项目看板",
-        entry_node="secure",
-        exit_node="dashboard",
-        path_length=1,
-        confidence=0.88,
-        steps=[
-            BusinessTemplateStep(
-                edge_id="step-10",
-                source="secure",
-                target="dashboard",
-                selector="#project",
-                action=ActionType.CLICK,
-                intent_key="project.dashboard.open",
-                param_name=None,
-            )
-        ],
-        slots={},
-        evidence={},
-        depends_on=["auth.login"],
-    )
-
-    restored = BusinessTemplate.model_validate_json(template.model_dump_json())
-
-    assert restored.depends_on == ["auth.login"]
 
 
 def test_graph_node_supports_opaque_state_id_with_real_url():
