@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import time
 from typing import Any
+from urllib.parse import parse_qsl, urlparse
 
 from browser_use.browser.session import BrowserSession as Browser
 
@@ -41,6 +43,51 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MAX_STEPS = 500
 _LLM_MAX_RETRIES = 3
 _LLM_TIMEOUT_MS = 60_000
+
+
+def _extract_spa_route(url: str) -> str:
+    parsed = urlparse(url or "")
+    return parsed.fragment or parsed.path or "/"
+
+
+def _build_data_signature(url: str) -> str:
+    parsed = urlparse(url or "")
+    query_keys = sorted(k for k, _ in parse_qsl(parsed.query, keep_blank_values=True))
+    raw = "|".join(query_keys)
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _build_state_identity(url: str, spa_route: str, view_fingerprint: str) -> str:
+    """Build a stable state identity for cross-session reuse."""
+    parsed = urlparse(url or "")
+    origin = f"{parsed.scheme}://{parsed.netloc}".lower()
+    route = (spa_route or "/").strip() or "/"
+    view = (view_fingerprint or "").strip() or "no-view-fp"
+    digest = hashlib.md5(f"{origin}|{route}|{view}".encode("utf-8")).hexdigest()[:16]
+    return f"state:{digest}"
+
+
+def _rank_selector_chain(selector: str, attrs: dict[str, Any], tag: str) -> list[str]:
+    chain: list[str] = []
+    test_id = attrs.get("data-testid") or attrs.get("data-test") or attrs.get("data-qa")
+    if test_id:
+        chain.append(f'[data-testid="{test_id}"]')
+    element_id = attrs.get("id")
+    if element_id:
+        chain.append(f"#{element_id}")
+    role = attrs.get("role")
+    name = attrs.get("name")
+    if role and name:
+        chain.append(f'{tag}[role="{role}"][name="{name}"]')
+    elif role:
+        chain.append(f'{tag}[role="{role}"]')
+    if name:
+        chain.append(f'{tag}[name="{name}"]')
+    if selector and selector not in chain:
+        chain.append(selector)
+    if not chain:
+        chain.append(f"[selector:{selector or '?'}]")
+    return chain
 
 
 class ReActExplorer(BaseAgent):
@@ -87,6 +134,10 @@ class ReActExplorer(BaseAgent):
             "scroll_horizontally",
             "close_overlay",
             "execute_javascript",
+            "query_knowledge",
+            "discover_zones",
+            "extract_menu",
+            "solve_captcha",
         })
         self._dynamic_action_model = self._build_dynamic_action_model()
 
@@ -265,6 +316,16 @@ class ReActExplorer(BaseAgent):
                     script = params.get("script", "")
                     r = await controller.execute_javascript(script)
                     return r.message
+                case "query_knowledge":
+                    query_text = (params.get("query_text") or "").strip()
+                    target_type = (params.get("target_type") or "all").strip()
+                    return await self._query_knowledge(query_text, target_type)
+                case "discover_zones":
+                    return "Zone discovery delegated to orchestrator analysis"
+                case "extract_menu":
+                    return "Menu extraction delegated to orchestrator analysis"
+                case "solve_captcha":
+                    return "Captcha solving delegated to runner auto-login flow"
                 case _:
                     return f"Unknown action: {action_type}"
         except Exception as e:
@@ -319,22 +380,34 @@ class ReActExplorer(BaseAgent):
         except Exception:
             return
 
-        # Use URL-based state IDs
-        from_fp = hashlib.md5(url_before.encode("utf-8")).hexdigest()[:10]
-        to_fp = hashlib.md5(url_after.encode("utf-8")).hexdigest()[:10]
-        from_state_id = f"state:{from_fp}:{self._state_id or 'root'}"
-        to_state_id = f"state:{to_fp}:react-{step}"
+        from_state_id = _build_state_identity(
+            url_before,
+            _extract_spa_route(url_before),
+            fp_before or self._compute_dom_fingerprint(url_before),
+        )
+        to_state_id = _build_state_identity(
+            url_after,
+            _extract_spa_route(url_after),
+            fp_after or self._compute_dom_fingerprint(url_after),
+        )
 
         from_state = State(
             id=from_state_id,
             url=url_before,
             title=self._page_title or title_after,
+            spa_route=_extract_spa_route(url_before),
+            fingerprint=fp_before,
+            view_fingerprint=fp_before,
+            data_signature=_build_data_signature(url_before),
         )
         to_state = State(
             id=to_state_id,
             url=url_after,
             fingerprint=fp_after,
             title=f"{self._page_title or title_after} after {action_type}",
+            spa_route=_extract_spa_route(url_after),
+            view_fingerprint=fp_after,
+            data_signature=_build_data_signature(url_after),
         )
 
         act_type = {
@@ -345,6 +418,36 @@ class ReActExplorer(BaseAgent):
 
         idx = getattr(output.action, "index", None)
         selector = f"[{idx}]" if idx is not None else "[?]"
+        selector_chain = [selector]
+        element_snapshot_json: str | None = None
+        if idx is not None and self._controller is not None:
+            node = self._controller.selector_map.get(idx)
+            if node is not None:
+                attrs = getattr(node, "attributes", {}) or {}
+                tag = (getattr(node, "tag_name", "") or "").strip() or "*"
+                node_selector = (
+                    getattr(node, "css_selector", "")
+                    or getattr(node, "xpath", "")
+                    or selector
+                )
+                selector_chain = _rank_selector_chain(node_selector, attrs, tag)
+                selector = selector_chain[0]
+                element_snapshot_json = json.dumps(
+                    {
+                        "selector": selector,
+                        "xpath": getattr(node, "xpath", None),
+                        "css_selector": getattr(node, "css_selector", None),
+                        "name": attrs.get("name"),
+                        "id": attrs.get("id"),
+                        "class_name": attrs.get("class"),
+                        "type": attrs.get("type"),
+                        "tag_name": tag,
+                        "text_content": getattr(node, "node_value", ""),
+                        "attributes": attrs,
+                        "frame_path": [],
+                    },
+                    ensure_ascii=False,
+                )
         thought_text = output.next_goal or ""
 
         # Intent inference
@@ -373,12 +476,19 @@ class ReActExplorer(BaseAgent):
         transition = Transition(
             id=f"t:{self._state_id or 'root'}:react-{action_type}-{step}",
             selector=selector,
+            selector_chain=selector_chain,
+            semantic_action_key=f"{act_type.value}:{selector}",
             action=act_type,
             thought=thought_text,
             intent=intent,
             from_state_id=from_state_id,
             to_state_id=to_state_id,
             step_index=step,
+            element_snapshot=element_snapshot_json,
+            evidence_ids=[
+                f"evidence:{self._state_id or 'root'}:{step}:url_change",
+                f"evidence:{self._state_id or 'root'}:{step}:dom_after",
+            ],
         )
         cp = Checkpoint(
             id=f"cp:{transition.id}:after",
@@ -522,3 +632,49 @@ class ReActExplorer(BaseAgent):
             return int(result) if result else 0
         except Exception:
             return 0
+
+    async def _query_knowledge(self, query_text: str, target_type: str) -> str:
+        """Query historical graph knowledge to guide next exploration step."""
+        if not query_text:
+            return "Knowledge query skipped: empty query text"
+        try:
+            from graph_agent.neo4j_client.manager import GraphManager
+
+            async with GraphManager() as manager:
+                if target_type == "state":
+                    rows = await manager._run_read(
+                        """
+                        MATCH (s:State)
+                        WHERE toLower(coalesce(s.title, '') + ' ' + coalesce(s.url, ''))
+                              CONTAINS toLower($q)
+                        RETURN s.id AS id, s.url AS url, s.title AS title
+                        ORDER BY coalesce(s.last_visited, '') DESC
+                        LIMIT 5
+                        """,
+                        q=query_text,
+                    )
+                    if not rows:
+                        return f"No historical states matched: {query_text}"
+                    preview = "; ".join(f"{r.get('title') or r.get('id')}" for r in rows)
+                    return f"Historical state hints: {preview}"
+
+                rows = await manager._run_read(
+                    """
+                    MATCH (t:Transition)
+                    WHERE toLower(coalesce(t.selector, '') + ' ' + coalesce(t.thought, ''))
+                          CONTAINS toLower($q)
+                    RETURN t.id AS id, t.selector AS selector, t.confidence AS confidence
+                    ORDER BY coalesce(t.confidence, 0.0) DESC
+                    LIMIT 5
+                    """,
+                    q=query_text,
+                )
+                if not rows:
+                    return f"No historical transitions matched: {query_text}"
+                preview = "; ".join(
+                    f"{r.get('selector')}({float(r.get('confidence') or 0.0):.2f})"
+                    for r in rows
+                )
+                return f"Historical transition hints: {preview}"
+        except Exception as e:
+            return f"Knowledge query failed: {e}"

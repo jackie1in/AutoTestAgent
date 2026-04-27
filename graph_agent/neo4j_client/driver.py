@@ -15,9 +15,9 @@ class Neo4jDriver:
         user: str | None = None,
         password: str | None = None,
     ):
-        self._uri = uri or os.getenv("NEO4J_URI", "bolt://localhost:7687")
-        self._user = user or os.getenv("NEO4J_USER", "neo4j")
-        self._password = password or os.getenv("NEO4J_PASSWORD", "autotestagent")
+        self._uri: str = uri or os.getenv("NEO4J_URI", "bolt://localhost:7687")
+        self._user: str = user or os.getenv("NEO4J_USER", "neo4j")
+        self._password: str = password or os.getenv("NEO4J_PASSWORD", "autotestagent")
         self._driver: AsyncDriver | None = None
 
     async def connect(self) -> AsyncDriver:
@@ -59,6 +59,7 @@ class Neo4jDriver:
                 "CREATE CONSTRAINT IF NOT EXISTS FOR (tc:TestCase) REQUIRE tc.id IS UNIQUE",
                 "CREATE CONSTRAINT IF NOT EXISTS FOR (s:Session) REQUIRE s.id IS UNIQUE",
                 "CREATE CONSTRAINT IF NOT EXISTS FOR (m:Menu) REQUIRE m.id IS UNIQUE",
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (ev:Evidence) REQUIRE ev.id IS UNIQUE",
             ]
             indexes = [
                 "CREATE INDEX IF NOT EXISTS FOR (a:App) ON (a.entry_url)",
@@ -80,6 +81,8 @@ class Neo4jDriver:
                 "CREATE INDEX IF NOT EXISTS FOR (m:Menu) ON (m.level)",
                 "CREATE INDEX IF NOT EXISTS FOR (m:Menu) ON (m.menu_key)",
                 "CREATE INDEX IF NOT EXISTS FOR (m:Menu) ON (m.stable_path)",
+                "CREATE INDEX IF NOT EXISTS FOR (ev:Evidence) ON (ev.evidence_type)",
+                "CREATE INDEX IF NOT EXISTS FOR (ev:Evidence) ON (ev.transition_id)",
             ]
             for stmt in constraints + indexes:
                 await session.run(stmt)

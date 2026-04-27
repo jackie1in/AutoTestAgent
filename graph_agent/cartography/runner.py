@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from graph_agent.llm import get_llm
 from graph_agent.llm.utils import ainvoke_structured
 from browser_use.llm.messages import UserMessage, ContentPartTextParam, ContentPartImageParam, ImageURL
+from graph_agent.lib.captcha_solver import solve_with_ddddocr
 
 # Global registry for active browser sessions (for cleanup on Ctrl+C)
 _active_browsers: list[Any] = []
@@ -503,6 +504,81 @@ def _load_inventory(inventory_path: str | Path) -> list[dict]:
     return elements if isinstance(elements, list) else []
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+async def _recognize_captcha_with_fallback(image_data_url: str, llm: Any) -> str:
+    """Try ddddocr first, then fallback to LLM vision."""
+    dddd_enabled = _env_bool("CAPTCHA_DDDDOCR_ENABLED", True)
+    dddd_only = _env_bool("CAPTCHA_DDDDOCR_ONLY", False)
+
+    if dddd_enabled:
+        dddd_code = solve_with_ddddocr(image_data_url)
+        if dddd_code and 3 <= len(dddd_code) <= 8:
+            print(f"[CAPTCHA][ddddocr] recognized code: {dddd_code}")
+            return dddd_code
+        if dddd_code and dddd_only:
+            print(f"[CAPTCHA][ddddocr] only-mode uses code: {dddd_code}")
+            return dddd_code
+        if dddd_only:
+            print("[CAPTCHA][ddddocr] only-mode failed to recognize code.")
+            return ""
+
+    print("[CAPTCHA][fallback-llm] using LLM vision for captcha.")
+    try:
+        messages = [
+            UserMessage(
+                content=[
+                    ContentPartTextParam(
+                        text=(
+                            "You are a CAPTCHA solver. Look at the image carefully and return ONLY the "
+                            "exact characters/numbers/letters shown in the CAPTCHA image. "
+                            "The CAPTCHA is usually 4-6 characters. Pay attention to: "
+                            "- Similar looking characters (0 vs O, 1 vs l vs I, 5 vs S, 8 vs B) "
+                            "- Case sensitivity (uppercase vs lowercase letters) "
+                            "- Do NOT guess; if truly unreadable, return 'UNKNOWN'. "
+                            "Return ONLY the characters, no explanation, no quotes, no markdown."
+                        )
+                    ),
+                    ContentPartImageParam(
+                        image_url=ImageURL(url=image_data_url, detail="high")
+                    ),
+                ]
+            )
+        ]
+        result = await llm.ainvoke(messages)
+        raw_code = str(result.completion or "").strip()
+        code = raw_code.replace("```", "").replace("`", "").strip()
+        if code.lower() in ("unknown", "", "n/a"):
+            return ""
+        return "".join(ch for ch in code if ch.isalnum())
+    except Exception as e:
+        print(f"[CAPTCHA] LLM recognition failed with exception: {e}")
+        return ""
+
+
+def rank_warm_start_candidates(
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Rank warm-start candidates by exploration value."""
+    return sorted(
+        candidates,
+        key=lambda item: (
+            0 if item.get("zone_unexplored") else 1,
+            -(float(item.get("confidence") or 0.0)),
+            str(item.get("transition_id") or ""),
+        ),
+    )
+
+
 async def _solve_captcha_with_llm(
     page: Any,
     login_info: dict[str, Any],
@@ -723,44 +799,13 @@ async def _solve_captcha_with_llm(
         print("[CAPTCHA] All strategies failed. Could not extract CAPTCHA image from page.")
         return ""
 
-    # Call LLM with vision to recognize the CAPTCHA
-    try:
-        print(f"[CAPTCHA] Sending image to LLM for recognition. data_url length={len(image_data_url)}")
-        messages = [
-            UserMessage(
-                content=[
-                    ContentPartTextParam(
-                        text=(
-                            "You are a CAPTCHA solver. Look at the image carefully and return ONLY the "
-                            "exact characters/numbers/letters shown in the CAPTCHA image. "
-                            "The CAPTCHA is usually 4-6 characters. Pay attention to: "
-                            "- Similar looking characters (0 vs O, 1 vs l vs I, 5 vs S, 8 vs B) "
-                            "- Case sensitivity (uppercase vs lowercase letters) "
-                            "- Do NOT guess; if truly unreadable, return 'UNKNOWN'. "
-                            "Return ONLY the characters, no explanation, no quotes, no markdown."
-                        )
-                    ),
-                    ContentPartImageParam(
-                        image_url=ImageURL(url=image_data_url, detail="high")
-                    ),
-                ]
-            )
-        ]
-        result = await llm.ainvoke(messages)
-        raw_code = str(result.completion or "").strip()
-        print(f"[CAPTCHA] LLM raw response: {raw_code}")
-        # Clean up common LLM formatting
-        code = raw_code.replace("```", "").replace("`", "").strip()
-        if code.lower() in ("unknown", "", "n/a"):
-            print("[CAPTCHA] LLM returned UNKNOWN/empty, giving up.")
-            return ""
-        # Keep only alphanumeric characters (common for CAPTCHA)
-        code = "".join(ch for ch in code if ch.isalnum())
-        print(f"[CAPTCHA] Cleaned code (alphanumeric only): '{code}'")
-        return code
-    except Exception as e:
-        print(f"[CAPTCHA] LLM recognition failed with exception: {e}")
-        return ""
+    print(f"[CAPTCHA] Sending image to recognizer. data_url length={len(image_data_url)}")
+    code = await _recognize_captcha_with_fallback(image_data_url, llm)
+    if code:
+        print(f"[CAPTCHA] Recognized code: '{code}'")
+    else:
+        print("[CAPTCHA] Recognizer returned empty code.")
+    return code
 
 
 def _map_llm_zone_type(zone_type: str) -> "ZoneType | None":
@@ -1139,6 +1184,7 @@ async def _run_orchestrated_mapping(
     session_id: str,
     max_steps: int,
     time_budget_ms: int = 600_000,
+    warm_start_candidates: list[dict[str, Any]] | None = None,
 ) -> "CartographyResult":
     """Run LLM-first orchestrated exploration across multiple pages.
 
@@ -1231,6 +1277,20 @@ async def _run_orchestrated_mapping(
             except Exception as e:
                 print(f"[ORCH] Failed to close foreign tab {target_id}: {e}")
         return surviving
+
+    warm_candidates = rank_warm_start_candidates(warm_start_candidates or [])
+    warm_targets = [
+        (item.get("target_url") or "").strip()
+        for item in warm_candidates
+        if (item.get("target_url") or "").strip()
+    ]
+    for target_url in warm_targets:
+        clean = _clean_url(target_url)
+        if clean == _clean_url(current_url or start_url):
+            continue
+        if primary_origin_url and not _same_origin(target_url, primary_origin_url):
+            continue
+        pages_to_explore.append((target_url, "warm-start"))
 
     orchestration_step = 0
     max_orchestration_steps = 50
@@ -1669,6 +1729,8 @@ async def _run_orchestrated_mapping(
     result.transitions = all_transitions
     result.zones = all_zones
     result.history = all_history
+    result.menus = menu_items_discovered
+    result.zone_hints = zones_discovered
 
     print("\n[ORCH] === Orchestrated exploration complete ===")
     print(f"  Pages explored: {len(pages_explored)}")
@@ -2010,6 +2072,28 @@ async def run_mapping(
         app_name = domain or "unknown"
         app_id = f"app:{app_name}:{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
         session_id = f"session:{app_id}:{datetime.now(timezone.utc).isoformat()}"
+        warm_start_candidates: list[dict[str, Any]] = []
+        try:
+            from graph_agent.neo4j_client.manager import GraphManager
+
+            async with GraphManager() as warm_manager:
+                warm_start_candidates = await warm_manager._run_read(
+                    """
+                    MATCH (a:App {name: $app_name})
+                    WITH a ORDER BY coalesce(a.last_session_at, a.created_at) DESC LIMIT 1
+                    MATCH (a)-[:HAS_STATE]->(s:State)<-[:FROM]-(t:Transition)-[:TO]->(target:State)
+                    OPTIONAL MATCH (target)-[:HAS_ZONE]->(z:Zone)
+                    RETURN t.id AS transition_id,
+                           coalesce(t.confidence, 0.0) AS confidence,
+                           target.url AS target_url,
+                           count(z) = 0 AS zone_unexplored
+                    ORDER BY confidence DESC
+                    LIMIT 200
+                    """,
+                    app_name=app_name,
+                )
+        except Exception as e:
+            print(f"[ORCH] Warm-start candidate query skipped: {e}")
 
         # Check for shutdown request before running
         if _shutdown_requested:
@@ -2026,6 +2110,7 @@ async def run_mapping(
                 app_id=app_id,
                 session_id=session_id,
                 max_steps=max_steps,
+                warm_start_candidates=warm_start_candidates,
             )
         except asyncio.CancelledError:
             print("[INFO] Orchestrated exploration cancelled, cleaning up...")
@@ -2035,7 +2120,15 @@ async def run_mapping(
     # Write CartographyResult directly to Neo4j
     # ------------------------------------------------------------------
     from graph_agent.neo4j_client.manager import GraphManager
-    from graph_agent.models import App, Session, State, Transition, ActionType
+    from graph_agent.models import (
+        App,
+        Session,
+        State,
+        Transition,
+        ActionType,
+        Evidence,
+        EvidenceType,
+    )
 
     async with GraphManager() as manager:
         # Create app and session
@@ -2125,6 +2218,97 @@ async def run_mapping(
                 f"selector={transition.selector!r} action={transition.action!r} "
                 f"intent={transition.intent.key if transition.intent else '<none>'!r}"
             )
+            for evidence_id in transition.evidence_ids:
+                evidence_type = (
+                    EvidenceType.URL_CHANGE
+                    if evidence_id.endswith("url_change")
+                    else EvidenceType.DOM_DIFF
+                )
+                evidence = Evidence(
+                    id=evidence_id,
+                    transition_id=transition.id,
+                    session_id=session_id,
+                    evidence_type=evidence_type,
+                    summary=f"{evidence_type.value} evidence for {transition.selector}",
+                    payload=json.dumps(
+                        {
+                            "from_state_id": transition.from_state_id,
+                            "to_state_id": transition.to_state_id,
+                            "selector": transition.selector,
+                            "step_index": transition.step_index,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    confidence=min(1.0, max(0.1, transition.confidence)),
+                )
+                await manager.add_evidence(evidence)
+                await manager.link_transition_evidence(transition.id, evidence.id)
+                await manager.link_session_evidence(session_id, evidence.id)
+
+        # Persist discovered menu/zones to improve replay metadata reuse
+        menu_rows: list[dict[str, Any]] = []
+        if getattr(result, "menus", None):
+            for i, menu in enumerate(result.menus):
+                text = (menu.get("text") or "").strip()
+                href = (menu.get("href") or "").strip()
+                level = int(menu.get("level") or 0)
+                source_url = (menu.get("source_url") or "").strip()
+                if not text and not href:
+                    continue
+                menu_id_src = f"{app_id}|{source_url}|{level}|{text}|{href}"
+                menu_rows.append(
+                    {
+                        "id": f"menu:{hashlib.md5(menu_id_src.encode()).hexdigest()[:12]}",
+                        "text": text or href,
+                        "href": href,
+                        "level": level,
+                        "order": i,
+                        "is_active": False,
+                    }
+                )
+            if menu_rows:
+                await manager.add_menus(
+                    app_id=app_id,
+                    menus=menu_rows,
+                    page_url=current_url or resolved_url,
+                    session_id=session_id,
+                )
+
+        if getattr(result, "zone_hints", None):
+            zone_rows: list[dict[str, Any]] = []
+            for zone in result.zone_hints:
+                selector = (zone.get("selector") or "").strip()
+                z_type = (zone.get("zone_type") or "content").strip()
+                summary = (zone.get("description") or "").strip()
+                if not selector:
+                    continue
+                zid_src = f"{app_id}|{z_type}|{selector}"
+                zone_rows.append(
+                    {
+                        "id": f"zone:{hashlib.md5(zid_src.encode()).hexdigest()[:12]}",
+                        "type": z_type,
+                        "selector": selector,
+                        "element_count": 0,
+                        "bounds": "",
+                        "text_sample": summary,
+                    }
+                )
+            if zone_rows:
+                await manager.add_zones(
+                    app_id=app_id,
+                    zones=zone_rows,
+                )
+
+        if menu_rows:
+            for transition in result.transitions:
+                signal = f"{transition.selector} {transition.thought or ''}".lower()
+                for menu in menu_rows:
+                    text = str(menu.get("text") or "").strip().lower()
+                    if text and text in signal:
+                        await manager.link_transition_navigated_via(
+                            transition.id, str(menu["id"])
+                        )
+                        break
 
         # Collect visited URLs from result history
         visited_urls: list[str] = []

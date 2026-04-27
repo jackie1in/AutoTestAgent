@@ -10,6 +10,7 @@ from graph_agent.models import (
     Session,
     State,
     Transition,
+    Evidence,
 )
 
 
@@ -141,6 +142,33 @@ class GraphManager:
             transition.from_state_id,
             transition.to_state_id,
         )
+
+    async def add_evidence(self, evidence: Evidence) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.upsert_evidence(evidence)
+
+    async def link_transition_evidence(self, transition_id: str, evidence_id: str) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.link_transition_evidence(transition_id, evidence_id)
+
+    async def link_session_evidence(self, session_id: str, evidence_id: str) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.link_session_evidence(session_id, evidence_id)
+
+    async def get_transition_evidence(self, transition_id: str) -> list[Evidence]:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        return await self._repo.get_transition_evidence(transition_id)
+
+    async def link_transition_navigated_via(
+        self, transition_id: str, menu_id: str
+    ) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.link_transition_navigated_via(transition_id, menu_id)
     
     # Query operations
     async def get_all_transitions(self, app_id: str) -> list[dict]:

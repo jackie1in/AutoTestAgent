@@ -371,6 +371,33 @@ def _format_replay_error(
     return f"{prefix}selector: {orig} (context: {ctx})"
 
 
+def summarize_transition_evidence(evidence_items: list[dict[str, Any]]) -> str:
+    """Build a compact summary string from transition evidence items."""
+    if not evidence_items:
+        return ""
+    counts: dict[str, int] = {}
+    for item in evidence_items:
+        ev_type = str(item.get("evidence_type") or item.get("type") or "unknown")
+        counts[ev_type] = counts.get(ev_type, 0) + 1
+    parts = [f"{name}:{counts[name]}" for name in sorted(counts)]
+    return ", ".join(parts)
+
+
+async def _lookup_transition_evidence_summary(transition_id: str | None) -> str:
+    if not transition_id:
+        return ""
+    try:
+        from graph_agent.neo4j_client.manager import GraphManager
+
+        async with GraphManager() as manager:
+            evidence_items = await manager.get_transition_evidence(transition_id)
+        payload = [item.model_dump() for item in evidence_items]
+        summary = summarize_transition_evidence(payload)
+        return summary
+    except Exception:
+        return ""
+
+
 def _page_for_tab(
     pages_by_tab_id: dict[str, Any],
     tab_id: str,
@@ -1167,6 +1194,13 @@ async def run_playback(
                             formatted_error = _format_replay_error(
                                 step_error, edge, edge.tab_id
                             )
+                            evidence_summary = await _lookup_transition_evidence_summary(
+                                edge.edge_id
+                            )
+                            if evidence_summary:
+                                formatted_error = (
+                                    f"{formatted_error} | evidence: {evidence_summary}"
+                                )
                             log_entry["success"] = False
                             log_entry["error"] = formatted_error
                             if log_callback:

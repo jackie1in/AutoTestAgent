@@ -5,7 +5,7 @@ from typing import Any
 from neo4j import AsyncDriver
 from graph_agent.models import (
     App, State, Transition, Zone, FrameNode, Entity, EntityInstance,
-    Intent, Checkpoint, FieldConstraint, TestCase, Session, Menu,
+    Intent, Checkpoint, FieldConstraint, TestCase, Session, Menu, Evidence,
 )
 from graph_agent.neo4j_client.queries import CypherQueries
 
@@ -410,6 +410,46 @@ class GraphRepository:
                 CypherQueries.LINK_TEST_CASE_COVERS,
                 test_case_id=test_case_id, field_id=field_id,
             )
+
+    # ===== Evidence =====
+    async def upsert_evidence(self, evidence: Evidence) -> None:
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.UPSERT_EVIDENCE,
+                id=evidence.id,
+                props=_model_to_props(evidence),
+            )
+
+    async def link_transition_evidence(self, transition_id: str, evidence_id: str) -> None:
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.LINK_TRANSITION_EVIDENCE,
+                transition_id=transition_id,
+                evidence_id=evidence_id,
+            )
+
+    async def link_session_evidence(self, session_id: str, evidence_id: str) -> None:
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.LINK_SESSION_EVIDENCE,
+                session_id=session_id,
+                evidence_id=evidence_id,
+            )
+
+    async def get_transition_evidence(self, transition_id: str) -> list[Evidence]:
+        async with self._driver.session() as session:
+            result = await session.run(
+                CypherQueries.GET_TRANSITION_EVIDENCE,
+                transition_id=transition_id,
+            )
+            records = await result.data()
+            out: list[Evidence] = []
+            for record in records:
+                node = record.get("e")
+                if node is None:
+                    continue
+                out.append(Evidence(**dict(node)))
+            return out
 
     # ===== FieldConstraint =====
 

@@ -15,6 +15,14 @@ class ActionType(str, Enum):
     UNKNOWN = "unknown"
 
 
+class EvidenceType(str, Enum):
+    DOM_DIFF = "dom_diff"
+    NETWORK = "network"
+    CONSOLE = "console"
+    SCREENSHOT = "screenshot"
+    URL_CHANGE = "url_change"
+
+
 class TabActionType(str, Enum):
     OPEN = "open"
     SWITCH = "switch"
@@ -120,6 +128,8 @@ class State(BaseModel):
     is_modal: bool = False
     parent_state_id: str | None = None
     app_id: str | None = None
+    view_fingerprint: str | None = None
+    data_signature: str | None = None
 
 
 class Transition(BaseModel):
@@ -144,6 +154,10 @@ class Transition(BaseModel):
     # Intent inference (unified across cartography and mapping)
     intent: "Intent | None" = None
     intent_failure_reason: str | None = None
+    selector_chain: list[str] = Field(default_factory=list)
+    semantic_action_key: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    failed_requests: list[dict[str, Any]] = Field(default_factory=list)
 
     # Relationship endpoints (not stored as properties, used for graph construction)
     from_state_id: str | None = None
@@ -275,6 +289,19 @@ class Menu(BaseModel):
     stable_path: str | None = None
     first_discovered: datetime = Field(default_factory=datetime.utcnow)
     last_seen: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Evidence(BaseModel):
+    """Observational evidence supporting a transition decision."""
+
+    id: str
+    transition_id: str
+    session_id: str
+    evidence_type: EvidenceType = EvidenceType.DOM_DIFF
+    summary: str = ""
+    payload: str = "{}"  # JSON
+    confidence: float = 0.5
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 # ===== Coverage Model =====

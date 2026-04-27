@@ -395,6 +395,72 @@ def _build_path_preview(edge_list: list[GraphEdge]) -> dict[str, Any]:
     return {"step_count": len(edge_list), "steps": steps}
 
 
+async def _apply_playback_feedback(
+    edge_list: list[GraphEdge],
+    playback_result: dict[str, Any],
+) -> None:
+    """Feed playback outcome back into transition confidence and coverage stats."""
+    try:
+        driver = await _get_driver()
+    except Exception:
+        return
+    success = bool(playback_result.get("success"))
+    failed_step_index = playback_result.get("failed_step_index")
+    failed_edge_id = playback_result.get("failed_edge_id")
+
+    transition_ids = [edge.edge_id for edge in edge_list if edge.edge_id]
+    if not transition_ids:
+        return
+    async with driver.session() as session:
+        for idx, edge in enumerate(edge_list):
+            if not edge.edge_id:
+                continue
+            passed = success or (
+                failed_step_index is not None and idx < int(failed_step_index)
+            )
+            if failed_edge_id and edge.edge_id == failed_edge_id:
+                passed = False
+            delta = 0.1 if passed else -0.2
+            await session.run(
+                """
+                MATCH (t:Transition {id: $transition_id})
+                SET t.confidence = CASE
+                    WHEN coalesce(t.confidence, 0.5) + $delta > 1.0 THEN 1.0
+                    WHEN coalesce(t.confidence, 0.5) + $delta < 0.0 THEN 0.0
+                    ELSE coalesce(t.confidence, 0.5) + $delta
+                END,
+                t.last_validated = datetime(),
+                t.validation_count = coalesce(t.validation_count, 0) + 1
+                """,
+                transition_id=edge.edge_id,
+                delta=delta,
+            )
+
+        app_name = _resolve_app_name()
+        stats_result = await session.run(
+            """
+            MATCH (a:App)
+            WHERE $app_name = '' OR a.name = $app_name
+            WITH a ORDER BY coalesce(a.last_session_at, a.created_at) DESC LIMIT 1
+            OPTIONAL MATCH (a)-[:HAS_STATE]->(s:State)
+            WITH a, count(s) AS total_states
+            OPTIONAL MATCH (a)-[:HAS_STATE]->(:State)<-[:FROM]-(t:Transition)
+            WITH a, total_states, count(t) AS total_transitions,
+                 count(CASE WHEN coalesce(t.validation_count, 0) > 0 THEN 1 END) AS validated_transitions
+            SET a.last_playback_success = $success,
+                a.last_playback_at = datetime(),
+                a.interaction_coverage = CASE
+                    WHEN total_transitions = 0 THEN 0.0
+                    ELSE toFloat(validated_transitions) / toFloat(total_transitions)
+                END
+            RETURN a.id AS app_id
+            """,
+            app_name=app_name,
+            success=success,
+        )
+        await stats_result.single()
+
+
 async def _sse_generator(
     edge_list: list[GraphEdge],
     test_data: dict,
@@ -418,6 +484,7 @@ async def _sse_generator(
                 log_callback=log_callback,
                 wait_for_network=wait_for_network,
             )
+            await _apply_playback_feedback(edge_list, result)
             if result["success"]:
                 await q.put({"level": "success", "actual_url": result["actual_url"]})
             else:

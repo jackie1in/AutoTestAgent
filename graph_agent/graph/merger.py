@@ -28,6 +28,8 @@ class CartographyResult:
     zone_state_map: dict[str, str] = field(default_factory=dict)
     checkpoint_transition_map: dict[str, str] = field(default_factory=dict)
     history: list[dict[str, Any]] = field(default_factory=list)
+    menus: list[dict[str, Any]] = field(default_factory=list)
+    zone_hints: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

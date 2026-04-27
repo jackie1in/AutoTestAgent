@@ -99,6 +99,9 @@ class CypherQueries:
            t.session_id AS session_id,
            t.intent AS intent,
            t.intent_failure_reason AS intent_failure_reason,
+           t.selector_chain AS selector_chain,
+           t.semantic_action_key AS semantic_action_key,
+           t.evidence_ids AS evidence_ids,
            s.id AS from_state_id,
            s.url AS source_url,
            target.id AS to_state_id,
@@ -297,6 +300,30 @@ class CypherQueries:
     LINK_TEST_CASE_COVERS = """
     MATCH (tc:TestCase {id: $test_case_id}), (fc:FieldConstraint {id: $field_id})
     MERGE (tc)-[:COVERS]->(fc)
+    """
+
+    # ===== Evidence =====
+    UPSERT_EVIDENCE = """
+    MERGE (e:Evidence {id: $id})
+    SET e += $props
+    SET e.name = coalesce(e.summary, e.evidence_type, e.id)
+    RETURN e
+    """
+
+    LINK_TRANSITION_EVIDENCE = """
+    MATCH (t:Transition {id: $transition_id}), (e:Evidence {id: $evidence_id})
+    MERGE (t)-[:SUPPORTED_BY]->(e)
+    """
+
+    LINK_SESSION_EVIDENCE = """
+    MATCH (sess:Session {id: $session_id}), (e:Evidence {id: $evidence_id})
+    MERGE (e)-[:OBSERVED_IN]->(sess)
+    """
+
+    GET_TRANSITION_EVIDENCE = """
+    MATCH (t:Transition {id: $transition_id})-[:SUPPORTED_BY]->(e:Evidence)
+    RETURN e
+    ORDER BY coalesce(e.created_at, '') DESC
     """
 
     # ===== Session =====
