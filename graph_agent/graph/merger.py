@@ -4,7 +4,6 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
 
 from neo4j import AsyncDriver
 
@@ -27,9 +26,11 @@ class CartographyResult:
     checkpoints: list[Checkpoint] = field(default_factory=list)
     zone_state_map: dict[str, str] = field(default_factory=dict)
     checkpoint_transition_map: dict[str, str] = field(default_factory=dict)
-    history: list[dict[str, Any]] = field(default_factory=list)
-    menus: list[dict[str, Any]] = field(default_factory=list)
-    zone_hints: list[dict[str, Any]] = field(default_factory=list)
+    history: list[dict[str, object]] = field(default_factory=list)
+    menus: list[dict[str, object]] = field(default_factory=list)
+    zone_hints: list[dict[str, object]] = field(default_factory=list)
+    layout_evidence: list[dict[str, object]] = field(default_factory=list)
+    layout_metrics: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -223,10 +224,13 @@ class GraphMerger:
             failed_reqs_json = None
             if transition.failed_requests:
                 try:
-                    failed_reqs_json = json.dumps(
-                        [fr.model_dump(mode="json") for fr in transition.failed_requests],
-                        ensure_ascii=False,
-                    )
+                    normalized: list[dict[str, object]] = []
+                    for fr in transition.failed_requests:
+                        if isinstance(fr, dict):
+                            normalized.append(fr)
+                        elif hasattr(fr, "model_dump"):
+                            normalized.append(fr.model_dump(mode="json"))
+                    failed_reqs_json = json.dumps(normalized, ensure_ascii=False)
                 except Exception:
                     pass
 

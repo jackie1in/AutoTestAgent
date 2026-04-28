@@ -35,3 +35,28 @@ async def capture_page_snapshot(page: "Page") -> dict[str, str]:
         "title": title,
         "fingerprint": await capture_dom_fingerprint(page),
     }
+
+
+async def capture_composite_fingerprint(
+    page: "Page",
+    *,
+    layout_enabled: bool = True,
+    layout_limit: int = 200,
+) -> str:
+    """Optional composite fingerprint: dom + layout."""
+    dom_fp = await capture_dom_fingerprint(page)
+    if not layout_enabled:
+        return dom_fp
+    try:
+        from graph_agent.cartography.layout_snapshot import (
+            capture_layout_snapshot,
+            compute_layout_fingerprint,
+        )
+
+        layout_snapshot = await capture_layout_snapshot(page, limit=layout_limit)
+        layout_fp = compute_layout_fingerprint(layout_snapshot)
+        if not layout_fp:
+            return dom_fp
+        return hashlib.sha256(f"{dom_fp}:{layout_fp}".encode()).hexdigest()[:16]
+    except Exception:
+        return dom_fp

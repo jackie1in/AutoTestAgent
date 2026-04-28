@@ -14,9 +14,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import re
 from collections import deque
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from pydantic import BaseModel, create_model
 
@@ -30,6 +31,9 @@ from graph_agent.llm.utils import ainvoke_structured
 from graph_agent.models import ActionType
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from playwright.async_api import Page, Request
 
 
 def _get_spa_route(url: str) -> str:
@@ -47,9 +51,9 @@ class AgentResult:
     """
 
     def __init__(self) -> None:
-        self.states: list[Any] = []
-        self.transitions: list[Any] = []
-        self.history: list[dict[str, Any]] = []
+        self.states: list[object] = []
+        self.transitions: list[object] = []
+        self.history: list[dict[str, object]] = []
 
 
 class BaseAgent:
@@ -75,17 +79,17 @@ class BaseAgent:
         browser: Browser,
         max_steps: int = 100,
         total_max_steps: int | None = None,
-        step_callback: Callable[[dict[str, Any]], Any] | None = None,
+        step_callback: Callable[[dict[str, object]], object | Awaitable[object]] | None = None,
         should_stop: Callable[[], bool] | None = None,
-        initial_history: list[dict[str, Any]] | None = None,
-        initial_actions: list[dict[str, Any]] | None = None,
+        initial_history: list[dict[str, object]] | None = None,
+        initial_actions: list[dict[str, object]] | None = None,
         start_step: int = 0,
         start_url: str = "",
     ):
         self.task = task
         self.llm = llm
         self.browser = browser
-        self.tools = Tools()
+        self.tools: Tools = Tools()
         self.max_steps = max_steps
         self.total_max_steps = total_max_steps or max_steps
         self.step_callback = step_callback
@@ -96,11 +100,11 @@ class BaseAgent:
         self._start_url = start_url
         self._start_origin = self._url_origin(start_url) if start_url else ""
         self.session_id = "base-agent"
-        self._last_history: list[dict[str, Any]] = []
+        self._last_history: list[dict[str, object]] = []
 
         # Page load tracking
         self._page_load_issue_note: str | None = None
-        self._request_failure_log: list[dict[str, Any]] = []
+        self._request_failure_log: list[dict[str, object]] = []
 
         # Supported actions from browser-use registry
         self._supported_actions: set[str] = {
@@ -191,7 +195,7 @@ Remaining steps: {remaining}
 </history>
 """
 
-    async def _execute_action(self, action_type: str, params: dict[str, Any]) -> str:
+    async def _execute_action(self, action_type: str, params: dict[str, object]) -> str:
         """Execute a single action and return a result description.
 
         Subclasses override this to handle custom actions.
@@ -255,7 +259,7 @@ Remaining steps: {remaining}
         action_type: str,
         result_text: str,
         output: AgentOutput | None = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, object]:
         """Build a history entry dict after each step.
 
         Subclasses override this to capture additional fields from ``output``
@@ -475,7 +479,7 @@ Remaining steps: {remaining}
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _execute_initial_action(self, action_type: str, action: dict[str, Any]) -> str:
+    async def _execute_initial_action(self, action_type: str, action: dict[str, object]) -> str:
         """Execute a single initial_action."""
         return await self._execute_action(action_type, action)
 
@@ -486,7 +490,7 @@ Remaining steps: {remaining}
         except Exception:
             pw_page = None
         if pw_page and hasattr(pw_page, "on"):
-            def _on_request_failed(request: Any) -> None:
+            def _on_request_failed(request: "Request") -> None:
                 failure = getattr(request, "failure", None)
                 error_text = str(failure.get("errorText", "")) if failure else ""
                 is_cors = any(
@@ -504,7 +508,7 @@ Remaining steps: {remaining}
 
     def _build_dynamic_action_model(self) -> type[ActionModel]:
         """Build a browser-use compatible ActionModel with supported actions."""
-        fields: dict[str, Any] = {}
+        fields: dict[str, tuple[type[BaseModel] | None, None]] = {}
         for name in sorted(self._supported_actions):
             if name not in self.tools.registry.registry.actions:
                 continue
@@ -523,10 +527,10 @@ Remaining steps: {remaining}
         return dom_text, title, selector_map
 
     async def _wait_for_page_stable(
-        self, page, timeout_ms: int = 5000
-    ) -> dict[str, Any]:
+        self, page: "Page", timeout_ms: int = 5000
+    ) -> dict[str, object]:
         """Wait for page to stabilize after an action."""
-        result: dict[str, Any] = {
+        result: dict[str, object] = {
             "stable": True,
             "has_cors_failures": False,
             "failed_requests": [],
@@ -632,13 +636,20 @@ Remaining steps: {remaining}
         return hashlib.md5(raw.encode("utf-8")).hexdigest()[:12]
 
     def _compute_page_fingerprint(
-        self, dom_text: str, title: str, selector_map: dict
+        self,
+        dom_text: str,
+        title: str,
+        selector_map: dict,
+        layout_fingerprint: str | None = None,
     ) -> str:
         """Composite fingerprint combining DOM text, title, and structure."""
         dom_fp = self._compute_dom_fingerprint(dom_text)
         struct_fp = self._compute_structural_fingerprint(selector_map)
         title_part = hashlib.md5((title or "").encode("utf-8")).hexdigest()[:8]
         composite = f"{dom_fp}:{struct_fp}:{title_part}"
+        include_layout = (os.getenv("CARTOGRAPHY_LAYOUT_INCLUDE_IN_PAGE_FP") or "").strip().lower()
+        if layout_fingerprint and include_layout in {"1", "true", "yes", "on"}:
+            composite = f"{composite}:{layout_fingerprint}"
         return hashlib.md5(composite.encode("utf-8")).hexdigest()[:20]
 
     async def _detect_modal(self, page) -> bool:

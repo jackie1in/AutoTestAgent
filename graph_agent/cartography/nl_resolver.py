@@ -12,11 +12,34 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Protocol, TypedDict
 
 from neo4j import AsyncDriver
 
 logger = logging.getLogger(__name__)
+
+
+class EmbedderLike(Protocol):
+    model: str
+
+    async def aembed(self, text: str) -> list[float]:
+        ...
+
+
+class TransitionRef(TypedDict):
+    transition_id: str
+    action: str
+    from_state: str
+    to_state: str
+
+
+class NLIntentCandidate(TypedDict):
+    intent_id: str
+    key: str
+    summary: str
+    name: str
+    score: float
+    transitions: list[TransitionRef]
 
 
 class _EmbedderAdapter:
@@ -67,11 +90,11 @@ class NLResolver:
         # [{"key": "create_task", "summary": "创建新任务", "score": 0.92, ...}]
     """
 
-    def __init__(self, driver: AsyncDriver, embedder: Any | None = None):
+    def __init__(self, driver: AsyncDriver, embedder: EmbedderLike | None = None):
         self._driver = driver
         self._embedder = embedder or _get_embedder()
 
-    async def resolve(self, query: str, top_k: int = 3) -> list[dict[str, Any]]:
+    async def resolve(self, query: str, top_k: int = 3) -> list[NLIntentCandidate]:
         """Resolve NL query to matching intents via vector search on intent_embeddings.
 
         Args:
@@ -126,10 +149,10 @@ class NLResolver:
             return []
 
         # 4. Enrich with related transitions
-        normalized: list[dict[str, Any]] = []
+        normalized: list[NLIntentCandidate] = []
         for rec in records:
             intent_id = rec.get("intent_id", "")
-            transitions: list[dict[str, Any]] = []
+            transitions: list[TransitionRef] = []
             try:
                 async with self._driver.session() as session:
                     t_result = await session.run(
@@ -150,7 +173,16 @@ class NLResolver:
                     t_record = await t_result.single()
                     if t_record:
                         raw = t_record.get("transitions", [])
-                        transitions = [dict(item) for item in raw if item]
+                        transitions = [
+                            {
+                                "transition_id": str(item.get("transition_id", "")),
+                                "action": str(item.get("action", "")),
+                                "from_state": str(item.get("from_state", "")),
+                                "to_state": str(item.get("to_state", "")),
+                            }
+                            for item in raw
+                            if isinstance(item, dict)
+                        ]
             except Exception:
                 pass
 

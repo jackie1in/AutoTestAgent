@@ -12,7 +12,6 @@ import hashlib
 import json
 import logging
 import time
-from typing import Any
 from urllib.parse import parse_qsl, urlparse
 
 from browser_use.browser.session import BrowserSession as Browser
@@ -67,7 +66,7 @@ def _build_state_identity(url: str, spa_route: str, view_fingerprint: str) -> st
     return f"state:{digest}"
 
 
-def _rank_selector_chain(selector: str, attrs: dict[str, Any], tag: str) -> list[str]:
+def _rank_selector_chain(selector: str, attrs: dict[str, object], tag: str) -> list[str]:
     chain: list[str] = []
     test_id = attrs.get("data-testid") or attrs.get("data-test") or attrs.get("data-qa")
     if test_id:
@@ -104,8 +103,8 @@ class ReActExplorer(BaseAgent):
         self,
         max_steps: int = _DEFAULT_MAX_STEPS,
         browser_session: "Browser | None" = None,
-        initial_actions: list[dict[str, Any]] | None = None,
-        initial_history: list[dict[str, Any]] | None = None,
+        initial_actions: list[dict[str, object]] | None = None,
+        initial_history: list[dict[str, object]] | None = None,
         extra_system_prompt: str = "",
     ):
         llm = get_llm()
@@ -204,7 +203,7 @@ class ReActExplorer(BaseAgent):
         action_type: str,
         result_text: str,
         output: AgentOutput | None = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, object]:
         return {
             "evaluation_previous_goal": (
                 getattr(output, "evaluation_previous_goal", "") if output else ""
@@ -248,7 +247,7 @@ class ReActExplorer(BaseAgent):
     # Action execution — delegate to PageController
     # ------------------------------------------------------------------
 
-    async def _execute_action(self, action_type: str, params: dict[str, Any]) -> str:
+    async def _execute_action(self, action_type: str, params: dict[str, object]) -> str:
         controller = self._controller
         if controller is None:
             return "Controller not initialized"
@@ -321,9 +320,9 @@ class ReActExplorer(BaseAgent):
                     target_type = (params.get("target_type") or "all").strip()
                     return await self._query_knowledge(query_text, target_type)
                 case "discover_zones":
-                    return "Zone discovery delegated to orchestrator analysis"
+                    return "Zone discovery delegated to pipeline analysis"
                 case "extract_menu":
-                    return "Menu extraction delegated to orchestrator analysis"
+                    return "Menu extraction delegated to pipeline analysis"
                 case "solve_captcha":
                     return "Captcha solving delegated to runner auto-login flow"
                 case _:
@@ -530,7 +529,7 @@ class ReActExplorer(BaseAgent):
         """Explore a page/zone and return CartographyResult.
 
         Supports two calling conventions:
-        1. ``explore_page(session, state_id, page_title)`` — used by orchestrator.
+        1. ``explore_page(session, state_id, page_title)`` — used by mapping pipeline.
         2. ``explore_page(start_url=url, max_steps=n)`` — used by maximal explorer.
         """
         # Handle maximal-explorer keyword convention

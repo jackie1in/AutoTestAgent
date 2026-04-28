@@ -21,6 +21,7 @@ class EvidenceType(str, Enum):
     CONSOLE = "console"
     SCREENSHOT = "screenshot"
     URL_CHANGE = "url_change"
+    LAYOUT = "layout"
 
 
 class TabActionType(str, Enum):
