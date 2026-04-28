@@ -30,6 +30,12 @@ class TabActionType(str, Enum):
     CLOSE = "close"
 
 
+class TransitionSourceType(str, Enum):
+    AUTO = "auto"
+    MANUAL_GRAPH_ASSISTED = "manual_graph_assisted"
+    MANUAL_RAW = "manual_raw"
+
+
 class ZoneType(str, Enum):
     SEARCH_FORM = "search_form"
     DATA_TABLE = "data_table"
@@ -131,6 +137,7 @@ class State(BaseModel):
     app_id: str | None = None
     view_fingerprint: str | None = None
     data_signature: str | None = None
+    ingest_version_id: str | None = None
 
 
 class Transition(BaseModel):
@@ -159,6 +166,9 @@ class Transition(BaseModel):
     semantic_action_key: str | None = None
     evidence_ids: list[str] = Field(default_factory=list)
     failed_requests: list[dict[str, Any]] = Field(default_factory=list)
+    source_type: TransitionSourceType = TransitionSourceType.AUTO
+    operator_id: str = "agent"
+    ingest_version_id: str | None = None
 
     # Relationship endpoints (not stored as properties, used for graph construction)
     from_state_id: str | None = None
@@ -173,6 +183,7 @@ class Zone(BaseModel):
     interactive_count: int = 0
     exploration_status: ExplorationStatus = ExplorationStatus.UNDISCOVERED
     last_explored: datetime | None = None
+    ingest_version_id: str | None = None
 
 
 class FrameNode(BaseModel):
@@ -230,6 +241,7 @@ class Checkpoint(BaseModel):
     fail_count: int = 0
     flaky: bool = False
     last_result: str | None = None  # pass | fail | skip
+    ingest_version_id: str | None = None
 
     def get_rule(self) -> dict:
         return json.loads(self.rule)
@@ -290,6 +302,7 @@ class Menu(BaseModel):
     stable_path: str | None = None
     first_discovered: datetime = Field(default_factory=datetime.utcnow)
     last_seen: datetime = Field(default_factory=datetime.utcnow)
+    ingest_version_id: str | None = None
 
 
 class Evidence(BaseModel):
@@ -303,6 +316,61 @@ class Evidence(BaseModel):
     payload: str = "{}"  # JSON
     confidence: float = 0.5
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    ingest_version_id: str | None = None
+
+
+class IngestionRun(BaseModel):
+    """One mapping ingestion batch for audit and replay."""
+
+    id: str
+    app_id: str
+    session_id: str
+    mode: str = "auto"
+    source: str = "cartography"
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    status: str = "completed"
+
+
+class TransitionEntity(BaseModel):
+    """Stable transition identity across revisions."""
+
+    stable_key: str
+    app_id: str | None = None
+    from_state_id: str | None = None
+    to_state_id: str | None = None
+    action: str = ""
+    semantic_action_key: str | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TransitionRevision(BaseModel):
+    """Versioned transition snapshot."""
+
+    revision_id: str
+    stable_key: str
+    transition_id: str
+    confidence: float = 0.5
+    intent_key: str | None = None
+    source_type: TransitionSourceType = TransitionSourceType.AUTO
+    operator_id: str = "agent"
+    selector: str = ""
+    action: str = ""
+    from_state_id: str = ""
+    to_state_id: str = ""
+    session_id: str = ""
+    ingest_version_id: str | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    is_active: bool = True
+
+
+class GraphRelease(BaseModel):
+    """Consumable graph snapshot composed from ingestion/revisions."""
+
+    id: str
+    app_id: str
+    base_ingest_ids: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    status: str = "active"
 
 
 # ===== Coverage Model =====

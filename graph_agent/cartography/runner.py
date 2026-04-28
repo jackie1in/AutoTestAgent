@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import FrameType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from pydantic import BaseModel, Field
 
 from browser_use.browser.session import BrowserSession as Browser
@@ -37,15 +37,31 @@ from graph_agent.cartography.mapping_pipeline import (
     run_orchestrated_mapping,
     ensure_browser_ready as orch_ensure_browser_ready,
 )
+from graph_agent.cartography.manual_capture import ManualCaptureSession
 from graph_agent.cartography.persistence import persist_mapping_result
-from graph_agent.cartography.types import FillResult, LLMTransitionHint, LoginInfo
+from graph_agent.cartography.types import (
+    EvidenceBundleItem,
+    FillResult,
+    LLMTransitionHint,
+    LoginInfo,
+)
 from graph_agent.llm import get_llm
 from graph_agent.llm.utils import ainvoke_structured
-from browser_use.llm.messages import UserMessage, ContentPartTextParam, ContentPartImageParam, ImageURL
+from graph_agent.lib.observability import initialize_laminar, observe
+from browser_use.llm.messages import (
+    AssistantMessage,
+    ContentPartImageParam,
+    ContentPartTextParam,
+    ImageURL,
+    SystemMessage,
+    UserMessage,
+)
 from graph_agent.lib.captcha_solver import solve_with_ddddocr
 
 if TYPE_CHECKING:
     from browser_use.actor.page import Page
+    from graph_agent.graph.merger import CartographyResult
+    from graph_agent.models import ZoneType
 
 # Global registry for active browser sessions (for cleanup on Ctrl+C)
 _active_browsers: list[Browser] = []
@@ -435,6 +451,13 @@ def _env_bool(name: str, default: bool) -> bool:
     return cartography_config.env_bool(name, default)
 
 
+def _as_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 async def _recognize_captcha_with_fallback(image_data_url: str, llm: BaseChatModel) -> str:
     # Keep local resolver for backward-compatible monkeypatch path in tests.
     dddd_enabled = _env_bool("CAPTCHA_DDDDOCR_ENABLED", True)
@@ -453,7 +476,7 @@ async def _recognize_captcha_with_fallback(image_data_url: str, llm: BaseChatMod
 
     print("[CAPTCHA][fallback-llm] using LLM vision for captcha.")
     try:
-        messages = [
+        messages: list[UserMessage | SystemMessage | AssistantMessage] = [
             UserMessage(
                 content=[
                     ContentPartTextParam(
@@ -561,6 +584,10 @@ async def _run_orchestrated_mapping(
     )
 
 
+@observe(
+    name="cartography.run_mapping",
+    metadata={"component": "cartography", "stage": "entry"},
+)
 async def run_mapping(
     url: str | None = None,
     output_path: str | None = None,  # Kept for API compatibility, ignored
@@ -583,6 +610,7 @@ async def run_mapping(
         raise ValueError(
             "inventory_path is required. Run scout first, then pass --inventory to mapping."
         )
+    initialize_laminar()
     inventory = _load_inventory(inventory_path)
 
     from browser_use import Browser
@@ -595,19 +623,17 @@ async def run_mapping(
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-    browser_kwargs: dict[str, object] = {
-        "headless": _resolve_mapping_headless(),
-        "args": ["--incognito"],  # Force incognito mode: no session cache
-    }
     channel = _resolve_mapping_channel()
+    base_headless = _resolve_mapping_headless()
+    base_args = ["--incognito"]  # Force incognito mode: no session cache
     if channel:
-        browser_kwargs["channel"] = channel
-    try:
-        browser = Browser(**browser_kwargs)
-    except TypeError:
-        # Older browser-use versions may not support channel keyword.
-        browser_kwargs.pop("channel", None)
-        browser = Browser(**browser_kwargs)
+        try:
+            browser = Browser(headless=base_headless, args=base_args, channel=channel)
+        except TypeError:
+            # Older browser-use versions may not support channel keyword.
+            browser = Browser(headless=base_headless, args=base_args)
+    else:
+        browser = Browser(headless=base_headless, args=base_args)
     
     async with managed_browser(browser):
         llm = get_llm()
@@ -824,6 +850,64 @@ async def run_mapping(
     return app_id
 
 
+async def run_manual_mapping(
+    *,
+    app_name: str,
+    session_id: str,
+    events: list[dict[str, object]],
+    mode: str = "manual_raw",
+    app_id: str | None = None,
+    operator_id: str = "human:operator",
+    start_state_hint: str = "",
+    start_url: str = "",
+) -> str:
+    """Persist manual capture events through the same cartography pipeline."""
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    resolved_app_id = app_id or f"app:{app_name}:{ts}"
+    if mode == "manual_graph_assisted":
+        manual_session = ManualCaptureSession.from_graph_context(
+            session_id=session_id,
+            operator_id=operator_id,
+            app_id=resolved_app_id,
+            start_state_hint=start_state_hint or start_url,
+            start_url=start_url,
+        )
+    else:
+        manual_session = ManualCaptureSession.from_raw(
+            session_id=session_id,
+            operator_id=operator_id,
+            start_url=start_url,
+        )
+    for event in events:
+        raw_evidence = event.get("evidence_bundle")
+        evidence_bundle = raw_evidence if isinstance(raw_evidence, list) else []
+        manual_session.record_action(
+            action=str(event.get("action") or "unknown"),
+            selector=str(event.get("selector") or "[manual]"),
+            url_before=str(event.get("url_before") or start_url),
+            url_after=str(event.get("url_after") or start_url),
+            thought=str(event.get("thought") or ""),
+            action_value=str(event.get("action_value") or ""),
+            param_name=str(event.get("param_name") or ""),
+            confidence_hint=_as_float(event.get("confidence_hint") or 0.9, 0.9),
+            evidence_bundle=cast(list[EvidenceBundleItem], evidence_bundle),
+            from_state_hint=str(event.get("from_state_hint") or ""),
+            to_state_hint=str(event.get("to_state_hint") or ""),
+        )
+    result = await manual_session.to_cartography_result()
+    await persist_mapping_result(
+        app_id=resolved_app_id,
+        app_name=app_name,
+        session_id=session_id,
+        resolved_url=start_url,
+        current_url=start_url,
+        inventory=[],
+        initial_actions_log=[],
+        result=result,
+    )
+    return resolved_app_id
+
+
 def main() -> None:
     """CLI entry: run scout then mapping. Scout writes inventory, mapping uses it to build graph."""
     import argparse
@@ -842,6 +926,7 @@ def main() -> None:
     
     # Setup browser-use timeouts from MAPPING_TIMEOUT env
     _setup_browser_use_timeouts()
+    initialize_laminar()
 
     pkg_root = Path(__file__).resolve().parent.parent
     default_output = str(pkg_root / "data" / "graph.json")
@@ -875,12 +960,39 @@ def main() -> None:
         action="store_true",
         help="Merge newly mapped graph with existing output file.",
     )
+    parser.add_argument(
+        "--mode",
+        default=os.getenv("MAPPING_MODE", "auto"),
+        choices=["auto", "manual_graph_assisted", "manual_raw"],
+        help="Run mode: auto (default), manual_graph_assisted, manual_raw.",
+    )
+    parser.add_argument(
+        "--manual-events",
+        default=os.getenv("MAPPING_MANUAL_EVENTS", ""),
+        help="Path to manual capture events JSON for manual modes.",
+    )
+    parser.add_argument(
+        "--manual-operator",
+        default=os.getenv("MAPPING_MANUAL_OPERATOR", "human:operator"),
+        help="Operator id for manual mode.",
+    )
+    parser.add_argument(
+        "--manual-start-state",
+        default=os.getenv("MAPPING_MANUAL_START_STATE", ""),
+        help="Start state hint for manual_graph_assisted mode.",
+    )
+    parser.add_argument(
+        "--manual-session-id",
+        default=os.getenv("MAPPING_MANUAL_SESSION_ID", ""),
+        help="Optional manual session id. Auto generated when omitted.",
+    )
     args = parser.parse_args()
     output = (args.output or "").strip() or default_output
     inventory = (args.inventory or "").strip() or default_inventory
     scout_pages_arg = (args.scout_pages or "").strip()
     scout_pages = [item.strip() for item in scout_pages_arg.split(",") if item.strip()]
     merge_existing = bool(args.merge_existing)
+    run_mode = (args.mode or "auto").strip()
     url = _resolve_mapping_url(args.url)
 
     async def _run() -> None:
@@ -894,17 +1006,46 @@ def main() -> None:
             Path(inventory).parent.mkdir(parents=True, exist_ok=True)
             Path(inventory).write_text(json.dumps({"elements": []}), encoding="utf-8")
 
-        print("Mapping (explore flow, build graph)...")
-        try:
-            app_id = await run_mapping(
-                url=url,
-                output_path=output,
-                inventory_path=inventory,
-                merge_existing=merge_existing,
-            )
-        except asyncio.CancelledError:
-            print("[INFO] Mapping cancelled")
-            raise
+        if run_mode == "auto":
+            print("Mapping (explore flow, build graph)...")
+            try:
+                _ = await run_mapping(
+                    url=url,
+                    output_path=output,
+                    inventory_path=inventory,
+                    merge_existing=merge_existing,
+                )
+            except asyncio.CancelledError:
+                print("[INFO] Mapping cancelled")
+                raise
+            return
+
+        manual_events_path = (args.manual_events or "").strip()
+        if not manual_events_path:
+            raise ValueError("--manual-events is required in manual mode.")
+        manual_events_file = Path(manual_events_path)
+        if not manual_events_file.exists():
+            raise FileNotFoundError(f"Manual events file not found: {manual_events_file}")
+        raw_manual = json.loads(manual_events_file.read_text(encoding="utf-8"))
+        events = raw_manual if isinstance(raw_manual, list) else raw_manual.get("events", [])
+        if not isinstance(events, list):
+            raise ValueError("manual events must be a JSON list or {\"events\": [...]}")
+        manual_session_id = (args.manual_session_id or "").strip() or (
+            f"session:manual:{datetime.now(timezone.utc).isoformat()}"
+        )
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        app_name = (parsed.netloc or parsed.path.split("/")[0] or "manual").strip()
+        _ = await run_manual_mapping(
+            app_name=app_name,
+            session_id=manual_session_id,
+            events=events,
+            mode=run_mode,
+            operator_id=(args.manual_operator or "human:operator").strip(),
+            start_state_hint=(args.manual_start_state or "").strip(),
+            start_url=url,
+        )
 
     # Use a custom event loop to handle signals and cleanup properly
     loop = asyncio.new_event_loop()

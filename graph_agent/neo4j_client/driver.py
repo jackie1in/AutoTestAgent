@@ -60,6 +60,10 @@ class Neo4jDriver:
                 "CREATE CONSTRAINT IF NOT EXISTS FOR (s:Session) REQUIRE s.id IS UNIQUE",
                 "CREATE CONSTRAINT IF NOT EXISTS FOR (m:Menu) REQUIRE m.id IS UNIQUE",
                 "CREATE CONSTRAINT IF NOT EXISTS FOR (ev:Evidence) REQUIRE ev.id IS UNIQUE",
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (run:IngestionRun) REQUIRE run.id IS UNIQUE",
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (ent:TransitionEntity) REQUIRE ent.stable_key IS UNIQUE",
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (rev:TransitionRevision) REQUIRE rev.revision_id IS UNIQUE",
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (gr:GraphRelease) REQUIRE gr.id IS UNIQUE",
             ]
             indexes = [
                 "CREATE INDEX IF NOT EXISTS FOR (a:App) ON (a.entry_url)",
@@ -83,6 +87,11 @@ class Neo4jDriver:
                 "CREATE INDEX IF NOT EXISTS FOR (m:Menu) ON (m.stable_path)",
                 "CREATE INDEX IF NOT EXISTS FOR (ev:Evidence) ON (ev.evidence_type)",
                 "CREATE INDEX IF NOT EXISTS FOR (ev:Evidence) ON (ev.transition_id)",
+                "CREATE INDEX IF NOT EXISTS FOR (run:IngestionRun) ON (run.app_id)",
+                "CREATE INDEX IF NOT EXISTS FOR (run:IngestionRun) ON (run.session_id)",
+                "CREATE INDEX IF NOT EXISTS FOR (rev:TransitionRevision) ON (rev.transition_id, rev.is_active)",
+                "CREATE INDEX IF NOT EXISTS FOR (rev:TransitionRevision) ON (rev.stable_key)",
+                "CREATE INDEX IF NOT EXISTS FOR (gr:GraphRelease) ON (gr.app_id)",
             ]
             for stmt in constraints + indexes:
                 await session.run(stmt)

@@ -17,13 +17,16 @@ from urllib.parse import parse_qsl, urlparse
 from browser_use.browser.session import BrowserSession as Browser
 
 from graph_agent.cartography.base_agent import BaseAgent
+from graph_agent.cartography.inference_core import (
+    SemanticInferenceInput,
+    infer_transition_semantics,
+)
 from graph_agent.cartography.react_prompts import (
     build_system_prompt,
     build_user_prompt,
 )
 from graph_agent.cartography.react_schema import AgentOutput
 from graph_agent.graph.merger import CartographyResult
-from graph_agent.intent.parser import infer_intent_progressive, distill_ui_thought
 from graph_agent.lib.page_controller import PageController
 from graph_agent.llm import get_llm
 from graph_agent.models import (
@@ -127,6 +130,7 @@ class ReActExplorer(BaseAgent):
         self._state_id = ""
         self._result = CartographyResult()
         self._extra_system_prompt = extra_system_prompt
+        self._semantic_conflict_count = 0
 
         # Extra actions supported by PageController but not in BaseAgent defaults
         self._supported_actions.update({
@@ -449,29 +453,6 @@ class ReActExplorer(BaseAgent):
                 )
         thought_text = output.next_goal or ""
 
-        # Intent inference
-        intent = None
-        try:
-            distilled = await distill_ui_thought(
-                thought_text, act_type, selector, url_before, url_after
-            )
-            neighbor_steps = self._result.history[-3:] if self._result.history else None
-            page_signals = {"title": self._page_title or title_after, "url": url_before}
-            intent, _reason, _level = await infer_intent_progressive(
-                action=act_type,
-                selector=selector,
-                source_url=url_before,
-                target_url=url_after,
-                param_name=None,
-                thought_text=distilled,
-                neighbor_steps=neighbor_steps,
-                page_signals=page_signals,
-            )
-            if intent:
-                logger.debug("    → Intent inferred: %s", intent.key)
-        except Exception as e:
-            logger.debug("    → Intent inference skipped: %s", e)
-
         transition = Transition(
             id=f"t:{self._state_id or 'root'}:react-{action_type}-{step}",
             selector=selector,
@@ -479,7 +460,7 @@ class ReActExplorer(BaseAgent):
             semantic_action_key=f"{act_type.value}:{selector}",
             action=act_type,
             thought=thought_text,
-            intent=intent,
+            intent=None,
             from_state_id=from_state_id,
             to_state_id=to_state_id,
             step_index=step,
@@ -489,6 +470,58 @@ class ReActExplorer(BaseAgent):
                 f"evidence:{self._state_id or 'root'}:{step}:dom_after",
             ],
         )
+        try:
+            neighbor_steps: list[dict[str, str]] | None = None
+            if self._result.history:
+                neighbor_steps = [
+                    {
+                        "action": str(h.get("action_name") or h.get("action") or ""),
+                        "selector": str(h.get("selector") or ""),
+                        "source_url": str(h.get("url_before") or ""),
+                        "target_url": str(h.get("url_after") or ""),
+                        "thought": str(h.get("next_goal") or ""),
+                    }
+                    for h in self._result.history[-3:]
+                    if isinstance(h, dict)
+                ]
+            page_signals = {"title": self._page_title or title_after, "url": url_before}
+            semantic = await infer_transition_semantics(
+                SemanticInferenceInput(
+                    source_type="auto",
+                    operator_id="agent",
+                    action=act_type,
+                    selector=selector,
+                    selector_chain_hint=selector_chain,
+                    source_url=url_before,
+                    target_url=url_after,
+                    param_name=None,
+                    thought_text=thought_text,
+                    neighbor_steps=neighbor_steps,
+                    page_signals=page_signals,
+                    from_state_id=from_state_id,
+                    to_state_id=to_state_id,
+                    step_index=step,
+                    transition_id=transition.id,
+                    existing_semantic_keys={
+                        t.semantic_action_key
+                        for t in self._result.transitions
+                        if getattr(t, "semantic_action_key", None)
+                    },
+                )
+            )
+            transition.intent = semantic.transition_patch.intent
+            transition.intent_failure_reason = semantic.transition_patch.intent_failure_reason
+            transition.selector_chain = semantic.transition_patch.selector_chain
+            transition.semantic_action_key = semantic.transition_patch.semantic_action_key
+            if semantic.transition_patch.confidence_hint > 0:
+                transition.confidence = semantic.transition_patch.confidence_hint
+            if semantic.conflict_flags:
+                self._semantic_conflict_count += 1
+            extra_checkpoints = semantic.checkpoints
+        except Exception as e:
+            logger.debug("    → Semantic inference skipped: %s", e)
+            extra_checkpoints = []
+
         cp = Checkpoint(
             id=f"cp:{transition.id}:after",
             layer=CheckpointLayer.STRUCTURAL,
@@ -502,7 +535,11 @@ class ReActExplorer(BaseAgent):
         self._result.states.extend([from_state, to_state])
         self._result.transitions.append(transition)
         self._result.checkpoints.append(cp)
+        self._result.checkpoints.extend(extra_checkpoints)
         self._result.checkpoint_transition_map[cp.id] = transition.id
+        for extra in extra_checkpoints:
+            self._result.checkpoint_transition_map[extra.id] = transition.id
+        self._result.semantic_conflict_count = self._semantic_conflict_count
         logger.info("    → Transition recorded: %s", transition.id)
 
         if url_after != url_before:
@@ -557,6 +594,7 @@ class ReActExplorer(BaseAgent):
         self._explored_indices.clear()
         self._total_wait_time = 0.0
         self._last_url = ""
+        self._semantic_conflict_count = 0
 
         # Temporarily override max_steps if requested
         original_max_steps = self.max_steps

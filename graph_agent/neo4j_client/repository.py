@@ -6,6 +6,7 @@ from neo4j import AsyncDriver
 from graph_agent.models import (
     App, State, Transition, Zone, FrameNode, Entity, EntityInstance,
     Intent, Checkpoint, FieldConstraint, TestCase, Session, Menu, Evidence,
+    GraphRelease, IngestionRun, TransitionEntity, TransitionRevision,
 )
 from graph_agent.neo4j_client.queries import CypherQueries
 
@@ -135,6 +136,17 @@ class GraphRepository:
         async with self._driver.session() as session:
             result = await session.run(
                 CypherQueries.GET_ALL_TRANSITIONS, app_id=app_id
+            )
+            return await result.data()
+
+    async def get_all_transitions_by_release(
+        self, app_id: str, release_id: str
+    ) -> list[dict[str, Any]]:
+        async with self._driver.session() as session:
+            result = await session.run(
+                CypherQueries.GET_ALL_TRANSITIONS_BY_RELEASE,
+                app_id=app_id,
+                release_id=release_id,
             )
             return await result.data()
 
@@ -351,6 +363,151 @@ class GraphRepository:
             await session.run(
                 CypherQueries.LINK_SESSION_DISCOVERED_TRANSITION,
                 session_id=session_id, transition_id=transition_id,
+            )
+
+    async def upsert_ingestion_run(self, run: IngestionRun) -> None:
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.UPSERT_INGESTION_RUN,
+                id=run.id,
+                props=_model_to_props(run),
+            )
+
+    async def link_session_ingestion_run(self, session_id: str, ingest_id: str) -> None:
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.LINK_SESSION_INGESTION_RUN,
+                session_id=session_id,
+                ingest_id=ingest_id,
+            )
+
+    async def link_ingestion_emits_state(self, ingest_id: str, state_id: str) -> None:
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.LINK_INGESTION_EMITS_STATE,
+                ingest_id=ingest_id,
+                state_id=state_id,
+            )
+
+    async def link_ingestion_emits_transition(
+        self, ingest_id: str, transition_id: str
+    ) -> None:
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.LINK_INGESTION_EMITS_TRANSITION,
+                ingest_id=ingest_id,
+                transition_id=transition_id,
+            )
+
+    async def link_ingestion_emits_evidence(self, ingest_id: str, evidence_id: str) -> None:
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.LINK_INGESTION_EMITS_EVIDENCE,
+                ingest_id=ingest_id,
+                evidence_id=evidence_id,
+            )
+
+    async def link_ingestion_emits_menu(self, ingest_id: str, menu_id: str) -> None:
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.LINK_INGESTION_EMITS_MENU,
+                ingest_id=ingest_id,
+                menu_id=menu_id,
+            )
+
+    async def link_ingestion_emits_zone(self, ingest_id: str, zone_id: str) -> None:
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.LINK_INGESTION_EMITS_ZONE,
+                ingest_id=ingest_id,
+                zone_id=zone_id,
+            )
+
+    async def upsert_transition_entity(self, entity: TransitionEntity) -> None:
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.UPSERT_TRANSITION_ENTITY,
+                stable_key=entity.stable_key,
+                props=_model_to_props(entity),
+            )
+
+    async def upsert_transition_revision(self, revision: TransitionRevision) -> None:
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.UPSERT_TRANSITION_REVISION,
+                revision_id=revision.revision_id,
+                props=_model_to_props(revision),
+            )
+
+    async def get_active_transition_revision(
+        self, stable_key: str
+    ) -> TransitionRevision | None:
+        async with self._driver.session() as session:
+            result = await session.run(
+                CypherQueries.GET_ACTIVE_REVISION_BY_STABLE_KEY,
+                stable_key=stable_key,
+            )
+            record = await result.single()
+            if record and record.get("rev") is not None:
+                return TransitionRevision(**dict(record["rev"]))
+            return None
+
+    async def activate_transition_revision(
+        self,
+        stable_key: str,
+        revision_id: str,
+        supersedes_revision_ids: list[str] | None = None,
+    ) -> None:
+        supersedes_revision_ids = supersedes_revision_ids or []
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.DEACTIVATE_ACTIVE_REVISIONS,
+                stable_key=stable_key,
+            )
+            await session.run(
+                CypherQueries.LINK_ENTITY_HAS_REVISION,
+                stable_key=stable_key,
+                revision_id=revision_id,
+            )
+            for old_revision_id in supersedes_revision_ids:
+                await session.run(
+                    CypherQueries.LINK_REVISION_SUPERSEDES,
+                    new_revision_id=revision_id,
+                    old_revision_id=old_revision_id,
+                )
+
+    async def attach_transition_revision(self, stable_key: str, revision_id: str) -> None:
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.LINK_ENTITY_HAS_REVISION,
+                stable_key=stable_key,
+                revision_id=revision_id,
+            )
+
+    async def link_ingestion_emits_revision(
+        self, ingest_id: str, revision_id: str
+    ) -> None:
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.LINK_INGESTION_EMITS_REVISION,
+                ingest_id=ingest_id,
+                revision_id=revision_id,
+            )
+
+    async def upsert_graph_release(self, release: GraphRelease) -> None:
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.UPSERT_GRAPH_RELEASE,
+                id=release.id,
+                props=_model_to_props(release),
+            )
+
+    async def link_release_revision(self, release_id: str, revision_id: str) -> None:
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.LINK_RELEASE_INCLUDES_REVISION,
+                release_id=release_id,
+                revision_id=revision_id,
             )
 
     async def link_session_generated_checkpoint(self, session_id: str, checkpoint_id: str) -> None:

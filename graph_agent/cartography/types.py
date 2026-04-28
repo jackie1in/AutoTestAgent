@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 
 class BBox(TypedDict):
@@ -79,3 +79,39 @@ class LLMTransitionHint(TypedDict, total=False):
     selector: str
     from_url: str
     to_url: str
+
+
+TransitionSourceType = Literal["auto", "manual_graph_assisted", "manual_raw"]
+
+
+class EvidenceBundleItem(TypedDict, total=False):
+    evidence_type: Literal[
+        "layout",
+        "dom_diff",
+        "url_change",
+        "screenshot",
+        "manual_note",
+        "network",
+    ]
+    summary: str
+    payload: str
+    confidence: float
+
+
+class TransitionCandidate(TypedDict, total=False):
+    source_type: TransitionSourceType
+    operator_id: str
+    session_id: str
+    trace_id: str
+    step_index: int
+    action: str
+    selector: str
+    action_value: str
+    param_name: str
+    url_before: str
+    url_after: str
+    from_state_hint: str
+    to_state_hint: str
+    thought: str
+    confidence_hint: float
+    evidence_bundle: list[EvidenceBundleItem]

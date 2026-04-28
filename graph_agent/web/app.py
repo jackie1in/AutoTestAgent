@@ -70,6 +70,11 @@ def _resolve_app_name() -> str:
     return (os.getenv("MAPPING_APP_NAME") or "").strip()
 
 
+def _resolve_release_id() -> str:
+    """Optional release selector for playback reads."""
+    return (os.getenv("MAPPING_RELEASE_ID") or "").strip()
+
+
 async def _get_driver() -> Any:
     """Return the raw Neo4j async driver, initializing if needed."""
     graphrag = await _ensure_graphrag()
@@ -81,29 +86,84 @@ async def _get_driver() -> Any:
 async def _get_edges_from_neo4j(driver) -> list[GraphEdge]:
     """Query transitions from Neo4j and build GraphEdge list."""
     app_name = _resolve_app_name()
+    release_id = _resolve_release_id()
     async with driver.session() as session:
-        result = await session.run(
-            """
-            MATCH (a:App)
-            WHERE $app_name = '' OR a.name = $app_name
-            WITH a ORDER BY coalesce(a.last_session_at, a.created_at) DESC LIMIT 1
-            MATCH (a)-[:HAS_STATE]->(s:State)<-[:FROM]-(t:Transition)-[:TO]->(target:State)
-            OPTIONAL MATCH (t)-[:REALIZES]->(i:Intent)
-            RETURN t.id AS id, t.step_index AS step_index,
-                   s.id AS from_state_id, target.id AS to_state_id,
-                   t.source_url AS source_url, t.target_url AS target_url,
-                   t.selector AS selector, t.action AS action,
-                   t.tab_id AS tab_id, t.target_tab_id AS target_tab_id,
-                   t.tab_action AS tab_action,
-                   t.intent_failure_reason AS intent_failure_reason,
-                   t.param_name AS param_name, t.action_value AS action_value,
-                   t.thought AS thought, t.element_snapshot AS element_snapshot,
-                   t.frame_path AS frame_path,
-                   i{.*} AS intent
-            ORDER BY t.step_index
-            """,
-            app_name=app_name,
-        )
+        if release_id:
+            result = await session.run(
+                """
+                MATCH (a:App)
+                WHERE $app_name = '' OR a.name = $app_name
+                WITH a ORDER BY coalesce(a.last_session_at, a.created_at) DESC LIMIT 1
+                MATCH (r:GraphRelease {id: $release_id, app_id: a.id, status: 'active'})
+                      <-[:IN_RELEASE]-(rev:TransitionRevision {is_active: true})
+                      <-[:HAS_REVISION]-(:TransitionEntity)
+                MATCH (t:Transition {id: rev.transition_id})
+                OPTIONAL MATCH (s:State {id: rev.from_state_id})
+                OPTIONAL MATCH (target:State {id: rev.to_state_id})
+                OPTIONAL MATCH (t)-[:REALIZES]->(i:Intent)
+                RETURN t.id AS id, t.step_index AS step_index,
+                       s.id AS from_state_id, target.id AS to_state_id,
+                       t.source_url AS source_url, t.target_url AS target_url,
+                       t.selector AS selector, t.action AS action,
+                       t.tab_id AS tab_id, t.target_tab_id AS target_tab_id,
+                       t.tab_action AS tab_action,
+                       t.intent_failure_reason AS intent_failure_reason,
+                       t.param_name AS param_name, t.action_value AS action_value,
+                       t.thought AS thought, t.element_snapshot AS element_snapshot,
+                       t.frame_path AS frame_path,
+                       i{.*} AS intent
+                ORDER BY t.step_index
+                """,
+                app_name=app_name,
+                release_id=release_id,
+            )
+            first_record = await result.peek()
+            if first_record is None:
+                result = await session.run(
+                    """
+                    MATCH (a:App)
+                    WHERE $app_name = '' OR a.name = $app_name
+                    WITH a ORDER BY coalesce(a.last_session_at, a.created_at) DESC LIMIT 1
+                    MATCH (a)-[:HAS_STATE]->(s:State)<-[:FROM]-(t:Transition)-[:TO]->(target:State)
+                    OPTIONAL MATCH (t)-[:REALIZES]->(i:Intent)
+                    RETURN t.id AS id, t.step_index AS step_index,
+                           s.id AS from_state_id, target.id AS to_state_id,
+                           t.source_url AS source_url, t.target_url AS target_url,
+                           t.selector AS selector, t.action AS action,
+                           t.tab_id AS tab_id, t.target_tab_id AS target_tab_id,
+                           t.tab_action AS tab_action,
+                           t.intent_failure_reason AS intent_failure_reason,
+                           t.param_name AS param_name, t.action_value AS action_value,
+                           t.thought AS thought, t.element_snapshot AS element_snapshot,
+                           t.frame_path AS frame_path,
+                           i{.*} AS intent
+                    ORDER BY t.step_index
+                    """,
+                    app_name=app_name,
+                )
+        else:
+            result = await session.run(
+                """
+                MATCH (a:App)
+                WHERE $app_name = '' OR a.name = $app_name
+                WITH a ORDER BY coalesce(a.last_session_at, a.created_at) DESC LIMIT 1
+                MATCH (a)-[:HAS_STATE]->(s:State)<-[:FROM]-(t:Transition)-[:TO]->(target:State)
+                OPTIONAL MATCH (t)-[:REALIZES]->(i:Intent)
+                RETURN t.id AS id, t.step_index AS step_index,
+                       s.id AS from_state_id, target.id AS to_state_id,
+                       t.source_url AS source_url, t.target_url AS target_url,
+                       t.selector AS selector, t.action AS action,
+                       t.tab_id AS tab_id, t.target_tab_id AS target_tab_id,
+                       t.tab_action AS tab_action,
+                       t.intent_failure_reason AS intent_failure_reason,
+                       t.param_name AS param_name, t.action_value AS action_value,
+                       t.thought AS thought, t.element_snapshot AS element_snapshot,
+                       t.frame_path AS frame_path,
+                       i{.*} AS intent
+                ORDER BY t.step_index
+                """,
+                app_name=app_name,
+            )
         edges: list[GraphEdge] = []
         async for record in result:
             t = dict(record)

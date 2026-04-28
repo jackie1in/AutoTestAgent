@@ -62,6 +62,13 @@ class MigrationManager:
             apply=self._migration_004_add_zone_menu_indexes,
         ))
 
+        # Migration 005: Add ingestion/revision/release versioning layers
+        self.register(Migration(
+            version="005",
+            description="Add IngestionRun, TransitionEntity/TransitionRevision, GraphRelease constraints and indexes",
+            apply=self._migration_005_add_versioning_layers,
+        ))
+
     def register(self, migration: Migration) -> None:
         """Register a new migration."""
         self._migrations.append(migration)
@@ -282,6 +289,31 @@ class MigrationManager:
             ]
             
             for stmt in zone_indexes + menu_indexes:
+                await session.run(stmt)
+
+    async def _migration_005_add_versioning_layers(self, driver: Any) -> None:
+        """Add three-layer versioning schema and indexes."""
+        async with driver.session() as session:
+            constraints = [
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (run:IngestionRun) REQUIRE run.id IS UNIQUE",
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (ent:TransitionEntity) REQUIRE ent.stable_key IS UNIQUE",
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (rev:TransitionRevision) REQUIRE rev.revision_id IS UNIQUE",
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (r:GraphRelease) REQUIRE r.id IS UNIQUE",
+            ]
+            indexes = [
+                "CREATE INDEX IF NOT EXISTS FOR (run:IngestionRun) ON (run.app_id)",
+                "CREATE INDEX IF NOT EXISTS FOR (run:IngestionRun) ON (run.session_id)",
+                "CREATE INDEX IF NOT EXISTS FOR (rev:TransitionRevision) ON (rev.transition_id, rev.is_active)",
+                "CREATE INDEX IF NOT EXISTS FOR (rev:TransitionRevision) ON (rev.stable_key)",
+                "CREATE INDEX IF NOT EXISTS FOR (rev:TransitionRevision) ON (rev.ingest_version_id)",
+                "CREATE INDEX IF NOT EXISTS FOR (r:GraphRelease) ON (r.app_id)",
+                "CREATE INDEX IF NOT EXISTS FOR (s:State) ON (s.ingest_version_id)",
+                "CREATE INDEX IF NOT EXISTS FOR (t:Transition) ON (t.ingest_version_id)",
+                "CREATE INDEX IF NOT EXISTS FOR (e:Evidence) ON (e.ingest_version_id)",
+                "CREATE INDEX IF NOT EXISTS FOR (m:Menu) ON (m.ingest_version_id)",
+                "CREATE INDEX IF NOT EXISTS FOR (z:Zone) ON (z.ingest_version_id)",
+            ]
+            for stmt in constraints + indexes:
                 await session.run(stmt)
 
 

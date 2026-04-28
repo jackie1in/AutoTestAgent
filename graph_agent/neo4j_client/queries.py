@@ -22,6 +22,11 @@ class CypherQueries:
     MERGE (a)-[:HAS_SESSION]->(sess)
     """
 
+    LINK_SESSION_INGESTION_RUN = """
+    MATCH (sess:Session {id: $session_id}), (run:IngestionRun {id: $ingest_id})
+    MERGE (sess)-[:GENERATES]->(run)
+    """
+
     GET_APP_STATES = """
     MATCH (a:App {id: $app_id})-[:HAS_STATE]->(s:State)
     RETURN s ORDER BY s.last_visited DESC
@@ -107,6 +112,42 @@ class CypherQueries:
            target.id AS to_state_id,
            target.url AS target_url
     ORDER BY t.confidence DESC
+    """
+
+    GET_ALL_TRANSITIONS_BY_RELEASE = """
+    MATCH (r:GraphRelease {id: $release_id, app_id: $app_id, status: 'active'})
+          <-[:IN_RELEASE]-(rev:TransitionRevision {is_active: true})
+          <-[:HAS_REVISION]-(ent:TransitionEntity)
+    MATCH (t:Transition {id: rev.transition_id})
+    OPTIONAL MATCH (s:State {id: rev.from_state_id})
+    OPTIONAL MATCH (target:State {id: rev.to_state_id})
+    RETURN t.id AS id,
+           t.selector AS selector,
+           t.action AS action,
+           t.action_value AS action_value,
+           t.param_name AS param_name,
+           t.element_snapshot AS element_snapshot,
+           t.frame_path AS frame_path,
+           t.tab_id AS tab_id,
+           t.target_tab_id AS target_tab_id,
+           t.tab_action AS tab_action,
+           t.thought AS thought,
+           rev.confidence AS confidence,
+           t.step_index AS step_index,
+           t.session_id AS session_id,
+           t.intent AS intent,
+           t.intent_failure_reason AS intent_failure_reason,
+           t.selector_chain AS selector_chain,
+           t.semantic_action_key AS semantic_action_key,
+           t.evidence_ids AS evidence_ids,
+           rev.source_type AS source_type,
+           rev.operator_id AS operator_id,
+           rev.ingest_version_id AS ingest_version_id,
+           s.id AS from_state_id,
+           s.url AS source_url,
+           target.id AS to_state_id,
+           target.url AS target_url
+    ORDER BY rev.confidence DESC
     """
 
     GET_LOW_CONFIDENCE_TRANSITIONS = """
@@ -342,6 +383,93 @@ class CypherQueries:
     LINK_SESSION_DISCOVERED_TRANSITION = """
     MATCH (sess:Session {id: $session_id}), (t:Transition {id: $transition_id})
     MERGE (sess)-[:DISCOVERED]->(t)
+    """
+
+    LINK_INGESTION_EMITS_STATE = """
+    MATCH (run:IngestionRun {id: $ingest_id}), (s:State {id: $state_id})
+    MERGE (run)-[:EMITS]->(s)
+    """
+
+    LINK_INGESTION_EMITS_TRANSITION = """
+    MATCH (run:IngestionRun {id: $ingest_id}), (t:Transition {id: $transition_id})
+    MERGE (run)-[:EMITS]->(t)
+    """
+
+    LINK_INGESTION_EMITS_EVIDENCE = """
+    MATCH (run:IngestionRun {id: $ingest_id}), (e:Evidence {id: $evidence_id})
+    MERGE (run)-[:EMITS]->(e)
+    """
+
+    LINK_INGESTION_EMITS_MENU = """
+    MATCH (run:IngestionRun {id: $ingest_id}), (m:Menu {id: $menu_id})
+    MERGE (run)-[:EMITS]->(m)
+    """
+
+    LINK_INGESTION_EMITS_ZONE = """
+    MATCH (run:IngestionRun {id: $ingest_id}), (z:Zone {id: $zone_id})
+    MERGE (run)-[:EMITS]->(z)
+    """
+
+    UPSERT_INGESTION_RUN = """
+    MERGE (run:IngestionRun {id: $id})
+    SET run += $props
+    RETURN run
+    """
+
+    UPSERT_TRANSITION_ENTITY = """
+    MERGE (ent:TransitionEntity {stable_key: $stable_key})
+    SET ent += $props
+    RETURN ent
+    """
+
+    UPSERT_TRANSITION_REVISION = """
+    MERGE (rev:TransitionRevision {revision_id: $revision_id})
+    SET rev += $props
+    RETURN rev
+    """
+
+    LINK_ENTITY_HAS_REVISION = """
+    MATCH (ent:TransitionEntity {stable_key: $stable_key}),
+          (rev:TransitionRevision {revision_id: $revision_id})
+    MERGE (ent)-[:HAS_REVISION]->(rev)
+    """
+
+    DEACTIVATE_ACTIVE_REVISIONS = """
+    MATCH (:TransitionEntity {stable_key: $stable_key})-[:HAS_REVISION]->(rev:TransitionRevision {is_active: true})
+    SET rev.is_active = false
+    RETURN collect(rev.revision_id) AS revision_ids
+    """
+
+    LINK_REVISION_SUPERSEDES = """
+    MATCH (new:TransitionRevision {revision_id: $new_revision_id}),
+          (old:TransitionRevision {revision_id: $old_revision_id})
+    MERGE (new)-[:SUPERSEDES]->(old)
+    """
+
+    LINK_INGESTION_EMITS_REVISION = """
+    MATCH (run:IngestionRun {id: $ingest_id}),
+          (rev:TransitionRevision {revision_id: $revision_id})
+    MERGE (run)-[:EMITS]->(rev)
+    """
+
+    GET_ACTIVE_REVISION_BY_STABLE_KEY = """
+    MATCH (:TransitionEntity {stable_key: $stable_key})-[:HAS_REVISION]->(rev:TransitionRevision)
+    WHERE rev.is_active = true
+    RETURN rev
+    ORDER BY rev.created_at DESC
+    LIMIT 1
+    """
+
+    UPSERT_GRAPH_RELEASE = """
+    MERGE (r:GraphRelease {id: $id})
+    SET r += $props
+    RETURN r
+    """
+
+    LINK_RELEASE_INCLUDES_REVISION = """
+    MATCH (r:GraphRelease {id: $release_id}),
+          (rev:TransitionRevision {revision_id: $revision_id})
+    MERGE (rev)-[:IN_RELEASE]->(r)
     """
 
     LINK_SESSION_GENERATED_CHECKPOINT = """

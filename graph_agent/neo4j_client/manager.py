@@ -7,9 +7,13 @@ from graph_agent.neo4j_client.driver import Neo4jDriver
 from graph_agent.neo4j_client.repository import GraphRepository
 from graph_agent.models import (
     App,
+    GraphRelease,
+    IngestionRun,
     Session,
     State,
     Transition,
+    TransitionEntity,
+    TransitionRevision,
     Evidence,
 )
 
@@ -58,6 +62,16 @@ class GraphManager:
         if self._repo is None:
             raise RuntimeError("GraphManager not initialized")
         await self._repo.upsert_session(session)
+
+    async def add_ingestion_run(self, run: IngestionRun) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.upsert_ingestion_run(run)
+
+    async def link_session_ingestion_run(self, session_id: str, ingest_id: str) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.link_session_ingestion_run(session_id, ingest_id)
     
     async def link_session_discovered(self, session_id: str, state_id: str) -> None:
         """Link a session to a discovered state."""
@@ -70,6 +84,31 @@ class GraphManager:
         if self._repo is None:
             raise RuntimeError("GraphManager not initialized")
         await self._repo.link_session_discovered_transition(session_id, transition_id)
+
+    async def link_ingestion_emits_state(self, ingest_id: str, state_id: str) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.link_ingestion_emits_state(ingest_id, state_id)
+
+    async def link_ingestion_emits_transition(self, ingest_id: str, transition_id: str) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.link_ingestion_emits_transition(ingest_id, transition_id)
+
+    async def link_ingestion_emits_evidence(self, ingest_id: str, evidence_id: str) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.link_ingestion_emits_evidence(ingest_id, evidence_id)
+
+    async def link_ingestion_emits_menu(self, ingest_id: str, menu_id: str) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.link_ingestion_emits_menu(ingest_id, menu_id)
+
+    async def link_ingestion_emits_zone(self, ingest_id: str, zone_id: str) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.link_ingestion_emits_zone(ingest_id, zone_id)
     
     async def link_app_state(self, app_id: str, state_id: str) -> None:
         """Link an app to a state."""
@@ -108,6 +147,12 @@ class GraphManager:
             s.semantic_mismatch_warnings = $semantic_mismatch_warnings,
             s.url_discontinuity_warnings = $url_discontinuity_warnings,
             s.frame_context_transition_warnings = $frame_context_transition_warnings,
+            s.manual_transition_count = $manual_transition_count,
+            s.auto_transition_count = $auto_transition_count,
+            s.intervention_task_count = $intervention_task_count,
+            s.intervention_tasks = $intervention_tasks,
+            s.current_release_id = $current_release_id,
+            s.latest_ingest_version_id = $latest_ingest_version_id,
             s.name = coalesce(s.focus, s.id)
         """
         await self._run_write(
@@ -123,6 +168,12 @@ class GraphManager:
             semantic_mismatch_warnings=stats.get("semantic_mismatch_warnings", 0),
             url_discontinuity_warnings=stats.get("url_discontinuity_warnings", 0),
             frame_context_transition_warnings=stats.get("frame_context_transition_warnings", 0),
+            manual_transition_count=stats.get("manual_transition_count", 0),
+            auto_transition_count=stats.get("auto_transition_count", 0),
+            intervention_task_count=stats.get("intervention_task_count", 0),
+            intervention_tasks=stats.get("intervention_tasks", []),
+            current_release_id=stats.get("current_release_id", ""),
+            latest_ingest_version_id=stats.get("latest_ingest_version_id", ""),
         )
     
     # State operations
@@ -139,9 +190,50 @@ class GraphManager:
             raise RuntimeError("GraphManager not initialized")
         await self._repo.upsert_transition(
             transition,
-            transition.from_state_id,
-            transition.to_state_id,
+            transition.from_state_id or "",
+            transition.to_state_id or "",
         )
+
+    async def add_transition_entity(self, entity: TransitionEntity) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.upsert_transition_entity(entity)
+
+    async def add_transition_revision(self, revision: TransitionRevision) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.upsert_transition_revision(revision)
+
+    async def get_active_transition_revision(
+        self, stable_key: str
+    ) -> TransitionRevision | None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        return await self._repo.get_active_transition_revision(stable_key)
+
+    async def activate_transition_revision(
+        self,
+        stable_key: str,
+        revision_id: str,
+        supersedes_revision_ids: list[str] | None = None,
+    ) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.activate_transition_revision(
+            stable_key,
+            revision_id,
+            supersedes_revision_ids,
+        )
+
+    async def attach_transition_revision(self, stable_key: str, revision_id: str) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.attach_transition_revision(stable_key, revision_id)
+
+    async def link_ingestion_emits_revision(self, ingest_id: str, revision_id: str) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.link_ingestion_emits_revision(ingest_id, revision_id)
 
     async def add_evidence(self, evidence: Evidence) -> None:
         if self._repo is None:
@@ -176,6 +268,17 @@ class GraphManager:
         if self._repo is None:
             raise RuntimeError("GraphManager not initialized")
         return await self._repo.get_all_transitions(app_id)
+
+    async def get_all_transitions_for_release(
+        self, app_id: str, release_id: str | None = None
+    ) -> list[dict]:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        if release_id:
+            rows = await self._repo.get_all_transitions_by_release(app_id, release_id)
+            if rows:
+                return rows
+        return await self._repo.get_all_transitions(app_id)
     
     async def get_states_with_intents(self, app_id: str) -> list[dict]:
         """Get all states and their intents for an app."""
@@ -187,6 +290,16 @@ class GraphManager:
         """
         result = await self._run_read(query, app_id=app_id)
         return [record for record in result]
+
+    async def add_graph_release(self, release: GraphRelease) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.upsert_graph_release(release)
+
+    async def link_release_revision(self, release_id: str, revision_id: str) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.link_release_revision(release_id, revision_id)
     
     # Zone operations
     async def add_zones(
@@ -209,6 +322,7 @@ class GraphManager:
             z.element_count = zone.element_count,
             z.bounds = zone.bounds,
             z.text_sample = zone.text_sample,
+            z.ingest_version_id = zone.ingest_version_id,
             z.name = coalesce(zone.summary, zone.type, zone.id),
             z.updated_at = datetime()
         WITH z, zone
@@ -282,6 +396,7 @@ class GraphManager:
             m.level = menu.level,
             m.order = menu.order,
             m.is_active = menu.is_active,
+            m.ingest_version_id = menu.ingest_version_id,
             m.page_url = $page_url,
             m.name = coalesce(menu.text, menu.label, menu.menu_key, menu.id),
             m.updated_at = datetime()

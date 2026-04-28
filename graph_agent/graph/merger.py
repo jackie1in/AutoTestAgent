@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -14,6 +15,15 @@ logger = logging.getLogger(__name__)
 # Fingerprint changes within this window (seconds) don't degrade confidence,
 # protecting against pages with dynamic content (timestamps, counters, etc.).
 _FP_GRACE_PERIOD_SECONDS = 300
+
+
+def _source_priority(source_type: str | None) -> int:
+    value = (source_type or "auto").strip().lower()
+    if value == "manual_graph_assisted":
+        return 3
+    if value == "manual_raw":
+        return 2
+    return 1
 
 
 @dataclass
@@ -31,6 +41,8 @@ class CartographyResult:
     zone_hints: list[dict[str, object]] = field(default_factory=list)
     layout_evidence: list[dict[str, object]] = field(default_factory=list)
     layout_metrics: dict[str, object] = field(default_factory=dict)
+    intervention_tasks: list[dict[str, object]] = field(default_factory=list)
+    semantic_conflict_count: int = 0
 
 
 @dataclass
@@ -129,7 +141,6 @@ class GraphMerger:
         )
         existing = await result.single()
         now = datetime.utcnow().isoformat()
-
         if existing is None:
             await tx.run(
                 "CREATE (s:State {id: $id, url: $url, title: $title, "
@@ -200,6 +211,111 @@ class GraphMerger:
 
     # ── Transition ───────────────────────────────────────────
 
+    def _transition_stable_key(self, transition: Transition) -> str:
+        from_id = str(transition.from_state_id or "")
+        to_id = str(transition.to_state_id or "")
+        action = (
+            transition.action.value
+            if hasattr(transition.action, "value")
+            else str(transition.action)
+        )
+        semantic = str(transition.semantic_action_key or transition.selector or "")
+        return f"{from_id}|{to_id}|{action.lower()}|{semantic}"
+
+    async def _write_transition_revision(
+        self,
+        tx,
+        *,
+        stable_key: str,
+        transition: Transition,
+        transition_id: str,
+        session_id: str,
+        active: bool,
+        supersedes_revision_ids: list[str],
+    ) -> str:
+        revision_id = (
+            f"trev:{hashlib.md5(f'{stable_key}|{transition_id}|{session_id}|{datetime.utcnow().isoformat()}'.encode()).hexdigest()[:16]}"
+        )
+        action_val = (
+            transition.action.value
+            if hasattr(transition.action, "value")
+            else str(transition.action)
+        )
+        source_value = (
+            transition.source_type.value
+            if hasattr(transition.source_type, "value")
+            else str(transition.source_type)
+        )
+        intent_key = ""
+        if transition.intent:
+            intent_key = str(getattr(transition.intent, "key", "") or "")
+        if not intent_key:
+            intent_key = str(transition.semantic_action_key or "")
+        await tx.run(
+            "MERGE (ent:TransitionEntity {stable_key: $stable_key}) "
+            "SET ent.app_id = coalesce(ent.app_id, $app_id), "
+            "    ent.from_state_id = coalesce(ent.from_state_id, $from_state_id), "
+            "    ent.to_state_id = coalesce(ent.to_state_id, $to_state_id), "
+            "    ent.action = coalesce(ent.action, $action), "
+            "    ent.semantic_action_key = coalesce(ent.semantic_action_key, $semantic_action_key), "
+            "    ent.created_at = coalesce(ent.created_at, $now)",
+            stable_key=stable_key,
+            app_id=None,
+            from_state_id=str(transition.from_state_id or ""),
+            to_state_id=str(transition.to_state_id or ""),
+            action=action_val,
+            semantic_action_key=str(transition.semantic_action_key or ""),
+            now=datetime.utcnow().isoformat(),
+        )
+        await tx.run(
+            "MERGE (rev:TransitionRevision {revision_id: $revision_id}) "
+            "SET rev.stable_key = $stable_key, "
+            "    rev.transition_id = $transition_id, "
+            "    rev.confidence = $confidence, "
+            "    rev.intent_key = $intent_key, "
+            "    rev.source_type = $source_type, "
+            "    rev.operator_id = $operator_id, "
+            "    rev.selector = $selector, "
+            "    rev.action = $action, "
+            "    rev.from_state_id = $from_state_id, "
+            "    rev.to_state_id = $to_state_id, "
+            "    rev.session_id = $session_id, "
+            "    rev.ingest_version_id = $ingest_version_id, "
+            "    rev.created_at = $now, "
+            "    rev.is_active = $is_active",
+            revision_id=revision_id,
+            stable_key=stable_key,
+            transition_id=transition_id,
+            confidence=max(0.0, min(1.0, float(transition.confidence))),
+            intent_key=intent_key or None,
+            source_type=source_value or "auto",
+            operator_id=str(getattr(transition, "operator_id", "agent") or "agent"),
+            selector=transition.selector,
+            action=action_val,
+            from_state_id=str(transition.from_state_id or ""),
+            to_state_id=str(transition.to_state_id or ""),
+            session_id=session_id,
+            ingest_version_id=str(getattr(transition, "ingest_version_id", "") or ""),
+            now=datetime.utcnow().isoformat(),
+            is_active=active,
+        )
+        await tx.run(
+            "MATCH (ent:TransitionEntity {stable_key: $stable_key}), "
+            "(rev:TransitionRevision {revision_id: $revision_id}) "
+            "MERGE (ent)-[:HAS_REVISION]->(rev)",
+            stable_key=stable_key,
+            revision_id=revision_id,
+        )
+        for old_revision_id in supersedes_revision_ids:
+            await tx.run(
+                "MATCH (new:TransitionRevision {revision_id: $new_revision_id}), "
+                "(old:TransitionRevision {revision_id: $old_revision_id}) "
+                "MERGE (new)-[:SUPERSEDES]->(old)",
+                new_revision_id=revision_id,
+                old_revision_id=old_revision_id,
+            )
+        return revision_id
+
     async def _merge_transition(self, tx, transition: Transition, session_id: str) -> str:
         action_val = (
             transition.action.value
@@ -210,7 +326,8 @@ class GraphMerger:
             "MATCH (s1:State)<-[:FROM]-(t:Transition)-[:TO]->(s2:State) "
             "WHERE s1.id = $from_id AND s2.id = $to_id "
             "AND t.action = $action AND t.selector = $selector "
-            "RETURN t.id AS id, t.confidence AS confidence",
+            "RETURN t.id AS id, t.confidence AS confidence, "
+            "coalesce(t.source_type, 'auto') AS source_type",
             from_id=transition.from_state_id,
             to_id=transition.to_state_id,
             action=action_val,
@@ -218,6 +335,36 @@ class GraphMerger:
         )
         existing = await result.single()
         now = datetime.utcnow().isoformat()
+        stable_key = self._transition_stable_key(transition)
+        active_revision_result = await tx.run(
+            "MATCH (:TransitionEntity {stable_key: $stable_key})-[:HAS_REVISION]->(rev:TransitionRevision {is_active: true}) "
+            "RETURN rev.revision_id AS revision_id, rev.source_type AS source_type, rev.confidence AS confidence "
+            "ORDER BY rev.created_at DESC LIMIT 1",
+            stable_key=stable_key,
+        )
+        active_revision = await active_revision_result.single()
+        incoming_source = (
+            transition.source_type.value
+            if hasattr(transition.source_type, "value")
+            else str(transition.source_type)
+        )
+        incoming_priority = _source_priority(incoming_source)
+        incoming_conf = max(0.0, min(1.0, float(transition.confidence)))
+        should_activate_revision = True
+        supersedes_revision_ids: list[str] = []
+        if active_revision is not None:
+            current_priority = _source_priority(str(active_revision.get("source_type") or "auto"))
+            current_conf = float(active_revision.get("confidence") or 0.0)
+            if incoming_priority > current_priority:
+                should_activate_revision = True
+            elif incoming_priority < current_priority:
+                should_activate_revision = False
+            else:
+                should_activate_revision = incoming_conf >= current_conf
+            if should_activate_revision:
+                old_revision_id = str(active_revision.get("revision_id") or "")
+                if old_revision_id:
+                    supersedes_revision_ids.append(old_revision_id)
 
         if existing is None:
             initial_conf = max(0.5, transition.confidence)
@@ -315,14 +462,40 @@ class GraphMerger:
                 "MATCH (s1:State)<-[:FROM]-(t:Transition)-[:TO]->(s2:State) "
                 "WHERE s1.id = $from_id AND s2.id = $to_id "
                 "AND t.id <> $tid "
-                "RETURN t.id AS id, t.selector AS sel, t.confidence AS conf",
+                "RETURN t.id AS id, t.selector AS sel, t.confidence AS conf, "
+                "coalesce(t.source_type, 'auto') AS source_type",
                 from_id=transition.from_state_id,
                 to_id=transition.to_state_id,
                 tid=transition.id,
             )
             conflicts = [record async for record in conflict_result]
             new_sel_len = len(transition.selector or "")
+            new_priority = _source_priority(
+                getattr(transition, "source_type", "auto").value
+                if hasattr(getattr(transition, "source_type", None), "value")
+                else str(getattr(transition, "source_type", "auto"))
+            )
             for rec in conflicts:
+                old_priority = _source_priority(str(rec.get("source_type") or "auto"))
+                if new_priority > old_priority:
+                    await tx.run(
+                        "MATCH (t:Transition {id: $tid}) SET t.confidence = CASE "
+                        "WHEN t.confidence + 0.15 > 1.0 THEN 1.0 ELSE t.confidence + 0.15 END",
+                        tid=transition.id,
+                    )
+                    await tx.run(
+                        "MATCH (t:Transition {id: $oid}) SET t.confidence = CASE "
+                        "WHEN t.confidence - 0.15 < 0 THEN 0.0 ELSE t.confidence - 0.15 END",
+                        oid=rec["id"],
+                    )
+                    continue
+                if new_priority < old_priority:
+                    await tx.run(
+                        "MATCH (t:Transition {id: $tid}) SET t.confidence = CASE "
+                        "WHEN t.confidence - 0.15 < 0 THEN 0.0 ELSE t.confidence - 0.15 END",
+                        tid=transition.id,
+                    )
+                    continue
                 old_sel_len = len(rec["sel"] or "")
                 if new_sel_len < old_sel_len:
                     # New transition has shorter selector: boost new, degrade old
@@ -344,7 +517,61 @@ class GraphMerger:
                         tid=transition.id,
                     )
 
+            if should_activate_revision:
+                await tx.run(
+                    "MATCH (:TransitionEntity {stable_key: $stable_key})-[:HAS_REVISION]->(rev:TransitionRevision {is_active: true}) "
+                    "SET rev.is_active = false",
+                    stable_key=stable_key,
+                )
+            await self._write_transition_revision(
+                tx,
+                stable_key=stable_key,
+                transition=transition,
+                transition_id=transition.id,
+                session_id=session_id,
+                active=should_activate_revision,
+                supersedes_revision_ids=supersedes_revision_ids,
+            )
+
             return "created"
+
+        existing_priority = _source_priority(str(existing.get("source_type") or "auto"))
+        incoming_source = (
+            transition.source_type.value
+            if hasattr(transition.source_type, "value")
+            else str(transition.source_type)
+        )
+        incoming_priority = _source_priority(incoming_source)
+        if incoming_priority > existing_priority:
+            await tx.run(
+                "MATCH (t:Transition {id: $id}) "
+                "SET t.source_type = $source_type, t.operator_id = $operator_id, "
+                "    t.confidence = CASE WHEN t.confidence < $incoming_conf THEN $incoming_conf ELSE t.confidence END, "
+                "    t.last_validated = $now, "
+                "    t.validation_count = t.validation_count + 1",
+                id=existing["id"],
+                source_type=incoming_source,
+                operator_id=getattr(transition, "operator_id", "agent"),
+                incoming_conf=max(0.1, min(1.0, float(transition.confidence))),
+                now=now,
+            )
+            target_transition_id = str(existing["id"])
+            if should_activate_revision:
+                await tx.run(
+                    "MATCH (:TransitionEntity {stable_key: $stable_key})-[:HAS_REVISION]->(rev:TransitionRevision {is_active: true}) "
+                    "SET rev.is_active = false",
+                    stable_key=stable_key,
+                )
+            await self._write_transition_revision(
+                tx,
+                stable_key=stable_key,
+                transition=transition,
+                transition_id=target_transition_id,
+                session_id=session_id,
+                active=should_activate_revision,
+                supersedes_revision_ids=supersedes_revision_ids,
+            )
+            return "updated"
 
         new_conf = min(1.0, existing["confidence"] + 0.2)
         await tx.run(
@@ -360,6 +587,21 @@ class GraphMerger:
             "MERGE (sess)-[:VALIDATED]->(t)",
             sess_id=session_id,
             tid=existing["id"],
+        )
+        if should_activate_revision:
+            await tx.run(
+                "MATCH (:TransitionEntity {stable_key: $stable_key})-[:HAS_REVISION]->(rev:TransitionRevision {is_active: true}) "
+                "SET rev.is_active = false",
+                stable_key=stable_key,
+            )
+        await self._write_transition_revision(
+            tx,
+            stable_key=stable_key,
+            transition=transition,
+            transition_id=str(existing["id"]),
+            session_id=session_id,
+            active=should_activate_revision,
+            supersedes_revision_ids=supersedes_revision_ids,
         )
         return "boosted"
 

@@ -24,6 +24,7 @@ from graph_agent.cartography.layout_snapshot import (
     estimate_layout_confidence,
     compute_layout_fingerprint,
 )
+from graph_agent.cartography.intervention_queue import evaluate_intervention_need
 from graph_agent.cartography.llm_planning import (
     LLMPageAnalysis,
     analyze_page_with_llm,
@@ -37,6 +38,7 @@ from graph_agent.cartography.types import (
     LayoutEvidenceItem,
     LayoutMetrics,
 )
+from graph_agent.lib.observability import observe
 
 if TYPE_CHECKING:
     from graph_agent.graph.merger import CartographyResult
@@ -46,11 +48,17 @@ if TYPE_CHECKING:
 def rank_warm_start_candidates(
     candidates: list[dict[str, object]],
 ) -> list[dict[str, object]]:
+    def _to_float(value: object) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
     return sorted(
         candidates,
         key=lambda item: (
             0 if item.get("zone_unexplored") else 1,
-            -(float(item.get("confidence") or 0.0)),
+            -(_to_float(item.get("confidence") or 0.0)),
             str(item.get("transition_id") or ""),
         ),
     )
@@ -108,6 +116,8 @@ async def collect_layout_context(
         return "", "", 0.0
     try:
         page = await browser.get_current_page()
+        if page is None:
+            return "", "", 0.0
         snapshot = await capture_layout_snapshot(page, limit=limit)
         return (
             build_layout_summary(snapshot),
@@ -147,6 +157,10 @@ def summarize_layout_metrics(
     }
 
 
+@observe(
+    name="cartography.run_orchestrated_mapping",
+    metadata={"component": "cartography", "stage": "pipeline"},
+)
 async def run_orchestrated_mapping(
     browser: Browser,
     llm: BaseChatModel,
@@ -186,6 +200,11 @@ async def run_orchestrated_mapping(
     layout_confidence_samples: list[float] = []
     low_layout_confidence_hits = 0
     low_layout_confidence_page_types: Counter[str] = Counter()
+    failed_action_count = 0
+    semantic_conflict_count = 0
+    cross_origin_seen = False
+    iframe_seen = False
+    captcha_seen = False
 
     def _enqueue_page(url: str, reason: str) -> None:
         clean = clean_url(url)
@@ -199,6 +218,7 @@ async def run_orchestrated_mapping(
         pages_to_explore.append((url, reason))
 
     async def _cleanup_foreign_tabs() -> str:
+        nonlocal cross_origin_seen
         if not primary_origin_url:
             return ""
         try:
@@ -218,13 +238,14 @@ async def run_orchestrated_mapping(
             try:
                 await browser.close_page(target_id)
                 print(f"[PIPELINE] Closed foreign tab ({tab_url[:60] or 'blank'})")
+                cross_origin_seen = True
             except Exception as e:
                 print(f"[PIPELINE] Failed to close foreign tab {target_id}: {e}")
         return surviving
 
     warm_candidates = rank_warm_start_candidates(warm_start_candidates or [])
     for item in warm_candidates:
-        target_url = (item.get("target_url") or "").strip()
+        target_url = str(item.get("target_url") or "").strip()
         if not target_url:
             continue
         if clean_url(target_url) == clean_url(current_url or start_url):
@@ -283,6 +304,7 @@ async def run_orchestrated_mapping(
             clicked = await click_menu_by_text(browser, pending_menu_task["text"])
             if not clicked:
                 print(f"[PIPELINE] Menu click failed for '{pending_menu_task['text']}', skipping")
+                failed_action_count += 1
                 continue
             await asyncio.sleep(2)
 
@@ -346,6 +368,10 @@ async def run_orchestrated_mapping(
             f"[PIPELINE] LLM analysis: page_type={page_analysis.page_type}, "
             f"menus={len(page_analysis.menu_items)}, zones={len(page_analysis.functional_zones)}"
         )
+        if "iframe" in dom_text.lower():
+            iframe_seen = True
+        if "captcha" in dom_text.lower() or page_analysis.page_type == "login":
+            captcha_seen = True
         if low_layout_conf:
             low_layout_confidence_page_types[page_analysis.page_type] += 1
 
@@ -431,11 +457,12 @@ async def run_orchestrated_mapping(
         try:
             try:
                 page = await browser.get_current_page()
-                _ = await capture_composite_fingerprint(
-                    page,
-                    layout_enabled=layout_enabled,
-                    layout_limit=layout_limit,
-                )
+                if page is not None:
+                    _ = await capture_composite_fingerprint(
+                        page,
+                        layout_enabled=layout_enabled,
+                        layout_limit=layout_limit,
+                    )
             except Exception:
                 pass
             explore_result = await explorer.explore_page(
@@ -452,6 +479,9 @@ async def run_orchestrated_mapping(
             all_zones.extend(explore_result.zones)
             if explore_result.history:
                 all_history.extend(explore_result.history)
+            semantic_conflict_count += int(
+                getattr(explore_result, "semantic_conflict_count", 0) or 0
+            )
 
             explored_urls.append(current_page_url)
             pages_explored.add(url_clean)
@@ -495,6 +525,7 @@ async def run_orchestrated_mapping(
                 break
         except Exception as e:
             print(f"[PIPELINE] ReActExplorer failed: {e}")
+            failed_action_count += 1
             pages_explored.add(url_clean)
             await ensure_browser_ready(browser, url)
             continue
@@ -533,11 +564,36 @@ async def run_orchestrated_mapping(
     result.history = all_history
     result.menus = menu_items_discovered
     result.zone_hints = zones_discovered
-    result.layout_evidence = layout_evidence
-    result.layout_metrics = summarize_layout_metrics(
+    result.layout_evidence = [dict(item) for item in layout_evidence]
+    result.layout_metrics = dict(
+        summarize_layout_metrics(
         samples=layout_confidence_samples,
         low_confidence_hits=low_layout_confidence_hits,
         low_confidence_page_types=dict(low_layout_confidence_page_types),
         evidence_count=len(layout_evidence),
+        )
     )
+    intervention_tasks = evaluate_intervention_need(
+        session_id=session_id,
+        source_url=current_url or start_url,
+        page_type="mixed",
+        low_layout_confidence_hits=low_layout_confidence_hits,
+        failed_action_count=failed_action_count,
+        semantic_conflict_count=semantic_conflict_count,
+        has_cross_origin=cross_origin_seen,
+        has_iframe=iframe_seen,
+        has_captcha=captcha_seen,
+    )
+    result.intervention_tasks = [
+        {
+            "task_id": task.task_id,
+            "reason": task.reason,
+            "source_url": task.source_url,
+            "page_type": task.page_type,
+            "context": task.context,
+            "status": task.status,
+        }
+        for task in intervention_tasks
+    ]
+    result.semantic_conflict_count = semantic_conflict_count
     return result
