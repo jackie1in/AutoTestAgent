@@ -18,10 +18,12 @@ from urllib.parse import parse_qsl, urlparse
 from browser_use.browser.session import BrowserSession as Browser
 
 from graph_agent.cartography.base_agent import BaseAgent
+from graph_agent.cartography.captcha import solve_captcha_from_page
 from graph_agent.cartography.inference_core import (
     SemanticInferenceInput,
     infer_transition_semantics,
 )
+from graph_agent.cartography.login import detect_login_info
 from graph_agent.cartography.react_prompts import (
     build_system_prompt,
     build_user_prompt,
@@ -335,7 +337,41 @@ class ReActExplorer(BaseAgent):
                 case "extract_menu":
                     return "Menu extraction delegated to pipeline analysis"
                 case "solve_captcha":
-                    return "Captcha solving delegated to runner auto-login flow"
+                    page = await self.browser.get_current_page()
+                    login_info = await detect_login_info(page)
+                    # Always attempt captcha extraction; detect_login_info may miss captcha img hints.
+                    captcha_code = await solve_captcha_from_page(page, login_info, self.llm)
+                    input_index = params.get("input_index")
+                    if captcha_code and input_index is not None:
+                        input_result = await controller.input_text(input_index, captcha_code)
+                        return f"Solved captcha and filled [{input_index}]: {input_result.message}"
+                    if captcha_code:
+                        fill_script = r"""
+                        (...args) => {
+                            const [captchaCode] = args;
+                            const inputs = document.querySelectorAll('input');
+                            for (const inp of inputs) {
+                                const t = inp.type || 'text';
+                                if (t === 'password') continue;
+                                const sig = ((inp.name || '') + (inp.id || '') + (inp.placeholder || '') + (inp.className || '')).toLowerCase();
+                                if (/captcha|验证码|verify.*code|auth.*code|code/i.test(sig)) {
+                                    inp.focus();
+                                    const proto = Object.getPrototypeOf(inp);
+                                    const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+                                    if (desc && desc.set) desc.set.call(inp, captchaCode); else inp.value = captchaCode;
+                                    inp.dispatchEvent(new Event('input', { bubbles: true }));
+                                    inp.dispatchEvent(new Event('change', { bubbles: true }));
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }
+                        """
+                        filled = bool(await page.evaluate(fill_script, captcha_code))
+                        if filled:
+                            return "Solved captcha and filled captcha input via semantic match"
+                        return "Solved captcha but failed to locate captcha input field"
+                    return "Captcha solve returned empty code"
                 case _:
                     return f"Unknown action: {action_type}"
         except Exception as e:

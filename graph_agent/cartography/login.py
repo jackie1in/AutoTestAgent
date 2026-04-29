@@ -6,12 +6,14 @@ import os
 import re
 from typing import TYPE_CHECKING, cast
 
+from graph_agent.cartography.captcha import solve_captcha_from_page
 from graph_agent.cartography.types import FillResult, LoginInfo
 
 if TYPE_CHECKING:
     from browser_use.actor.page import Page
     from browser_use.browser.session import BrowserSession as Browser
     from browser_use.llm.base import BaseChatModel
+
 
 LOGIN_DETECT_SCRIPT = r"""
 (...args) => {
@@ -232,8 +234,49 @@ async def fill_login_form_via_evaluate(
     return cast(FillResult, parsed)
 
 
+async def refresh_captcha_on_page(page: "Page", login_info: LoginInfo) -> bool:
+    captcha_id = str(login_info.get("captchaId") or "")
+    refresh_script = r"""
+    (...args) => {
+        const [captchaId] = args;
+        let target = null;
+        if (captchaId) {
+            target = document.getElementById(captchaId);
+        }
+        if (!target) {
+            for (const img of document.querySelectorAll("img")) {
+                const sig = ((img.src || "") + (img.alt || "") + (img.id || "") + (img.className || "")).toLowerCase();
+                if (/captcha|验证码|verify|auth|code/.test(sig)) {
+                    target = img;
+                    break;
+                }
+            }
+        }
+        if (!target) {
+            for (const canvas of document.querySelectorAll("canvas")) {
+                const sig = ((canvas.id || "") + (canvas.className || "")).toLowerCase();
+                if (/captcha|验证码|verify|auth|code/.test(sig)) {
+                    target = canvas;
+                    break;
+                }
+            }
+        }
+        if (!target || typeof target.click !== "function") {
+            return false;
+        }
+        target.click();
+        return true;
+    }
+    """
+    try:
+        refreshed = await page.evaluate(refresh_script, captcha_id)
+        return bool(refreshed)
+    except Exception as e:
+        print(f"[ORCH-AUTO_LOGIN] Captcha refresh failed: {e}")
+        return False
+
+
 async def try_auto_login_orchestrated(browser: "Browser", llm: "BaseChatModel") -> bool:
-    _ = llm
     username = (os.getenv("MAPPING_USERNAME") or "").strip()
     password = (os.getenv("MAPPING_PASSWORD") or "").strip()
     if not username or not password:
@@ -253,8 +296,30 @@ async def try_auto_login_orchestrated(browser: "Browser", llm: "BaseChatModel") 
     if not login_info or not login_info.get("hasLogin"):
         return False
 
-    # Captcha solving has been delegated to the LLM exploration prompt flow.
     captcha_code = ""
+    if login_info.get("hasCaptcha"):
+        has_captcha_input = bool(login_info.get("hasCaptchaInput"))
+        try:
+            captcha_code = await solve_captcha_from_page(page, login_info, llm)
+            if captcha_code:
+                print(f"[ORCH-AUTO_LOGIN] Captcha solved with code '{captcha_code}'.")
+            else:
+                print("[ORCH-AUTO_LOGIN] Captcha detected but solver returned empty code.")
+                if has_captcha_input:
+                    refreshed = await refresh_captcha_on_page(page, login_info)
+                    if refreshed:
+                        print("[ORCH-AUTO_LOGIN] Captcha refreshed. Retrying solve once.")
+                        await asyncio.sleep(0.6)
+                        captcha_code = await solve_captcha_from_page(page, login_info, llm)
+                        if captcha_code:
+                            print(f"[ORCH-AUTO_LOGIN] Captcha solved after refresh with code '{captcha_code}'.")
+                        else:
+                            print("[ORCH-AUTO_LOGIN] Captcha still unsolved after refresh retry.")
+                else:
+                    print("[ORCH-AUTO_LOGIN] Skip captcha refresh retry because captcha input is not detected.")
+        except Exception as e:
+            print(f"[ORCH-AUTO_LOGIN] Captcha solving failed: {e}")
+            captcha_code = ""
 
     fill_result = await fill_login_form_via_evaluate(
         page,

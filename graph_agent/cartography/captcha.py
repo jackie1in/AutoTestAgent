@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, cast
 
 from browser_use.llm.messages import (
@@ -10,6 +11,7 @@ from browser_use.llm.messages import (
     UserMessage,
 )
 
+from graph_agent.lib.page_controller import PageController
 from graph_agent.cartography.types import LoginInfo
 
 if TYPE_CHECKING:
@@ -42,7 +44,57 @@ def _normalize_captcha_code(raw_code: str) -> str:
     cleaned = raw_code.replace("```", "").replace("`", "").strip()
     if cleaned.lower() in ("unknown", "", "n/a"):
         return ""
-    return "".join(ch for ch in cleaned if ch.isalnum())
+    # Handle arithmetic captchas like "9+8=?" or "9*3=?".
+    expr = cleaned.replace(" ", "").replace("×", "*").replace("x", "*").replace("X", "*").replace("÷", "/")
+    match = re.search(r"(\d+)([+\-*/])(\d+)", expr)
+    if match:
+        left = int(match.group(1))
+        op = match.group(2)
+        right = int(match.group(3))
+        value: int | None = None
+        if op == "+":
+            value = left + right
+        elif op == "-":
+            value = left - right
+        elif op == "*":
+            value = left * right
+        elif op == "/" and right != 0:
+            value = left // right if left % right == 0 else None
+        if value is not None:
+            return str(value)
+    fallback = "".join(ch for ch in cleaned if ch.isalnum())
+    return fallback
+
+
+def _needs_arithmetic_retry(raw_code: str) -> bool:
+    raw = (raw_code or "").strip()
+    if not raw:
+        return False
+    has_equal_or_qmark = ("=" in raw or "?" in raw or "？" in raw)
+    has_operator = bool(re.search(r"[+\-*/×xX÷]", raw))
+    return has_equal_or_qmark and not has_operator
+
+
+async def _recognize_arithmetic_with_candidates(
+    image_data_urls: list[str],
+    llm: "BaseChatModel",
+) -> str:
+    content: list[ContentPartTextParam | ContentPartImageParam] = [
+        ContentPartTextParam(
+            text=(
+                "You are reading arithmetic CAPTCHA images. "
+                "Return the expression exactly as shown, including operator and symbols, "
+                "e.g. '7+1=?' or '9-3=?'. "
+                "If it is not an arithmetic captcha, return UNKNOWN. "
+                "Output only the expression text."
+            )
+        )
+    ]
+    for idx, data_url in enumerate(image_data_urls, start=1):
+        content.append(ContentPartTextParam(text=f"Arithmetic candidate #{idx}:"))
+        content.append(ContentPartImageParam(image_url=ImageURL(url=data_url, detail="high")))
+    result = await llm.ainvoke([UserMessage(content=content)])
+    return str(result.completion or "")
 
 
 async def recognize_captcha_with_candidates(
@@ -80,7 +132,13 @@ async def recognize_captcha_with_candidates(
         ]
         result = await llm.ainvoke(messages)
         raw_code = str(result.completion or "")
-        return _normalize_captcha_code(raw_code)
+        normalized_code = _normalize_captcha_code(raw_code)
+        if _needs_arithmetic_retry(raw_code):
+            retry_raw = await _recognize_arithmetic_with_candidates(normalized_urls, llm)
+            retry_normalized = _normalize_captcha_code(retry_raw)
+            if retry_normalized:
+                normalized_code = retry_normalized
+        return normalized_code
     except Exception as e:
         print(f"[CAPTCHA] LLM recognition failed with exception: {e}")
         return ""
@@ -109,6 +167,90 @@ async def solve_captcha_from_page(
             return
         if candidate not in image_data_urls:
             image_data_urls.append(candidate)
+
+    # Strategy 0: use browser-use indexed DOM (selector_map) to locate captcha image first.
+    try:
+        bs = getattr(page, "_browser_session", None)
+        if bs is not None:
+            controller = PageController(bs)
+            await controller.update_tree()
+            captcha_id_norm = str(captcha_id or "").strip().lower()
+            input_xpaths: list[str] = []
+
+            for node in (controller.selector_map or {}).values():
+                tag = str(getattr(node, "tag_name", "") or "").lower()
+                if tag != "input":
+                    continue
+                attrs = getattr(node, "attributes", {}) or {}
+                inp_type = str(attrs.get("type") or "").lower()
+                if inp_type == "password":
+                    continue
+                sig = " ".join(
+                    [
+                        str(attrs.get("id") or ""),
+                        str(attrs.get("name") or ""),
+                        str(attrs.get("placeholder") or ""),
+                        str(attrs.get("class") or ""),
+                        str(getattr(node, "node_value", "") or ""),
+                    ]
+                ).lower()
+                if re.search(r"captcha|验证码|verify.*code|auth.*code|code", sig):
+                    xp = str(getattr(node, "xpath", "") or "")
+                    if xp:
+                        input_xpaths.append(xp)
+
+            def _xpath_proximity_score(img_xpath: str) -> int:
+                if not img_xpath or not input_xpaths:
+                    return 0
+                best = 0
+                img_parts = [p for p in img_xpath.split("/") if p]
+                for input_xpath in input_xpaths:
+                    in_parts = [p for p in input_xpath.split("/") if p]
+                    common = 0
+                    for a, b in zip(img_parts, in_parts):
+                        if a != b:
+                            break
+                        common += 1
+                    if common > best:
+                        best = common
+                return best
+
+            ranked_img_indices: list[tuple[int, int]] = []
+            for idx, node in (controller.selector_map or {}).items():
+                tag = str(getattr(node, "tag_name", "") or "").lower()
+                if tag != "img":
+                    continue
+                attrs = getattr(node, "attributes", {}) or {}
+                sig = " ".join(
+                    [
+                        str(attrs.get("id") or ""),
+                        str(attrs.get("name") or ""),
+                        str(attrs.get("alt") or ""),
+                        str(attrs.get("class") or ""),
+                        str(attrs.get("src") or ""),
+                        str(getattr(node, "node_value", "") or ""),
+                    ]
+                ).lower()
+                score = 0
+                if captcha_id_norm and str(attrs.get("id") or "").strip().lower() == captcha_id_norm:
+                    score += 8
+                if re.search(r"captcha|验证码|verify|auth|code", sig):
+                    score += 4
+                if "data:image" in sig:
+                    score += 2
+                score += _xpath_proximity_score(str(getattr(node, "xpath", "") or ""))
+                if score > 0:
+                    ranked_img_indices.append((score, int(idx)))
+
+            ranked_img_indices.sort(reverse=True)
+            for _, img_idx in ranked_img_indices[:3]:
+                extracted = await controller.extract_captcha_image(img_idx)
+                if extracted.success and extracted.message:
+                    _add_candidate(f"data:image/png;base64,{extracted.message}")
+                if image_data_urls:
+                    break
+    except Exception as e:
+        print(f"[CAPTCHA] Strategy 0 (browser-use selector_map) failed: {e}")
 
     if captcha_tag == "img":
         print(f"[CAPTCHA] Strategy 1: captcha is <img>. src={captcha_src if captcha_src else 'empty'}")
