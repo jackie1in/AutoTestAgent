@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from graph_agent.cartography.config import resolve_knowledge_trigger_profile
 from graph_agent.graph.pathfinding import (
     get_path_from_query,
     get_path_from_nl_query,
@@ -40,6 +41,14 @@ logger = logging.getLogger(__name__)
 _neo4j_driver: Any | None = None
 _embedder: Any | None = None
 _graphrag_available: bool | None = None
+_ALLOWED_KNOWLEDGE_PROFILES = {"conservative", "balanced", "aggressive"}
+
+
+def _normalize_knowledge_profile(value: str) -> str:
+    profile = (value or "").strip().lower()
+    if profile in _ALLOWED_KNOWLEDGE_PROFILES:
+        return profile
+    return "balanced"
 
 
 async def _ensure_graphrag() -> tuple[Any, Any] | None:
@@ -196,6 +205,12 @@ class NLPlaybackRequest(BaseModel):
     query: str
     test_data: dict = {}
     wait_for_network: bool = True
+
+
+class KnowledgeSettingsRequest(BaseModel):
+    """Request body for POST /api/settings/knowledge."""
+
+    trigger_profile: str
 
 
 async def _get_graph_from_neo4j(driver) -> dict[str, Any] | None:
@@ -600,6 +615,46 @@ async def get_dashboard():
                 intent_success_rate = (
                     1.0 - (missing_count / edge_count) if edge_count > 0 else 1.0
                 )
+                session_result = await session.run(
+                    """
+                    MATCH (a:App)
+                    WHERE $app_name = '' OR a.name = $app_name
+                    WITH a ORDER BY coalesce(a.last_session_at, a.created_at) DESC LIMIT 1
+                    OPTIONAL MATCH (a)-[:HAS_SESSION]->(sess:Session)
+                    RETURN sess
+                    ORDER BY coalesce(sess.timestamp, sess.created_at) DESC
+                    LIMIT 1
+                    """,
+                    app_name=app_name,
+                )
+                session_record = await session_result.single()
+                sess = session_record.get("sess") if session_record else None
+                knowledge_query_count = 0
+                knowledge_hit_count = 0
+                knowledge_cache_hit_count = 0
+                knowledge_timeout_count = 0
+                knowledge_circuit_open_count = 0
+                knowledge_error_count = 0
+                knowledge_avg_latency_ms = 0.0
+                session_trigger_profile = "balanced"
+                if sess:
+                    knowledge_query_count = int(sess.get("knowledge_query_count", 0) or 0)
+                    knowledge_hit_count = int(sess.get("knowledge_hit_count", 0) or 0)
+                    knowledge_cache_hit_count = int(sess.get("knowledge_cache_hit_count", 0) or 0)
+                    knowledge_timeout_count = int(sess.get("knowledge_timeout_count", 0) or 0)
+                    knowledge_circuit_open_count = int(
+                        sess.get("knowledge_circuit_open_count", 0) or 0
+                    )
+                    knowledge_error_count = int(sess.get("knowledge_error_count", 0) or 0)
+                    knowledge_avg_latency_ms = float(
+                        sess.get("knowledge_avg_latency_ms", 0.0) or 0.0
+                    )
+                    session_trigger_profile = str(
+                        sess.get("knowledge_trigger_profile", "balanced") or "balanced"
+                    )
+                knowledge_trigger_profile = _normalize_knowledge_profile(
+                    resolve_knowledge_trigger_profile()
+                )
                 return {
                     "node_count": node_count,
                     "edge_count": edge_count,
@@ -617,6 +672,17 @@ async def get_dashboard():
                     "state_like_node_ratio": 0.0,
                     "business_intent_edge_ratio": 0.0,
                     "multi_edge_preserved_count": 0,
+                    "knowledge_query_count": knowledge_query_count,
+                    "knowledge_hit_count": knowledge_hit_count,
+                    "knowledge_cache_hit_count": knowledge_cache_hit_count,
+                    "knowledge_timeout_count": knowledge_timeout_count,
+                    "knowledge_circuit_open_count": knowledge_circuit_open_count,
+                    "knowledge_error_count": knowledge_error_count,
+                    "knowledge_avg_latency_ms": round(knowledge_avg_latency_ms, 3),
+                    "knowledge_trigger_profile": knowledge_trigger_profile,
+                    "knowledge_last_session_trigger_profile": _normalize_knowledge_profile(
+                        session_trigger_profile
+                    ),
                 }
     except Exception as e:
         logger.warning("Neo4j dashboard query failed: %s", e)
@@ -638,6 +704,47 @@ async def get_dashboard():
         "state_like_node_ratio": 0.0,
         "business_intent_edge_ratio": 0.0,
         "multi_edge_preserved_count": 0,
+        "knowledge_query_count": 0,
+        "knowledge_hit_count": 0,
+        "knowledge_cache_hit_count": 0,
+        "knowledge_timeout_count": 0,
+        "knowledge_circuit_open_count": 0,
+        "knowledge_error_count": 0,
+        "knowledge_avg_latency_ms": 0.0,
+        "knowledge_trigger_profile": _normalize_knowledge_profile(
+            resolve_knowledge_trigger_profile()
+        ),
+        "knowledge_last_session_trigger_profile": "balanced",
+    }
+
+
+@app.get("/api/settings/knowledge")
+async def get_knowledge_settings():
+    """Return active knowledge trigger settings."""
+    return {
+        "trigger_profile": _normalize_knowledge_profile(
+            resolve_knowledge_trigger_profile()
+        ),
+        "allowed_profiles": sorted(_ALLOWED_KNOWLEDGE_PROFILES),
+    }
+
+
+@app.post("/api/settings/knowledge")
+async def post_knowledge_settings(body: KnowledgeSettingsRequest):
+    """Update active knowledge trigger profile for current process."""
+    profile = _normalize_knowledge_profile(body.trigger_profile)
+    if profile != (body.trigger_profile or "").strip().lower():
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "invalid trigger_profile",
+                "allowed_profiles": sorted(_ALLOWED_KNOWLEDGE_PROFILES),
+            },
+        )
+    os.environ["CARTOGRAPHY_KNOWLEDGE_TRIGGER_PROFILE"] = profile
+    return {
+        "ok": True,
+        "trigger_profile": profile,
     }
 
 

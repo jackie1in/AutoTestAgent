@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import time
 from urllib.parse import parse_qsl, urlparse
 
@@ -109,8 +110,12 @@ class ReActExplorer(BaseAgent):
         initial_actions: list[dict[str, object]] | None = None,
         initial_history: list[dict[str, object]] | None = None,
         extra_system_prompt: str = "",
+        use_vision: bool | str = "auto",
+        vision_detail_level: str = "auto",
     ):
         llm = get_llm()
+        env_use_vision = (os.getenv("BROWSER_USE_USE_VISION") or "").strip()
+        env_vision_detail = (os.getenv("BROWSER_USE_VISION_DETAIL_LEVEL") or "").strip()
         super().__init__(
             task="Explore the page and record all interactive elements and transitions.",
             llm=llm,
@@ -120,6 +125,8 @@ class ReActExplorer(BaseAgent):
             initial_history=initial_history,
             initial_actions=initial_actions,
             start_url="",
+            use_vision=env_use_vision or use_vision,
+            vision_detail_level=env_vision_detail or vision_detail_level,
         )
         self._browser_session = browser_session
         self._controller: PageController | None = None

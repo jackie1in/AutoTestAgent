@@ -19,10 +19,6 @@ from pydantic import BaseModel, Field
 from browser_use.browser.session import BrowserSession as Browser
 from browser_use.llm.base import BaseChatModel
 from graph_agent.cartography import browser_lifecycle, config as cartography_config
-from graph_agent.cartography.captcha import (
-    recognize_captcha_with_fallback,
-    solve_captcha_from_page,
-)
 from graph_agent.cartography.login import (
     click_menu_by_text as login_click_menu_by_text,
     detect_login_info,
@@ -43,20 +39,10 @@ from graph_agent.cartography.types import (
     EvidenceBundleItem,
     FillResult,
     LLMTransitionHint,
-    LoginInfo,
 )
 from graph_agent.llm import get_llm
 from graph_agent.llm.utils import ainvoke_structured
 from graph_agent.lib.observability import initialize_laminar, observe
-from browser_use.llm.messages import (
-    AssistantMessage,
-    ContentPartImageParam,
-    ContentPartTextParam,
-    ImageURL,
-    SystemMessage,
-    UserMessage,
-)
-from graph_agent.lib.captcha_solver import solve_with_ddddocr
 
 if TYPE_CHECKING:
     from browser_use.actor.page import Page
@@ -132,6 +118,34 @@ def _resolve_mapping_channel() -> str | None:
 
 def _setup_browser_use_timeouts():
     cartography_config.setup_browser_use_timeouts()
+
+
+def _resolve_knowledge_on_demand_enabled() -> bool:
+    return cartography_config.resolve_knowledge_on_demand_enabled()
+
+
+def _resolve_knowledge_min_interval_sec() -> float:
+    return cartography_config.resolve_knowledge_min_interval_sec()
+
+
+def _resolve_knowledge_trigger_score_threshold() -> float:
+    return cartography_config.resolve_knowledge_trigger_score_threshold()
+
+
+def _resolve_knowledge_trigger_profile() -> str:
+    return cartography_config.resolve_knowledge_trigger_profile()
+
+
+def _resolve_knowledge_query_timeout_ms() -> int:
+    return cartography_config.resolve_knowledge_query_timeout_ms()
+
+
+def _resolve_knowledge_topk() -> int:
+    return cartography_config.resolve_knowledge_topk()
+
+
+def _resolve_knowledge_release_id() -> str:
+    return cartography_config.resolve_knowledge_release_id()
 
 
 # =============================================================================
@@ -258,8 +272,9 @@ async def _analyze_page_with_llm(
 _PAGE_TYPE_ACTION_POLICY: dict[str, str] = {
     "login": (
         "ACTION POLICY: Login page. If credentials are available via the "
-        "auto-login hint, use them. Otherwise inventory the form fields "
-        "(input/password/captcha) and call done."
+        "auto-login hint, use them. If a captcha exists, identify the captcha "
+        "image near the verification input, read it, fill the captcha field, "
+        "then submit."
     ),
     "form": (
         "ACTION POLICY: Form page. Prefer `input` over `click`. Fill every "
@@ -432,6 +447,7 @@ def _build_login_hint_from_env() -> str:
         "若页面包含登录表单，优先使用以下测试账号完成登录："
         f"{credentials}。"
         "如字段名不同，请根据语义匹配对应输入框。"
+        "若存在验证码，请自行判断验证码图片并识别后填入验证码输入框，再提交登录。"
     )
 
 
@@ -458,67 +474,10 @@ def _as_float(value: object, default: float = 0.0) -> float:
         return default
 
 
-async def _recognize_captcha_with_fallback(image_data_url: str, llm: BaseChatModel) -> str:
-    # Keep local resolver for backward-compatible monkeypatch path in tests.
-    dddd_enabled = _env_bool("CAPTCHA_DDDDOCR_ENABLED", True)
-    dddd_only = _env_bool("CAPTCHA_DDDDOCR_ONLY", False)
-    if dddd_enabled:
-        dddd_code = solve_with_ddddocr(image_data_url)
-        if dddd_code and 3 <= len(dddd_code) <= 8:
-            print(f"[CAPTCHA][ddddocr] recognized code: {dddd_code}")
-            return dddd_code
-        if dddd_code and dddd_only:
-            print(f"[CAPTCHA][ddddocr] only-mode uses code: {dddd_code}")
-            return dddd_code
-        if dddd_only:
-            print("[CAPTCHA][ddddocr] only-mode failed to recognize code.")
-            return ""
-
-    print("[CAPTCHA][fallback-llm] using LLM vision for captcha.")
-    try:
-        messages: list[UserMessage | SystemMessage | AssistantMessage] = [
-            UserMessage(
-                content=[
-                    ContentPartTextParam(
-                        text=(
-                            "You are a CAPTCHA solver. Look at the image carefully and return ONLY the "
-                            "exact characters/numbers/letters shown in the CAPTCHA image. "
-                            "The CAPTCHA is usually 4-6 characters. Pay attention to: "
-                            "- Similar looking characters (0 vs O, 1 vs l vs I, 5 vs S, 8 vs B) "
-                            "- Case sensitivity (uppercase vs lowercase letters) "
-                            "- Do NOT guess; if truly unreadable, return 'UNKNOWN'. "
-                            "Return ONLY the characters, no explanation, no quotes, no markdown."
-                        )
-                    ),
-                    ContentPartImageParam(
-                        image_url=ImageURL(url=image_data_url, detail="high")
-                    ),
-                ]
-            )
-        ]
-        result = await llm.ainvoke(messages)
-        raw_code = str(result.completion or "").strip()
-        code = raw_code.replace("```", "").replace("`", "").strip()
-        if code.lower() in ("unknown", "", "n/a"):
-            return ""
-        return "".join(ch for ch in code if ch.isalnum())
-    except Exception as e:
-        print(f"[CAPTCHA] LLM recognition failed with exception: {e}")
-        return ""
-
-
 def rank_warm_start_candidates(
     candidates: list[dict[str, object]],
 ) -> list[dict[str, object]]:
     return orch_rank_warm_start_candidates(candidates)
-
-
-async def _solve_captcha_with_llm(
-    page: "Page",
-    login_info: LoginInfo,
-    llm: BaseChatModel,
-) -> str:
-    return await solve_captcha_from_page(page, login_info, llm)
 
 
 def _map_llm_zone_type(zone_type: str) -> "ZoneType | None":
@@ -550,13 +509,11 @@ async def _fill_login_form_via_evaluate(
     *,
     username: str,
     password: str,
-    captcha_code: str = "",
 ) -> FillResult:
     return await login_fill_login_form_via_evaluate(
         page,
         username=username,
         password=password,
-        captcha_code=captcha_code,
     )
 
 
@@ -570,6 +527,13 @@ async def _run_orchestrated_mapping(
     max_steps: int,
     time_budget_ms: int = 600_000,
     warm_start_candidates: list[dict[str, object]] | None = None,
+    knowledge_on_demand_enabled: bool | None = None,
+    knowledge_min_interval_sec: float | None = None,
+    knowledge_trigger_score_threshold: float | None = None,
+    knowledge_trigger_profile: str | None = None,
+    knowledge_query_timeout_ms: int | None = None,
+    knowledge_topk: int | None = None,
+    knowledge_release_id: str = "",
 ) -> "CartographyResult":
     return await run_orchestrated_mapping(
         browser=browser,
@@ -581,6 +545,13 @@ async def _run_orchestrated_mapping(
         max_steps=max_steps,
         time_budget_ms=time_budget_ms,
         warm_start_candidates=warm_start_candidates,
+        knowledge_on_demand_enabled=knowledge_on_demand_enabled,
+        knowledge_min_interval_sec=knowledge_min_interval_sec,
+        knowledge_trigger_score_threshold=knowledge_trigger_score_threshold,
+        knowledge_trigger_profile=knowledge_trigger_profile,
+        knowledge_query_timeout_ms=knowledge_query_timeout_ms,
+        knowledge_topk=knowledge_topk,
+        knowledge_release_id=knowledge_release_id,
     )
 
 
@@ -716,28 +687,10 @@ async def run_mapping(
                         current_url,
                     )
 
-                    captcha_code = ""
-                    if login_info.get("hasCaptcha"):
-                        print("[AUTO_LOGIN] CAPTCHA image detected. Attempting to solve...")
-                        captcha_code = await _solve_captcha_with_llm(page, login_info, llm)
-                        if captcha_code:
-                            _log_initial(
-                                {"solve_captcha": {"code": captcha_code}},
-                                f"Solved CAPTCHA: {captcha_code}",
-                                current_url,
-                            )
-                        else:
-                            _log_initial(
-                                {"solve_captcha": {"code": "", "status": "failed"}},
-                                "Failed to solve CAPTCHA",
-                                current_url,
-                            )
-
                     fill_result = await _fill_login_form_via_evaluate(
                         page,
                         username=username,
                         password=password,
-                        captcha_code=captcha_code,
                     )
                     if not fill_result.get("success"):
                         try:
@@ -749,7 +702,6 @@ async def run_mapping(
                                 page,
                                 username=username,
                                 password=password,
-                                captcha_code=captcha_code,
                             )
 
                     if fill_result.get("success") and fill_result.get("submitClicked"):
@@ -758,7 +710,6 @@ async def run_mapping(
                                 "input_text": {
                                     "username": username,
                                     "password": "***",
-                                    "captcha": captcha_code or "",
                                 },
                                 "click": {"target": "submit"},
                             },
@@ -816,6 +767,14 @@ async def run_mapping(
         except Exception as e:
             print(f"[PIPELINE] Warm-start candidate query skipped: {e}")
 
+        knowledge_on_demand_enabled = _resolve_knowledge_on_demand_enabled()
+        knowledge_min_interval_sec = _resolve_knowledge_min_interval_sec()
+        knowledge_trigger_score_threshold = _resolve_knowledge_trigger_score_threshold()
+        knowledge_trigger_profile = _resolve_knowledge_trigger_profile()
+        knowledge_query_timeout_ms = _resolve_knowledge_query_timeout_ms()
+        knowledge_topk = _resolve_knowledge_topk()
+        knowledge_release_id = _resolve_knowledge_release_id()
+
         # Check for shutdown request before running
         if browser_lifecycle.is_shutdown_requested():
             print("[INFO] Shutdown requested before agent run, cleaning up...")
@@ -832,6 +791,13 @@ async def run_mapping(
                 session_id=session_id,
                 max_steps=max_steps,
                 warm_start_candidates=warm_start_candidates,
+                knowledge_on_demand_enabled=knowledge_on_demand_enabled,
+                knowledge_min_interval_sec=knowledge_min_interval_sec,
+                knowledge_trigger_score_threshold=knowledge_trigger_score_threshold,
+                knowledge_trigger_profile=knowledge_trigger_profile,
+                knowledge_query_timeout_ms=knowledge_query_timeout_ms,
+                knowledge_topk=knowledge_topk,
+                knowledge_release_id=knowledge_release_id,
             )
         except asyncio.CancelledError:
             print("[INFO] Orchestrated exploration cancelled, cleaning up...")

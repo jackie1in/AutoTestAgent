@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from graph_agent.neo4j_client.driver import Neo4jDriver
 from graph_agent.neo4j_client.repository import GraphRepository
@@ -134,6 +135,20 @@ class GraphManager:
         stats: dict[str, Any]
     ) -> None:
         """Update session with various stats."""
+        raw_tasks = stats.get("intervention_tasks", [])
+        task_ids: list[str] = []
+        if isinstance(raw_tasks, list):
+            for task in raw_tasks:
+                if isinstance(task, dict):
+                    tid = str(task.get("task_id") or "").strip()
+                    if tid:
+                        task_ids.append(tid)
+                elif task is not None:
+                    text = str(task).strip()
+                    if text:
+                        task_ids.append(text)
+        tasks_json = json.dumps(raw_tasks, ensure_ascii=False)
+
         # Convert stats to a format suitable for Neo4j properties
         query = """
         MATCH (s:Session {id: $session_id})
@@ -151,6 +166,7 @@ class GraphManager:
             s.auto_transition_count = $auto_transition_count,
             s.intervention_task_count = $intervention_task_count,
             s.intervention_tasks = $intervention_tasks,
+            s.intervention_tasks_json = $intervention_tasks_json,
             s.current_release_id = $current_release_id,
             s.latest_ingest_version_id = $latest_ingest_version_id,
             s.name = coalesce(s.focus, s.id)
@@ -171,7 +187,8 @@ class GraphManager:
             manual_transition_count=stats.get("manual_transition_count", 0),
             auto_transition_count=stats.get("auto_transition_count", 0),
             intervention_task_count=stats.get("intervention_task_count", 0),
-            intervention_tasks=stats.get("intervention_tasks", []),
+            intervention_tasks=task_ids,
+            intervention_tasks_json=tasks_json,
             current_release_id=stats.get("current_release_id", ""),
             latest_ingest_version_id=stats.get("latest_ingest_version_id", ""),
         )

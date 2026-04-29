@@ -50,12 +50,14 @@ def get_format_instructions(output_format: type[BaseModel]) -> str:
         "4. For fields with 'anyOf' (union types), choose ONE of the options and include ONLY that option's fields",
         "5. Do NOT include extra fields not defined in the schema",
         "6. Field types must match exactly (string, number, boolean, object, array)",
+        "7. Do NOT output the schema itself (no 'properties', 'required', '$defs', or 'additionalProperties' as top-level output)",
+        "8. Your output must be an INSTANCE object, not a schema/definition/template",
     ]
     
     # Add required fields info
     required = schema.get("required", [])
     if required:
-        lines.append(f"7. Required top-level fields: {', '.join(required)}")
+        lines.append(f"9. Required top-level fields: {', '.join(required)}")
     
     # Add anyOf guidance if present
     anyof_fields = _find_anyof_fields(schema)
@@ -255,9 +257,20 @@ async def ainvoke_structured(
                 
         except Exception as e:
             last_error = e
+            required_fields = []
+            if hasattr(output_format, "model_fields"):
+                required_fields = [
+                    name
+                    for name, field in output_format.model_fields.items()
+                    if getattr(field, "is_required", lambda: False)()
+                ]
             logger.warning(
-                "LLM error (attempt %d/%d): %s",
-                attempt + 1, max_retries, str(e)[:200]
+                "LLM error (attempt %d/%d) | schema=%s required=%s | err=%s",
+                attempt + 1,
+                max_retries,
+                output_format.__name__,
+                required_fields,
+                str(e)[:600],
             )
             if attempt < max_retries - 1:
                 await asyncio.sleep(0.5 * (attempt + 1))

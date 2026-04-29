@@ -35,9 +35,56 @@
       align-items: center;
       justify-content: space-between;
       flex-shrink: 0;
+      gap: 0.75rem;
     }
     h1 { font-size: 1rem; margin: 0; color: var(--accent); }
     #status { font-size: 0.75rem; color: var(--muted); }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      min-width: 0;
+    }
+    #dashboard-summary {
+      display: flex;
+      gap: 0.4rem;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      font-size: 0.7rem;
+    }
+    .profile-control {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.72rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    #knowledge-profile-select {
+      padding: 0.15rem 0.35rem;
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--muted);
+      border-radius: 6px;
+      font: inherit;
+      font-size: 0.72rem;
+    }
+    #knowledge-profile-select:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    .metric-pill {
+      padding: 0.15rem 0.45rem;
+      border: 1px solid var(--muted);
+      border-radius: 999px;
+      color: var(--text);
+      background: var(--surface);
+      white-space: nowrap;
+    }
+    .metric-pill.warn {
+      border-color: var(--error);
+      color: var(--error);
+    }
     main {
       flex: 1;
       display: flex;
@@ -165,7 +212,18 @@
 <body>
   <header>
     <h1>Graph Agent</h1>
-    <span id="status">就绪</span>
+    <div class="header-right">
+      <span id="status">就绪</span>
+      <label class="profile-control" for="knowledge-profile-select">
+        策略
+        <select id="knowledge-profile-select" aria-label="knowledge-profile-select">
+          <option value="conservative">conservative</option>
+          <option value="balanced">balanced</option>
+          <option value="aggressive">aggressive</option>
+        </select>
+      </label>
+      <div id="dashboard-summary" aria-label="dashboard-summary"></div>
+    </div>
   </header>
   <main>
     <div id="graph-panel">
@@ -197,6 +255,8 @@
       const chatInput = document.getElementById("chat-input");
       const chatSendBtn = document.getElementById("chat-send");
       const statusEl = document.getElementById("status");
+      const knowledgeProfileSelect = document.getElementById("knowledge-profile-select");
+      const dashboardSummaryEl = document.getElementById("dashboard-summary");
       const quickActionsEl = document.getElementById("quick-actions");
 
       let network = null;
@@ -219,7 +279,76 @@
       }
 
       function escapeHtml(s) {
-        return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      }
+
+      function fmtRate(value) {
+        if (typeof value !== "number" || !Number.isFinite(value)) return "0.0%";
+        return (value * 100).toFixed(1) + "%";
+      }
+
+      function renderDashboardSummary(data) {
+        if (!dashboardSummaryEl) return;
+        const queryCount = Number(data.knowledge_query_count || 0);
+        const hitCount = Number(data.knowledge_hit_count || 0);
+        const timeoutCount = Number(data.knowledge_timeout_count || 0);
+        const avgLatency = Number(data.knowledge_avg_latency_ms || 0);
+        const profile = String(data.knowledge_trigger_profile || "balanced");
+        const hitRate = queryCount > 0 ? (hitCount / queryCount) : 0;
+        const timeoutRate = queryCount > 0 ? (timeoutCount / queryCount) : 0;
+        const timeoutCls = timeoutRate >= 0.2 ? "metric-pill warn" : "metric-pill";
+
+        dashboardSummaryEl.innerHTML = [
+          '<span class="metric-pill">策略: ' + escapeHtml(profile) + '</span>',
+          '<span class="metric-pill">查询: ' + queryCount + '</span>',
+          '<span class="metric-pill">命中率: ' + fmtRate(hitRate) + '</span>',
+          '<span class="' + timeoutCls + '">超时率: ' + fmtRate(timeoutRate) + '</span>',
+          '<span class="metric-pill">延迟: ' + avgLatency.toFixed(1) + 'ms</span>'
+        ].join("");
+      }
+
+      function loadKnowledgeSettings() {
+        if (!knowledgeProfileSelect) return;
+        fetch("/api/settings/knowledge")
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            const current = String(data.trigger_profile || "balanced");
+            knowledgeProfileSelect.value = current;
+          })
+          .catch(function () {
+            // Keep silent and keep default option.
+          });
+      }
+
+      function updateKnowledgeProfile(profile) {
+        if (!knowledgeProfileSelect) return Promise.resolve();
+        knowledgeProfileSelect.disabled = true;
+        return fetch("/api/settings/knowledge", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ trigger_profile: profile }),
+        })
+          .then(function (r) {
+            if (!r.ok) {
+              return r.json().then(function (body) {
+                throw new Error(body.error || ("更新失败: " + r.status));
+              });
+            }
+            return r.json();
+          })
+          .then(function (data) {
+            const applied = String(data.trigger_profile || "balanced");
+            knowledgeProfileSelect.value = applied;
+            addMessage("已切换按需查知识策略: " + applied, "msg-success");
+            loadDashboardSummary();
+          })
+          .catch(function (err) {
+            addMessage("策略切换失败: " + err.message, "msg-error");
+            loadKnowledgeSettings();
+          })
+          .finally(function () {
+            knowledgeProfileSelect.disabled = false;
+          });
       }
 
       function setStatus(text, playing) {
@@ -308,9 +437,21 @@
             const nodeCount = (data.nodes || []).length;
             const edgeCount = (data.edges || []).length;
             setStatus("节点: " + nodeCount + " | 边: " + edgeCount);
+            loadDashboardSummary();
           })
           .catch(function (err) {
             addMessage("加载图谱失败: " + err.message, "msg-error");
+          });
+      }
+
+      function loadDashboardSummary() {
+        fetch("/api/dashboard")
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            renderDashboardSummary(data || {});
+          })
+          .catch(function () {
+            // Keep silent and preserve previous summary.
           });
       }
 
@@ -564,6 +705,12 @@
         if (network) network.fit();
       });
 
+      if (knowledgeProfileSelect) {
+        knowledgeProfileSelect.addEventListener("change", function () {
+          updateKnowledgeProfile(knowledgeProfileSelect.value);
+        });
+      }
+
       // --- SSE graph update stream ---
       function connectIntentStream() {
         var es = new EventSource("/api/graph/stream");
@@ -584,9 +731,12 @@
       // Init
       addMessage("Graph Agent 已就绪。输入命令开始探索，或点击快捷标签。", "msg-system");
       loadGraph();
+      loadDashboardSummary();
+      loadKnowledgeSettings();
       loadIntents();
       connectIntentStream();
       bindChipListeners();
+      setInterval(loadDashboardSummary, 15000);
     })();
   </script>
 </body>

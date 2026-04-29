@@ -7,7 +7,6 @@ import re
 from typing import TYPE_CHECKING, cast
 
 from graph_agent.cartography.types import FillResult, LoginInfo
-from graph_agent.cartography.captcha import solve_captcha_from_page
 
 if TYPE_CHECKING:
     from browser_use.actor.page import Page
@@ -234,6 +233,7 @@ async def fill_login_form_via_evaluate(
 
 
 async def try_auto_login_orchestrated(browser: "Browser", llm: "BaseChatModel") -> bool:
+    _ = llm
     username = (os.getenv("MAPPING_USERNAME") or "").strip()
     password = (os.getenv("MAPPING_PASSWORD") or "").strip()
     if not username or not password:
@@ -253,9 +253,8 @@ async def try_auto_login_orchestrated(browser: "Browser", llm: "BaseChatModel") 
     if not login_info or not login_info.get("hasLogin"):
         return False
 
+    # Captcha solving has been delegated to the LLM exploration prompt flow.
     captcha_code = ""
-    if login_info.get("hasCaptcha"):
-        captcha_code = await solve_captcha_from_page(page, login_info, llm)
 
     fill_result = await fill_login_form_via_evaluate(
         page,

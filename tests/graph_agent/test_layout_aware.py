@@ -12,8 +12,10 @@ from graph_agent.cartography.llm_planning import (
     analyze_page_with_llm,
 )
 from graph_agent.cartography.mapping_pipeline import (
+    compute_knowledge_trigger_score,
     collect_layout_context,
     is_low_layout_confidence,
+    should_query_knowledge,
     summarize_layout_metrics,
 )
 
@@ -183,3 +185,29 @@ def test_summarize_layout_metrics():
     assert metrics["layout_low_confidence_hits"] == 2
     assert metrics["layout_low_confidence_page_types"]["dashboard"] == 1
     assert metrics["layout_evidence_count"] == 3
+
+
+def test_knowledge_on_demand_trigger_gate():
+    score = compute_knowledge_trigger_score(
+        low_layout_confidence_hits=2,
+        failed_action_count=2,
+        semantic_conflict_count=1,
+        stuck_steps=2,
+    )
+    assert score >= 2.0
+    assert should_query_knowledge(
+        enabled=True,
+        now_ts=60.0,
+        last_query_ts=0.0,
+        min_interval_sec=15.0,
+        score=score,
+        threshold=2.0,
+    )
+    assert not should_query_knowledge(
+        enabled=False,
+        now_ts=60.0,
+        last_query_ts=0.0,
+        min_interval_sec=15.0,
+        score=score,
+        threshold=2.0,
+    )

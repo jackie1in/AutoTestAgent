@@ -104,14 +104,16 @@ class ChatZhiPu(BaseChatModel):
         extra: dict[str, Any] = {}
         
         if self.thinking is not None:
-            if self.model.lower() == "glm-5":
-                extra["thinking"] = {"type": self.thinking}
-                if self.thinking == "enabled":
-                    extra["thinking"]["clear_thinking"] = self.clear_thinking
-            elif self.model.lower().startswith("glm-5.1"):
+            if self.model.lower().startswith("glm-5.1"):
                 extra['chat_template_kwargs'] = {
                     "enable_thinking": self.thinking == "enabled"
                 }
+                
+            else :
+                extra["thinking"] = {"type": self.thinking}
+                if self.thinking == "enabled":
+                    extra["thinking"]["clear_thinking"] = self.clear_thinking
+                    
         return extra if extra else None
 
     def _build_model_params(self) -> dict[str, Any]:
@@ -471,8 +473,25 @@ class ChatZhiPu(BaseChatModel):
                     status_code=500,
                     model=self.name,
                 )
-            
-            parsed = self._parse_json_output(choice.message.content, output_format)
+
+            raw_content = choice.message.content
+            try:
+                parsed = self._parse_json_output(raw_content, output_format)
+            except Exception as e:
+                required_fields = [
+                    name
+                    for name, field in output_format.model_fields.items()
+                    if field.is_required()
+                ]
+                logger.warning(
+                    "[GLM Structured Debug] parse failed | model=%s schema=%s required=%s raw_output=%r err=%s",
+                    self.model,
+                    output_format.__name__,
+                    required_fields,
+                    raw_content,
+                    e,
+                )
+                raise
             return ChatInvokeCompletion[T](
                 completion=parsed,
                 thinking=self._extract_thinking(response),

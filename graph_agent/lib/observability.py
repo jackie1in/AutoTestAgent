@@ -72,10 +72,26 @@ def initialize_laminar() -> bool:
     base_url = (os.getenv("LMNR_BASE_URL") or "").strip()
     if base_url:
         kwargs["base_url"] = base_url
+    http_port = (os.getenv("LMNR_HTTP_PORT") or "").strip()
+    if http_port.isdigit():
+        kwargs["http_port"] = int(http_port)
+    grpc_port = (os.getenv("LMNR_GRPC_PORT") or "").strip()
+    if grpc_port.isdigit():
+        kwargs["grpc_port"] = int(grpc_port)
+
+    force_http = (os.getenv("LMNR_FORCE_HTTP") or "").strip().lower()
+    if force_http in {"1", "true", "yes", "on"}:
+        kwargs["force_http"] = True
 
     try:
         _Laminar.initialize(**kwargs)
-        logger.info("Laminar initialized (base_url=%s).", kwargs.get("base_url", "default"))
+        logger.info(
+            "Laminar initialized (base_url=%s, http_port=%s, grpc_port=%s, force_http=%s).",
+            kwargs.get("base_url", "default"),
+            kwargs.get("http_port", "default"),
+            kwargs.get("grpc_port", "default"),
+            kwargs.get("force_http", False),
+        )
         return True
     except Exception as exc:  # pragma: no cover - runtime env dependent
         logger.warning("Laminar initialize failed: %s", exc)

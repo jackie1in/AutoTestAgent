@@ -51,7 +51,10 @@ class LLMExplorationPlan(BaseModel):
 
 
 PAGE_TYPE_ACTION_POLICY: dict[str, str] = {
-    "login": "ACTION POLICY: Login page. If credentials are available via the auto-login hint, use them.",
+    "login": (
+        "ACTION POLICY: Login page. If credentials are available via the auto-login hint, use them. "
+        "If a captcha exists, identify the captcha image near the verification input, read it, fill the captcha field, then submit."
+    ),
     "form": "ACTION POLICY: Form page. Prefer `input` over `click`, then submit.",
     "list": "ACTION POLICY: List/table page. Prefer row clicks and row-level actions.",
     "detail": "ACTION POLICY: Detail page. Click sub-tabs and primary actions.",
@@ -83,6 +86,7 @@ def build_login_hint_from_env() -> str:
     return (
         "若页面包含登录表单，优先使用以下测试账号完成登录："
         f"{credentials}。如字段名不同，请根据语义匹配对应输入框。"
+        "若存在验证码，请自行判断验证码图片并识别后填入验证码输入框，再提交登录。"
     )
 
 

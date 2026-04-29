@@ -85,6 +85,8 @@ class BaseAgent:
         initial_actions: list[dict[str, object]] | None = None,
         start_step: int = 0,
         start_url: str = "",
+        use_vision: bool | str = "auto",
+        vision_detail_level: str = "auto",
     ):
         self.task = task
         self.llm = llm
@@ -105,6 +107,8 @@ class BaseAgent:
         # Page load tracking
         self._page_load_issue_note: str | None = None
         self._request_failure_log: list[dict[str, object]] = []
+        self._use_vision = self._resolve_use_vision_mode(use_vision)
+        self._vision_detail_level = self._resolve_vision_detail_level(vision_detail_level)
 
         # Supported actions from browser-use registry
         self._supported_actions: set[str] = {
@@ -116,7 +120,32 @@ class BaseAgent:
             "go_back",
             "done",
         }
+        # Keep screenshot action available in auto/true mode.
+        if self._use_vision != "false":
+            self._supported_actions.add("screenshot")
         self._dynamic_action_model = self._build_dynamic_action_model()
+
+    @staticmethod
+    def _resolve_use_vision_mode(value: bool | str) -> str:
+        """Resolve use_vision mode: auto | true | false."""
+        raw = str(value).strip().lower() if not isinstance(value, bool) else ("true" if value else "false")
+        if raw in {"true", "false", "auto"}:
+            return raw
+        env_raw = (os.getenv("BROWSER_USE_USE_VISION") or "").strip().lower()
+        if env_raw in {"true", "false", "auto"}:
+            return env_raw
+        return "auto"
+
+    @staticmethod
+    def _resolve_vision_detail_level(value: str) -> str:
+        """Resolve vision detail level: auto | low | high."""
+        raw = (value or "").strip().lower()
+        if raw in {"auto", "low", "high"}:
+            return raw
+        env_raw = (os.getenv("BROWSER_USE_VISION_DETAIL_LEVEL") or "").strip().lower()
+        if env_raw in {"auto", "low", "high"}:
+            return env_raw
+        return "auto"
 
     # ------------------------------------------------------------------
     # Hook methods for subclasses to override
@@ -518,8 +547,9 @@ Remaining steps: {remaining}
 
     async def _get_browser_snapshot(self) -> tuple[str, str, dict]:
         """Get DOM text, page title, and selector map."""
+        include_screenshot = self._use_vision == "true"
         browser_summary = await self.browser.get_browser_state_summary(
-            include_screenshot=False, include_recent_events=False
+            include_screenshot=include_screenshot, include_recent_events=False
         )
         dom_text = browser_summary.dom_state.llm_representation()
         title = browser_summary.title or ""

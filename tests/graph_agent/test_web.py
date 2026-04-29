@@ -437,6 +437,8 @@ def test_api_dashboard_empty_on_neo4j_failure():
     assert data["edge_count"] == 0
     assert data["intent_missing_count"] == 0
     assert data["intent_success_rate"] == 1.0
+    assert data["knowledge_query_count"] == 0
+    assert data["knowledge_trigger_profile"] == "balanced"
 
 
 def test_api_dashboard_returns_stats():
@@ -461,6 +463,45 @@ def test_api_dashboard_returns_stats():
     assert data["edge_count"] == 2
     assert data["intent_missing_count"] == 1
     assert data["intent_success_rate"] == 0.5
+    assert "knowledge_query_count" in data
+    assert "knowledge_avg_latency_ms" in data
+
+
+def test_api_get_knowledge_settings(monkeypatch):
+    """Knowledge settings endpoint returns current profile and allowed options."""
+    monkeypatch.setenv("CARTOGRAPHY_KNOWLEDGE_TRIGGER_PROFILE", "aggressive")
+    client = TestClient(app)
+    resp = client.get("/api/settings/knowledge")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["trigger_profile"] == "aggressive"
+    assert "balanced" in data["allowed_profiles"]
+
+
+def test_api_post_knowledge_settings_updates_profile():
+    """Knowledge settings endpoint accepts valid trigger profile updates."""
+    client = TestClient(app)
+    resp = client.post(
+        "/api/settings/knowledge",
+        json={"trigger_profile": "conservative"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["trigger_profile"] == "conservative"
+
+
+def test_api_post_knowledge_settings_rejects_invalid_profile():
+    """Knowledge settings endpoint rejects unsupported profiles."""
+    client = TestClient(app)
+    resp = client.post(
+        "/api/settings/knowledge",
+        json={"trigger_profile": "extreme"},
+    )
+    assert resp.status_code == 400
+    data = resp.json()
+    assert "error" in data
+    assert "allowed_profiles" in data
 
 
 # -- /api/playback tests --

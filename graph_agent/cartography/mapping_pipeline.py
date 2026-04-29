@@ -12,11 +12,21 @@ from graph_agent.cartography.browser_lifecycle import is_shutdown_requested
 from graph_agent.cartography.config import (
     clean_url,
     is_http_url,
+    resolve_knowledge_min_interval_sec,
+    resolve_knowledge_on_demand_enabled,
+    resolve_knowledge_query_timeout_ms,
+    resolve_knowledge_topk,
+    resolve_knowledge_trigger_score_threshold,
+    resolve_knowledge_trigger_profile,
     resolve_layout_confidence_retry_enabled,
     resolve_layout_confidence_threshold,
     resolve_layout_aware_enabled,
     resolve_layout_snapshot_limit,
     same_origin,
+)
+from graph_agent.cartography.knowledge_broker import (
+    KnowledgeBroker,
+    KnowledgeQueryInput,
 )
 from graph_agent.cartography.layout_snapshot import (
     build_layout_summary,
@@ -32,7 +42,7 @@ from graph_agent.cartography.llm_planning import (
     build_login_hint_from_env,
     plan_next_exploration_with_llm,
 )
-from graph_agent.cartography.login import click_menu_by_text, is_login_url, try_auto_login_orchestrated
+from graph_agent.cartography.login import click_menu_by_text, is_login_url
 from graph_agent.cartography.types import (
     LLMTransitionHint,
     LayoutEvidenceItem,
@@ -157,6 +167,80 @@ def summarize_layout_metrics(
     }
 
 
+def compute_knowledge_trigger_score(
+    *,
+    low_layout_confidence_hits: int,
+    failed_action_count: int,
+    semantic_conflict_count: int,
+    stuck_steps: int,
+    profile: str = "balanced",
+) -> float:
+    profile_norm = (profile or "balanced").strip().lower()
+    if profile_norm == "aggressive":
+        w_low = 1.3
+        w_fail = 1.4
+        w_conflict = 1.1
+        w_stuck = 1.5
+    elif profile_norm == "conservative":
+        w_low = 0.8
+        w_fail = 0.9
+        w_conflict = 0.7
+        w_stuck = 1.0
+    else:
+        w_low = 1.0
+        w_fail = 1.0
+        w_conflict = 1.0
+        w_stuck = 1.0
+    score = 0.0
+    if low_layout_confidence_hits >= 2:
+        score += (1.0 + min(1.0, (low_layout_confidence_hits - 2) * 0.2)) * w_low
+    if failed_action_count >= 2:
+        score += (1.0 + min(1.0, (failed_action_count - 2) * 0.2)) * w_fail
+    if semantic_conflict_count >= 1:
+        score += (0.8 + min(1.0, (semantic_conflict_count - 1) * 0.2)) * w_conflict
+    if stuck_steps >= 2:
+        score += (1.2 + min(1.0, (stuck_steps - 2) * 0.2)) * w_stuck
+    return round(score, 3)
+
+
+def should_query_knowledge(
+    *,
+    enabled: bool,
+    now_ts: float,
+    last_query_ts: float,
+    min_interval_sec: float,
+    score: float,
+    threshold: float,
+) -> bool:
+    if not enabled:
+        return False
+    if score < threshold:
+        return False
+    if now_ts - last_query_ts < min_interval_sec:
+        return False
+    return True
+
+
+def build_knowledge_hint_text(summary: str, transition_hints: list[dict[str, object]]) -> str:
+    if not summary and not transition_hints:
+        return ""
+    lines = [
+        "HISTORICAL_HINTS (advisory only; always trust current DOM first):",
+    ]
+    if summary:
+        lines.append(f"- summary: {summary}")
+    for item in transition_hints[:3]:
+        lines.append(
+            "- action={action}, selector={selector}, conf={confidence:.2f}".format(
+                action=str(item.get("action") or ""),
+                selector=str(item.get("selector") or ""),
+                confidence=float(item.get("confidence") or 0.0),
+            )
+        )
+    lines.append("- If hint conflicts with current page evidence, ignore the hint.")
+    return "\n".join(lines)
+
+
 @observe(
     name="cartography.run_orchestrated_mapping",
     metadata={"component": "cartography", "stage": "pipeline"},
@@ -171,6 +255,13 @@ async def run_orchestrated_mapping(
     max_steps: int,
     time_budget_ms: int = 600_000,
     warm_start_candidates: list[dict[str, object]] | None = None,
+    knowledge_on_demand_enabled: bool | None = None,
+    knowledge_min_interval_sec: float | None = None,
+    knowledge_trigger_score_threshold: float | None = None,
+    knowledge_trigger_profile: str | None = None,
+    knowledge_query_timeout_ms: int | None = None,
+    knowledge_topk: int | None = None,
+    knowledge_release_id: str = "",
 ) -> "CartographyResult":
     from graph_agent.cartography.react_explorer import ReActExplorer
     from graph_agent.cartography.snapshot import capture_composite_fingerprint
@@ -205,6 +296,46 @@ async def run_orchestrated_mapping(
     cross_origin_seen = False
     iframe_seen = False
     captcha_seen = False
+    stuck_steps = 0
+    knowledge_enabled = (
+        resolve_knowledge_on_demand_enabled()
+        if knowledge_on_demand_enabled is None
+        else knowledge_on_demand_enabled
+    )
+    knowledge_interval = (
+        resolve_knowledge_min_interval_sec()
+        if knowledge_min_interval_sec is None
+        else max(1.0, knowledge_min_interval_sec)
+    )
+    knowledge_score_threshold = (
+        resolve_knowledge_trigger_score_threshold()
+        if knowledge_trigger_score_threshold is None
+        else max(0.1, knowledge_trigger_score_threshold)
+    )
+    knowledge_profile = (
+        resolve_knowledge_trigger_profile()
+        if knowledge_trigger_profile is None
+        else (knowledge_trigger_profile or "balanced").strip().lower()
+    )
+    knowledge_timeout_ms = (
+        resolve_knowledge_query_timeout_ms()
+        if knowledge_query_timeout_ms is None
+        else max(100, knowledge_query_timeout_ms)
+    )
+    knowledge_topk_val = (
+        resolve_knowledge_topk()
+        if knowledge_topk is None
+        else max(1, knowledge_topk)
+    )
+    knowledge_broker = KnowledgeBroker() if knowledge_enabled else None
+    last_knowledge_query_ts = 0.0
+    knowledge_query_count = 0
+    knowledge_hit_count = 0
+    knowledge_cache_hit_count = 0
+    knowledge_timeout_count = 0
+    knowledge_circuit_open_count = 0
+    knowledge_error_count = 0
+    knowledge_latency_total_ms = 0.0
 
     def _enqueue_page(url: str, reason: str) -> None:
         clean = clean_url(url)
@@ -321,9 +452,7 @@ async def run_orchestrated_mapping(
 
         current_page_url = await browser.get_current_page_url() or url
         if is_login_url(current_page_url):
-            print("[PIPELINE] Still on login page, attempting auto-login...")
-            await try_auto_login_orchestrated(browser, llm)
-            current_page_url = await browser.get_current_page_url() or current_page_url
+            print("[PIPELINE] Login page detected; delegating login (including captcha) to LLM explorer.")
 
         layout_summary = ""
         layout_fingerprint = ""
@@ -433,6 +562,63 @@ async def run_orchestrated_mapping(
         if exploration_guidance:
             explorer_hint += "\n\n" + exploration_guidance
 
+        trigger_score = compute_knowledge_trigger_score(
+            low_layout_confidence_hits=low_layout_confidence_hits,
+            failed_action_count=failed_action_count,
+            semantic_conflict_count=semantic_conflict_count,
+            stuck_steps=stuck_steps,
+            profile=knowledge_profile,
+        )
+        now_ts = loop.time()
+        if knowledge_broker and should_query_knowledge(
+            enabled=knowledge_enabled,
+            now_ts=now_ts,
+            last_query_ts=last_knowledge_query_ts,
+            min_interval_sec=knowledge_interval,
+            score=trigger_score,
+            threshold=knowledge_score_threshold,
+        ):
+            latest_transition = all_transitions[-1] if all_transitions else None
+            recent_selector = ""
+            recent_action = ""
+            if latest_transition is not None:
+                recent_selector = str(getattr(latest_transition, "selector", "") or "")
+                recent_action = str(getattr(latest_transition, "action", "") or "")
+            knowledge_query_count += 1
+            knowledge_result = await knowledge_broker.query(
+                KnowledgeQueryInput(
+                    app_id=app_id,
+                    session_id=session_id,
+                    current_url=current_page_url,
+                    page_type=page_analysis.page_type,
+                    layout_fingerprint=layout_fingerprint,
+                    recent_selector=recent_selector,
+                    recent_action=recent_action,
+                    release_id=knowledge_release_id,
+                    signals={"trigger_score": trigger_score},
+                    top_k=knowledge_topk_val,
+                ),
+                timeout_ms=knowledge_timeout_ms,
+            )
+            last_knowledge_query_ts = now_ts
+            knowledge_latency_total_ms += knowledge_result.meta.query_latency_ms
+            if knowledge_result.meta.cache_hit:
+                knowledge_cache_hit_count += 1
+            if knowledge_result.meta.timed_out:
+                knowledge_timeout_count += 1
+            if knowledge_result.meta.circuit_open:
+                knowledge_circuit_open_count += 1
+            if knowledge_result.meta.error:
+                knowledge_error_count += 1
+            if knowledge_result.transition_hints or knowledge_result.intent_hints or knowledge_result.state_hints:
+                knowledge_hit_count += 1
+                knowledge_hint_text = build_knowledge_hint_text(
+                    knowledge_result.summary,
+                    knowledge_result.transition_hints,
+                )
+                if knowledge_hint_text:
+                    explorer_hint += "\n\n" + knowledge_hint_text
+
         page_cap = {
             "dashboard": 20,
             "welcome": 15,
@@ -455,6 +641,7 @@ async def run_orchestrated_mapping(
             extra_system_prompt=build_login_hint_from_env() + "\n\n" + explorer_hint,
         )
         try:
+            transition_count_before = len(all_transitions)
             try:
                 page = await browser.get_current_page()
                 if page is not None:
@@ -482,6 +669,10 @@ async def run_orchestrated_mapping(
             semantic_conflict_count += int(
                 getattr(explore_result, "semantic_conflict_count", 0) or 0
             )
+            if len(all_transitions) == transition_count_before:
+                stuck_steps += 1
+            else:
+                stuck_steps = 0
 
             explored_urls.append(current_page_url)
             pages_explored.add(url_clean)
@@ -526,6 +717,7 @@ async def run_orchestrated_mapping(
         except Exception as e:
             print(f"[PIPELINE] ReActExplorer failed: {e}")
             failed_action_count += 1
+            stuck_steps += 1
             pages_explored.add(url_clean)
             await ensure_browser_ready(browser, url)
             continue
@@ -572,6 +764,22 @@ async def run_orchestrated_mapping(
         low_confidence_page_types=dict(low_layout_confidence_page_types),
         evidence_count=len(layout_evidence),
         )
+    )
+    result.layout_metrics.update(
+        {
+            "knowledge_query_count": knowledge_query_count,
+            "knowledge_hit_count": knowledge_hit_count,
+            "knowledge_cache_hit_count": knowledge_cache_hit_count,
+            "knowledge_timeout_count": knowledge_timeout_count,
+            "knowledge_circuit_open_count": knowledge_circuit_open_count,
+            "knowledge_error_count": knowledge_error_count,
+            "knowledge_avg_latency_ms": round(
+                knowledge_latency_total_ms / knowledge_query_count, 3
+            )
+            if knowledge_query_count > 0
+            else 0.0,
+            "knowledge_trigger_profile": knowledge_profile,
+        }
     )
     intervention_tasks = evaluate_intervention_need(
         session_id=session_id,

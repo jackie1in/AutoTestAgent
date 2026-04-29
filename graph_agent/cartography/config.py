@@ -124,3 +124,64 @@ def resolve_layout_confidence_threshold() -> float:
     except ValueError:
         return 0.45
     return max(0.1, min(0.95, val))
+
+
+def resolve_knowledge_on_demand_enabled() -> bool:
+    """Enable trigger-based online knowledge query."""
+    return env_bool("CARTOGRAPHY_KNOWLEDGE_ON_DEMAND_ENABLED", False)
+
+
+def resolve_knowledge_min_interval_sec() -> float:
+    raw = (os.getenv("CARTOGRAPHY_KNOWLEDGE_MIN_INTERVAL_SEC") or "").strip()
+    if not raw:
+        return 15.0
+    try:
+        val = float(raw)
+    except ValueError:
+        return 15.0
+    return max(1.0, min(300.0, val))
+
+
+def resolve_knowledge_trigger_score_threshold() -> float:
+    raw = (os.getenv("CARTOGRAPHY_KNOWLEDGE_TRIGGER_SCORE_THRESHOLD") or "").strip()
+    if not raw:
+        return 2.0
+    try:
+        val = float(raw)
+    except ValueError:
+        return 2.0
+    return max(0.1, min(10.0, val))
+
+
+def resolve_knowledge_query_timeout_ms() -> int:
+    raw = (os.getenv("CARTOGRAPHY_KNOWLEDGE_QUERY_TIMEOUT_MS") or "").strip()
+    if not raw:
+        return 1200
+    try:
+        val = int(raw)
+    except ValueError:
+        return 1200
+    return max(100, min(15000, val))
+
+
+def resolve_knowledge_topk() -> int:
+    raw = (os.getenv("CARTOGRAPHY_KNOWLEDGE_TOPK") or "").strip()
+    if not raw:
+        return 5
+    try:
+        val = int(raw)
+    except ValueError:
+        return 5
+    return max(1, min(20, val))
+
+
+def resolve_knowledge_release_id() -> str:
+    return (os.getenv("MAPPING_RELEASE_ID") or "").strip()
+
+
+def resolve_knowledge_trigger_profile() -> str:
+    """Trigger strategy profile: conservative | balanced | aggressive."""
+    raw = (os.getenv("CARTOGRAPHY_KNOWLEDGE_TRIGGER_PROFILE") or "").strip().lower()
+    if raw in {"conservative", "balanced", "aggressive"}:
+        return raw
+    return "balanced"

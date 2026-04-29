@@ -10,9 +10,7 @@ from browser_use.llm.messages import (
     UserMessage,
 )
 
-from graph_agent.cartography.config import env_bool
 from graph_agent.cartography.types import LoginInfo
-from graph_agent.lib.captcha_solver import solve_with_ddddocr
 
 if TYPE_CHECKING:
     from browser_use.actor.page import Page
@@ -37,49 +35,52 @@ async def recognize_captcha_with_fallback(
     image_data_url: str,
     llm: "BaseChatModel",
 ) -> str:
-    dddd_enabled = env_bool("CAPTCHA_DDDDOCR_ENABLED", True)
-    dddd_only = env_bool("CAPTCHA_DDDDOCR_ONLY", False)
+    return await recognize_captcha_with_candidates([image_data_url], llm)
 
-    if dddd_enabled:
-        dddd_code = solve_with_ddddocr(image_data_url)
-        if dddd_code and 3 <= len(dddd_code) <= 8:
-            print(f"[CAPTCHA][ddddocr] recognized code: {dddd_code}")
-            return dddd_code
-        if dddd_code and dddd_only:
-            print(f"[CAPTCHA][ddddocr] only-mode uses code: {dddd_code}")
-            return dddd_code
-        if dddd_only:
-            print("[CAPTCHA][ddddocr] only-mode failed to recognize code.")
-            return ""
 
+def _normalize_captcha_code(raw_code: str) -> str:
+    cleaned = raw_code.replace("```", "").replace("`", "").strip()
+    if cleaned.lower() in ("unknown", "", "n/a"):
+        return ""
+    return "".join(ch for ch in cleaned if ch.isalnum())
+
+
+async def recognize_captcha_with_candidates(
+    image_data_urls: list[str],
+    llm: "BaseChatModel",
+) -> str:
+    normalized_urls = [u for u in image_data_urls if isinstance(u, str) and u.startswith("data:image")]
+    if not normalized_urls:
+        return ""
     print("[CAPTCHA][fallback-llm] using LLM vision for captcha.")
     try:
+        content: list[ContentPartTextParam | ContentPartImageParam] = [
+            ContentPartTextParam(
+                text=(
+                    "You are a CAPTCHA solver. You will receive one or more candidate images from a login page. "
+                    "Only one candidate may contain the captcha. First identify which image is the captcha, "
+                    "then return ONLY the exact captcha characters. "
+                    "The captcha is usually 4-6 characters. Pay attention to: "
+                    "- Similar looking characters (0 vs O, 1 vs l vs I, 5 vs S, 8 vs B) "
+                    "- Case sensitivity (uppercase vs lowercase letters) "
+                    "- Ignore page text, logos, and QR codes. "
+                    "- Do NOT guess; if truly unreadable, return 'UNKNOWN'. "
+                    "Return ONLY the characters, no explanation, no quotes, no markdown."
+                )
+            )
+        ]
+        for idx, data_url in enumerate(normalized_urls, start=1):
+            content.append(ContentPartTextParam(text=f"Candidate image #{idx}:"))
+            content.append(ContentPartImageParam(image_url=ImageURL(url=data_url, detail="high")))
+
         messages = [
             UserMessage(
-                content=[
-                    ContentPartTextParam(
-                        text=(
-                            "You are a CAPTCHA solver. Look at the image carefully and return ONLY the "
-                            "exact characters/numbers/letters shown in the CAPTCHA image. "
-                            "The CAPTCHA is usually 4-6 characters. Pay attention to: "
-                            "- Similar looking characters (0 vs O, 1 vs l vs I, 5 vs S, 8 vs B) "
-                            "- Case sensitivity (uppercase vs lowercase letters) "
-                            "- Do NOT guess; if truly unreadable, return 'UNKNOWN'. "
-                            "Return ONLY the characters, no explanation, no quotes, no markdown."
-                        )
-                    ),
-                    ContentPartImageParam(
-                        image_url=ImageURL(url=image_data_url, detail="high")
-                    ),
-                ]
+                content=content
             )
         ]
         result = await llm.ainvoke(messages)
-        raw_code = str(result.completion or "").strip()
-        code = raw_code.replace("```", "").replace("`", "").strip()
-        if code.lower() in ("unknown", "", "n/a"):
-            return ""
-        return "".join(ch for ch in code if ch.isalnum())
+        raw_code = str(result.completion or "")
+        return _normalize_captcha_code(raw_code)
     except Exception as e:
         print(f"[CAPTCHA] LLM recognition failed with exception: {e}")
         return ""
@@ -95,15 +96,24 @@ async def solve_captcha_from_page(
     captcha_src = login_info.get("captchaSrc", "")
     print(
         f"[CAPTCHA] solve_captcha_from_page called. tag={captcha_tag}, "
-        f"id={captcha_id}, src={captcha_src[:60] if captcha_src else 'empty'}..."
+        f"id={captcha_id}, src={captcha_src if captcha_src else 'empty'}"
     )
 
-    image_data_url: str | None = None
+    image_data_urls: list[str] = []
+
+    def _add_candidate(data_url: str | None) -> None:
+        if not isinstance(data_url, str):
+            return
+        candidate = data_url.strip()
+        if not candidate.startswith("data:image"):
+            return
+        if candidate not in image_data_urls:
+            image_data_urls.append(candidate)
 
     if captcha_tag == "img":
-        print(f"[CAPTCHA] Strategy 1: captcha is <img>. src={captcha_src[:60] if captcha_src else 'empty'}...")
+        print(f"[CAPTCHA] Strategy 1: captcha is <img>. src={captcha_src if captcha_src else 'empty'}")
         if captcha_src.startswith("data:image"):
-            image_data_url = captcha_src
+            _add_candidate(captcha_src)
         elif captcha_src:
             try:
                 fetch_script = f"""
@@ -116,11 +126,11 @@ async def solve_captcha_from_page(
                     }}))
                     .catch(() => null)
                 """
-                image_data_url = await page.evaluate(fetch_script)
+                _add_candidate(await page.evaluate(fetch_script))
             except Exception as e:
                 print(f"[CAPTCHA] Strategy 1 failed: {e}")
 
-    if not image_data_url and captcha_tag == "canvas":
+    if not image_data_urls and captcha_tag == "canvas":
         try:
             canvas_script = f"""
             (...args) => {{
@@ -129,11 +139,44 @@ async def solve_captcha_from_page(
                 return null;
             }}
             """
-            image_data_url = await page.evaluate(canvas_script)
+            _add_candidate(await page.evaluate(canvas_script))
         except Exception as e:
             print(f"[CAPTCHA] Strategy 2 failed: {e}")
 
-    if not image_data_url:
+    if not image_data_urls:
+        try:
+            # Let LLM decide captcha from multiple candidates, avoid static single-element bias.
+            candidates_script = r"""
+            (...args) => {
+                const out = [];
+                const pushUrl = (url) => {
+                    if (typeof url === 'string' && url.startsWith('data:image') && !out.includes(url)) {
+                        out.push(url);
+                    }
+                };
+                for (const img of document.querySelectorAll('img')) {
+                    const sig = ((img.src || '') + (img.alt || '') + (img.id || '') + (img.className || '')).toLowerCase();
+                    if (/captcha|验证码|verify|auth|code/.test(sig) && (img.src || '').startsWith('data:image')) {
+                        pushUrl(img.src);
+                    }
+                }
+                for (const canvas of document.querySelectorAll('canvas')) {
+                    const sig = ((canvas.id || '') + (canvas.className || '')).toLowerCase();
+                    if (/captcha|验证码|verify|auth|code/.test(sig)) {
+                        try { pushUrl(canvas.toDataURL('image/png')); } catch (e) {}
+                    }
+                }
+                return out.slice(0, 6);
+            }
+            """
+            urls_raw = await page.evaluate(candidates_script)
+            if isinstance(urls_raw, list):
+                for item in urls_raw:
+                    _add_candidate(item if isinstance(item, str) else None)
+        except Exception as e:
+            print(f"[CAPTCHA] Candidate collection failed: {e}")
+
+    if not image_data_urls:
         try:
             screenshot_script = f"""
             (...args) => {{
@@ -189,11 +232,11 @@ async def solve_captcha_from_page(
                     )
                     data = result.get("data", "")
                     if data:
-                        image_data_url = f"data:image/png;base64,{data}"
+                        _add_candidate(f"data:image/png;base64,{data}")
         except Exception as e:
             print(f"[CAPTCHA] Strategy 3 failed: {e}")
 
-    if not image_data_url:
+    if not image_data_urls:
         try:
             bs = page._browser_session
             if bs and hasattr(bs, "cdp_client"):
@@ -204,16 +247,18 @@ async def solve_captcha_from_page(
                 )
                 data = result.get("data", "")
                 if data:
-                    image_data_url = f"data:image/png;base64,{data}"
+                    _add_candidate(f"data:image/png;base64,{data}")
         except Exception as e:
             print(f"[CAPTCHA] Strategy 4 failed: {e}")
 
-    if not image_data_url:
+    if not image_data_urls:
         print("[CAPTCHA] All strategies failed. Could not extract CAPTCHA image from page.")
         return ""
 
-    print(f"[CAPTCHA] Sending image to recognizer. data_url length={len(image_data_url)}")
-    code = await recognize_captcha_with_fallback(image_data_url, llm)
+    print(f"[CAPTCHA] Sending {len(image_data_urls)} candidate image(s) to recognizer.")
+    for idx, data_url in enumerate(image_data_urls, start=1):
+        print(f"[CAPTCHA] Candidate #{idx} data_url={data_url}")
+    code = await recognize_captcha_with_candidates(image_data_urls, llm)
     if code:
         print(f"[CAPTCHA] Recognized code: '{code}'")
     else:
