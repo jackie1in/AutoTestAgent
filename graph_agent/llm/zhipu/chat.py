@@ -29,6 +29,13 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 
+def _looks_like_schema_object(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    keys = set(value.keys())
+    return {"properties", "required", "type"}.issubset(keys) and not {"key", "confidence", "summary"}.issubset(keys)
+
+
 @dataclass
 class ChatZhiPu(BaseChatModel):
     """ZhiPu provider using OpenAI-compatible API.
@@ -478,6 +485,16 @@ class ChatZhiPu(BaseChatModel):
             try:
                 parsed = self._parse_json_output(raw_content, output_format)
             except Exception as e:
+                raw_keys: list[str] = []
+                schema_like_output = False
+                try:
+                    raw_obj = json.loads(raw_content)
+                    if isinstance(raw_obj, dict):
+                        raw_keys = list(raw_obj.keys())[:12]
+                        schema_like_output = _looks_like_schema_object(raw_obj)
+                except Exception:
+                    raw_keys = []
+                    schema_like_output = False
                 required_fields = [
                     name
                     for name, field in output_format.model_fields.items()
@@ -491,6 +508,11 @@ class ChatZhiPu(BaseChatModel):
                     raw_content,
                     e,
                 )
+                if schema_like_output:
+                    raise ModelProviderError(
+                        message="SCHEMA_ECHO_STRUCTURED_OUTPUT",
+                        model=self.name,
+                    ) from e
                 raise
             return ChatInvokeCompletion[T](
                 completion=parsed,

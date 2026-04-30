@@ -269,7 +269,6 @@ async def run_orchestrated_mapping(
     from graph_agent.models import State, Transition, Zone
 
     print("[PIPELINE] === LLM-first orchestrated exploration starting ===")
-
     all_states: list[State] = []
     all_transitions: list[Transition] = []
     all_zones: list[Zone] = []
@@ -520,26 +519,48 @@ async def run_orchestrated_mapping(
 
         enqueued_menu_count = 0
         pending_menu_added = 0
+        menu_enqueue_debug: list[dict[str, object]] = []
         already_scanned = clean_url(current_page_url) in menu_scanned_urls
+        is_login_context = (
+            page_analysis.page_type == "login"
+            or bool(page_analysis.is_login_page)
+            or is_login_url(current_page_url)
+        )
         if not already_scanned:
             menu_scanned_urls.add(clean_url(current_page_url))
-            for m in page_analysis.menu_items:
-                text = (m.text or "").strip()
-                href = (m.href or "").strip()
-                full_href = urljoin(current_page_url, href) if href and not href.startswith("http") else href
-                if full_href and is_http_url(full_href):
-                    before = len(pages_to_explore)
-                    _enqueue_page(full_href, f"menu: {text}")
-                    if len(pages_to_explore) > before:
-                        enqueued_menu_count += 1
-                elif text:
-                    key = (current_page_url, text)
-                    if key in menus_clicked:
+            if is_login_context:
+                pass
+            else:
+                for m in page_analysis.menu_items:
+                    text = (m.text or "").strip()
+                    href = (m.href or "").strip()
+                    lower_text = text.lower()
+                    if not href and lower_text in {"首页", "home"}:
+                        # Runtime evidence shows this often represents current-page nav badge.
+                        # Keep queue clean by skipping no-op menu clicks.
                         continue
-                    if any(p["source_url"] == current_page_url and p["text"] == text for p in pending_menus):
-                        continue
-                    pending_menus.append({"text": text, "source_url": current_page_url})
-                    pending_menu_added += 1
+                    full_href = urljoin(current_page_url, href) if href and not href.startswith("http") else href
+                    if full_href and is_http_url(full_href):
+                        before = len(pages_to_explore)
+                        _enqueue_page(full_href, f"menu: {text}")
+                        if len(pages_to_explore) > before:
+                            enqueued_menu_count += 1
+                            if len(menu_enqueue_debug) < 8:
+                                menu_enqueue_debug.append(
+                                    {"type": "url", "text": text[:80], "href": full_href[:120]}
+                                )
+                    elif text:
+                        key = (current_page_url, text)
+                        if key in menus_clicked:
+                            continue
+                        if any(p["source_url"] == current_page_url and p["text"] == text for p in pending_menus):
+                            continue
+                        pending_menus.append({"text": text, "source_url": current_page_url})
+                        pending_menu_added += 1
+                        if len(menu_enqueue_debug) < 8:
+                            menu_enqueue_debug.append(
+                                {"type": "click", "text": text[:80], "href": ""}
+                            )
 
         total_menu_targets = enqueued_menu_count + pending_menu_added
         if (

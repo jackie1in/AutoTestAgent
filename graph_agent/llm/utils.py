@@ -257,6 +257,7 @@ async def ainvoke_structured(
                 
         except Exception as e:
             last_error = e
+            err_text = str(e)
             required_fields = []
             if hasattr(output_format, "model_fields"):
                 required_fields = [
@@ -270,8 +271,11 @@ async def ainvoke_structured(
                 max_retries,
                 output_format.__name__,
                 required_fields,
-                str(e)[:600],
+                err_text[:600],
             )
+            if "SCHEMA_ECHO_STRUCTURED_OUTPUT" in err_text:
+                # Known bad-model behavior: retries are unlikely to recover.
+                break
             if attempt < max_retries - 1:
                 await asyncio.sleep(0.5 * (attempt + 1))
     

@@ -24,7 +24,6 @@ if TYPE_CHECKING:
 from graph_agent.lib.types import ActionResult, BrowserState, PageInfo
 
 logger = logging.getLogger(__name__)
-
 DOMSelectorMap = dict[int, "EnhancedDOMTreeNode"]
 
 # ---------------------------------------------------------------------------
@@ -283,6 +282,36 @@ _PATCH_REACT_JS = """() => {
     roots.forEach(el => el.setAttribute('data-page-agent-not-interactive', 'true'));
 }"""
 
+_CLICK_BY_XPATH_JS = """(xpath) => {
+    const byXpath = (xp) => {
+        if (!xp) return null;
+        try {
+            return document.evaluate(
+                xp,
+                document,
+                null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE,
+                null
+            ).singleNodeValue;
+        } catch (e) {
+            return null;
+        }
+    };
+    const el = byXpath(xpath);
+    if (!(el instanceof HTMLElement)) {
+        return JSON.stringify({success: false, reason: 'not-found'});
+    }
+    try {
+        el.scrollIntoView({block: 'center', inline: 'nearest'});
+    } catch (e) {}
+    try {
+        el.click();
+        return JSON.stringify({success: true, tag: (el.tagName || '').toLowerCase()});
+    } catch (e) {
+        return JSON.stringify({success: false, reason: String(e)});
+    }
+}"""
+
 
 class PageController:
     """Manages DOM state and element interaction entirely via browser-use.
@@ -377,11 +406,44 @@ class PageController:
         Mirrors page-agent: scrollIntoView → hit-test → full pointer/mouse
         event sequence → click activation.
         """
+        node_xpath = ""
+        try:
+            node = self._selector_map.get(index)
+            node_xpath = str(getattr(node, "xpath", "") or "")
+        except Exception:
+            node_xpath = ""
         try:
             self._assert_indexed()
             element = await self._get_element(index)
             if not element:
-                return ActionResult(success=False, message=f"No element at index {index}")
+                keys = [k for k in self._selector_map.keys() if isinstance(k, int)]
+                # Try one forced tree refresh to recover from stale index maps.
+                try:
+                    await self.update_tree()
+                except Exception:
+                    pass
+                refreshed = await self._get_element(index)
+                refreshed_keys = [k for k in self._selector_map.keys() if isinstance(k, int)]
+                if refreshed:
+                    try:
+                        await refreshed.click()
+                        elem_text = self._element_text_map.get(index, str(index))
+                        return ActionResult(
+                            success=True,
+                            message=f"Clicked [{index}] ({elem_text}) via refresh recovery.",
+                        )
+                    except Exception:
+                        pass
+                sample = sorted(refreshed_keys)[:8] if refreshed_keys else []
+                return ActionResult(
+                    success=False,
+                    message=(
+                        f"No element at index {index}. Current valid index range: "
+                        f"[{min(refreshed_keys) if refreshed_keys else 'N/A'}, "
+                        f"{max(refreshed_keys) if refreshed_keys else 'N/A'}], "
+                        f"sample={sample}"
+                    ),
+                )
 
             elem_text = self._element_text_map.get(index, str(index))
 
@@ -400,17 +462,31 @@ class PageController:
             )
         except Exception as e:
             # Fallback to browser-use's native click
-            try:
-                element = await self._get_element(index)
-                if element:
+            element = await self._get_element(index)
+            if element:
+                try:
                     await element.click()
                     elem_text = self._element_text_map.get(index, str(index))
                     return ActionResult(
                         success=True,
                         message=f"Clicked [{index}] ({elem_text}) via CDP fallback.",
                     )
-            except Exception:
-                pass
+                except Exception:
+                    pass
+            # Try DOM-level xpath fallback when backend-node click path is stale.
+            if node_xpath:
+                try:
+                    page = await self._get_page()
+                    raw = await page.evaluate(_CLICK_BY_XPATH_JS, node_xpath)
+                    result = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                    if result.get("success"):
+                        elem_text = self._element_text_map.get(index, str(index))
+                        return ActionResult(
+                            success=True,
+                            message=f"Clicked [{index}] ({elem_text}) via xpath recovery.",
+                        )
+                except Exception:
+                    pass
             return ActionResult(success=False, message=f"Click failed: {e}")
 
     async def input_text(self, index: int, text: str) -> ActionResult:

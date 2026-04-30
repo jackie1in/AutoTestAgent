@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlparse
@@ -92,6 +93,48 @@ _THOUGHT_NOISE_HINTS = (
 # ---------------------------------------------------------------------------
 
 _intent_cache: dict[str, tuple[Intent, str]] = {}
+_intent_schema_echo_short_circuit_until: float = 0.0
+
+
+def _heuristic_intent_fallback(
+    *,
+    action: ActionType,
+    selector: str,
+    source_url: str,
+    target_url: str,
+    param_name: str | None,
+    thought_text: str,
+) -> Intent:
+    selector_l = (selector or "").lower()
+    thought_l = (thought_text or "").lower()
+    src = (source_url or "").lower()
+    tgt = (target_url or "").lower()
+    login_context = any(token in f"{src} {tgt} {selector_l} {thought_l}" for token in ("login", "signin", "auth", "密码", "验证码"))
+
+    if action in (ActionType.FILL, ActionType.RICH_TEXT, ActionType.SELECT):
+        field_raw = (param_name or "").strip() or "field"
+        field = re.sub(r"[^a-z0-9_]+", "_", field_raw.lower()).strip("_") or "field"
+        key = f"{'auth' if login_context else 'form'}.fill.{field}"
+        summary = f"Fill {field} input"
+        return Intent(raw=thought_text or summary, verb="Fill", object=field, summary=summary, key=key, confidence=0.34)
+
+    if action == ActionType.CLICK:
+        if login_context and any(token in selector_l for token in ("submit", "login", "signin", "btn")):
+            key = "auth.click.submit"
+            summary = "Click login submit button"
+            obj = "Login Button"
+        else:
+            key = "elements.click.control"
+            summary = "Click page control"
+            obj = "Control"
+        return Intent(raw=thought_text or summary, verb="Click", object=obj, summary=summary, key=key, confidence=0.31)
+
+    if action == ActionType.NAVIGATE:
+        summary = "Navigate to page"
+        return Intent(raw=thought_text or summary, verb="Navigate", object="Page", summary=summary, key="navigation.page.change", confidence=0.33)
+
+    summary = "Interact with page element"
+    return Intent(raw=thought_text or summary, verb="Interact", object="Element", summary=summary, key="elements.interact.unknown", confidence=0.3)
 
 
 def _should_skip_refine() -> bool:
@@ -122,6 +165,15 @@ def _make_intent_cache_key(
 def clear_intent_cache() -> None:
     """Reset the in-memory intent cache (useful in tests)."""
     _intent_cache.clear()
+
+
+def _schema_echo_cooldown_seconds() -> float:
+    raw = (os.getenv("MAPPING_INTENT_SCHEMA_ECHO_COOLDOWN_SEC") or "").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 300.0
+    return max(30.0, value)
 
 
 def _get_next_goal(thought: dict | object) -> str:
@@ -183,6 +235,7 @@ async def infer_intent_for_context(
     playback_error_hint: str | None = None,
 ) -> tuple[Intent | None, str | None]:
     """Infer intent from context using AI only."""
+    global _intent_schema_echo_short_circuit_until
     # Cache lookup (skip when doing repair inference with playback hints)
     if not playback_error_hint:
         cache_key = _make_intent_cache_key(action, selector, source_url, target_url, param_name)
@@ -191,6 +244,20 @@ async def infer_intent_for_context(
             return cached[0], None
     else:
         cache_key = ""
+
+    now = time.time()
+    if now < _intent_schema_echo_short_circuit_until:
+        fallback = _heuristic_intent_fallback(
+            action=action,
+            selector=selector,
+            source_url=source_url,
+            target_url=target_url,
+            param_name=param_name,
+            thought_text=thought_text,
+        )
+        if cache_key:
+            _intent_cache[cache_key] = (fallback, context_level)
+        return fallback, "fallback:structured_schema_echo_short_circuit"
 
     llm = get_llm()
     neighbor_section = ""
@@ -251,6 +318,31 @@ Rules:
         timeout_ms = os.getenv("MAPPING_INTENT_TIMEOUT_MS", "?")
         return None, f"llm_error:timeout({timeout_ms}ms)"
     except Exception as exc:  # noqa: BLE001
+        err_text = str(exc)
+        schema_echo_like = "SCHEMA_ECHO_STRUCTURED_OUTPUT" in err_text
+        if (
+            schema_echo_like
+            or
+            "validation errors for IntentInferenceResult" in err_text
+            or (
+                "Failed to parse structured output" in err_text
+                and "Field required" in err_text
+                and "IntentInferenceResult" in err_text
+            )
+        ):
+            fallback = _heuristic_intent_fallback(
+                action=action,
+                selector=selector,
+                source_url=source_url,
+                target_url=target_url,
+                param_name=param_name,
+                thought_text=thought_text,
+            )
+            if schema_echo_like:
+                _intent_schema_echo_short_circuit_until = time.time() + _schema_echo_cooldown_seconds()
+            if cache_key:
+                _intent_cache[cache_key] = (fallback, context_level)
+            return fallback, "fallback:structured_parse_failed"
         return None, f"llm_error:{exc}"
 
     if not key or not summary:
