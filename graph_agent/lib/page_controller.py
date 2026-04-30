@@ -593,7 +593,9 @@ class PageController:
         """Extract captcha image bytes from an <img> element.
 
         Supports both base64 data URI and standalone image URLs.
-        Returns the raw image bytes (PNG/JPEG) in the message as base64.
+        For data URI sources, returns the original `data:image/...` string directly
+        to preserve MIME type and avoid redundant re-encoding.
+        For standalone URLs, returns raw image bytes in the message as base64.
         """
         try:
             self._assert_indexed()
@@ -608,16 +610,17 @@ class PageController:
                 return ActionResult(
                     success=False, message="Captcha image has no src attribute"
                 )
+            if src.startswith("data:image"):
+                return ActionResult(
+                    success=True,
+                    message=src,
+                )
 
             page = await self._get_page()
             b64 = await extract_image_base64_from_src(src, page)
             return ActionResult(
                 success=True,
                 message=b64,
-                metadata={
-                    "format": "base64",
-                    "size": len(b64) * 3 // 4,  # approximate byte size
-                },
             )
         except Exception as e:
             return ActionResult(
@@ -718,8 +721,8 @@ async def extract_image_base64_from_src(src: str, page) -> str:
     import base64
 
     if src.startswith("data:image"):
-        b64_part = src.split(",", 1)[1]
-        img_bytes = base64.b64decode(b64_part)
+        # Source is already a data URI; return the base64 payload directly.
+        return src.split(",", 1)[1]
     else:
         # Fetch external URL via page JS context (bypasses CORS restrictions)
         resp = await page.evaluate(
