@@ -11,17 +11,19 @@ from browser_use.llm.messages import (
     UserMessage,
 )
 
-from graph_agent.lib.page_controller import PageController
 from graph_agent.cartography.types import LoginInfo
+from graph_agent.lib.page_controller import PageController
 
 if TYPE_CHECKING:
     from browser_use.actor.page import Page
     from browser_use.llm.base import BaseChatModel
 
 
-_CAPTCHA_HINT_PATTERN = re.compile(r"captcha|验证码|verify|auth|check.*code|rand.*code", re.IGNORECASE)
+_CAPTCHA_HINT_PATTERN = re.compile(
+    r"captcha|验证码|verify|auth|check.*code|rand.*code", re.IGNORECASE
+)
 _WEAK_CAPTCHA_HINT_PATTERN = re.compile(r"code", re.IGNORECASE)
-_NON_CAPTCHA_PATTERN = re.compile(r"logo|qrcode|qr.?code|avatar|icon|banner|ad|wechat", re.IGNORECASE)
+_NON_CAPTCHA_PATTERN = re.compile(r"logo|avatar|icon|banner|ad|wechat", re.IGNORECASE)
 
 
 def _xpath_proximity_score(img_xpath: str, input_xpaths: list[str]) -> int:
@@ -54,7 +56,10 @@ def _extract_form_ancestor_xpath(xpath: str) -> str:
 def _in_same_form(img_xpath: str, form_xpaths: list[str]) -> bool:
     if not img_xpath or not form_xpaths:
         return False
-    return any(img_xpath.startswith(form_xpath + "/") or img_xpath == form_xpath for form_xpath in form_xpaths)
+    return any(
+        img_xpath.startswith(form_xpath + "/") or img_xpath == form_xpath
+        for form_xpath in form_xpaths
+    )
 
 
 def _score_captcha_img_node(
@@ -73,7 +78,9 @@ def _score_captcha_img_node(
     attr_aria = str(attrs.get("aria-label") or "")
     attr_class = str(attrs.get("class") or "")
     attr_src = str(attrs.get("src") or "")
-    semantic_sig = " ".join([attr_id, attr_name, attr_alt, attr_title, attr_aria, attr_class, node_value]).lower()
+    semantic_sig = " ".join(
+        [attr_id, attr_name, attr_alt, attr_title, attr_aria, attr_class, node_value]
+    ).lower()
     score = 0
 
     if captcha_id_norm and attr_id.strip().lower() == captcha_id_norm:
@@ -100,12 +107,14 @@ def _should_keep_img_candidate(
     form_xpaths: list[str],
     login_anchor_xpaths: list[str],
 ) -> bool:
-    # If we have explicit form boundaries from login inputs, only keep same-form images.
-    if form_xpaths:
-        return _in_same_form(img_xpath, form_xpaths)
-    # If no form tag exists, fall back to DOM proximity to login-related inputs.
+    # Same form → always keep.
+    if form_xpaths and _in_same_form(img_xpath, form_xpaths):
+        return True
+    # Close enough to any anchor input (captcha input, password input, etc.).
+    # Threshold lowered to 3 so that sibling-level img nodes are included even
+    # when they are not wrapped in a <form> element.
     if login_anchor_xpaths:
-        return _xpath_proximity_score(img_xpath, login_anchor_xpaths) >= 4
+        return _xpath_proximity_score(img_xpath, login_anchor_xpaths) >= 3
     return True
 
 
@@ -135,7 +144,13 @@ def _normalize_captcha_code(raw_code: str) -> str:
     if cleaned.lower() in ("unknown", "", "n/a"):
         return ""
     # Handle arithmetic captchas like "9+8=?" or "9*3=?".
-    expr = cleaned.replace(" ", "").replace("×", "*").replace("x", "*").replace("X", "*").replace("÷", "/")
+    expr = (
+        cleaned.replace(" ", "")
+        .replace("×", "*")
+        .replace("x", "*")
+        .replace("X", "*")
+        .replace("÷", "/")
+    )
     match = re.search(r"(\d+)([+\-*/])(\d+)", expr)
     if match:
         left = int(match.group(1))
@@ -160,7 +175,7 @@ def _needs_arithmetic_retry(raw_code: str) -> bool:
     raw = (raw_code or "").strip()
     if not raw:
         return False
-    has_equal_or_qmark = ("=" in raw or "?" in raw or "？" in raw)
+    has_equal_or_qmark = "=" in raw or "?" in raw or "？" in raw
     has_operator = bool(re.search(r"[+\-*/×xX÷]", raw))
     return has_equal_or_qmark and not has_operator
 
@@ -182,7 +197,9 @@ async def _recognize_arithmetic_with_candidates(
     ]
     for idx, data_url in enumerate(image_data_urls, start=1):
         content.append(ContentPartTextParam(text=f"Arithmetic candidate #{idx}:"))
-        content.append(ContentPartImageParam(image_url=ImageURL(url=data_url, detail="high")))
+        content.append(
+            ContentPartImageParam(image_url=ImageURL(url=data_url, detail="high"))
+        )
     result = await llm.ainvoke([UserMessage(content=content)])
     return str(result.completion or "")
 
@@ -191,7 +208,9 @@ async def recognize_captcha_with_candidates(
     image_data_urls: list[str],
     llm: "BaseChatModel",
 ) -> str:
-    normalized_urls = [u for u in image_data_urls if isinstance(u, str) and u.startswith("data:image")]
+    normalized_urls = [
+        u for u in image_data_urls if isinstance(u, str) and u.startswith("data:image")
+    ]
     if not normalized_urls:
         return ""
     print("[CAPTCHA][fallback-llm] using LLM vision for captcha.")
@@ -213,18 +232,18 @@ async def recognize_captcha_with_candidates(
         ]
         for idx, data_url in enumerate(normalized_urls, start=1):
             content.append(ContentPartTextParam(text=f"Candidate image #{idx}:"))
-            content.append(ContentPartImageParam(image_url=ImageURL(url=data_url, detail="high")))
-
-        messages = [
-            UserMessage(
-                content=content
+            content.append(
+                ContentPartImageParam(image_url=ImageURL(url=data_url, detail="high"))
             )
-        ]
+
+        messages = [UserMessage(content=content)]
         result = await llm.ainvoke(messages)
         raw_code = str(result.completion or "")
         normalized_code = _normalize_captcha_code(raw_code)
         if _needs_arithmetic_retry(raw_code):
-            retry_raw = await _recognize_arithmetic_with_candidates(normalized_urls, llm)
+            retry_raw = await _recognize_arithmetic_with_candidates(
+                normalized_urls, llm
+            )
             retry_normalized = _normalize_captcha_code(retry_raw)
             if retry_normalized:
                 normalized_code = retry_normalized
@@ -234,21 +253,46 @@ async def recognize_captcha_with_candidates(
         return ""
 
 
+# Broad pattern that matches any image-based verification code input.
+# Covers: 图形验证码, 验证码, captcha, verify code, auth code, code, 图片码
+_CAPTCHA_INPUT_PATTERN = re.compile(
+    r"captcha|图形.*码|图片.*码|验证码|verify.*code|auth.*code|\bcode\b",
+    re.IGNORECASE,
+)
+
+
 async def solve_captcha_from_page(
     page: "Page",
-    login_info: LoginInfo,
+    login_info: "LoginInfo | None",
     llm: "BaseChatModel",
+    *,
+    input_hint: str = "",
 ) -> str:
+    """Locate the verification-code image nearest to the target input and recognise it.
+
+    Args:
+        page: Current browser page.
+        login_info: Legacy login-detection result; pass None when calling outside
+            a login-form context (e.g. payment, bind, share pages with captchas).
+        llm: Vision-capable LLM used for image recognition.
+        input_hint: Semantic description of the target input (placeholder / label
+            text, e.g. '图形验证码', 'captcha').  When provided, the function uses
+            this to locate the anchor input and finds the nearest image to it,
+            rather than assuming a password-form layout.
+    """
+    if login_info is None:
+        login_info = {}
     captcha_tag = login_info.get("captchaTag", "")
     captcha_id = login_info.get("captchaId", "")
     captcha_src = login_info.get("captchaSrc", "")
+    hint_norm = input_hint.strip().lower()
     print(
         f"[CAPTCHA] solve_captcha_from_page called. tag={captcha_tag}, "
-        f"id={captcha_id}, src={captcha_src if captcha_src else 'empty'}"
+        f"id={captcha_id}, hint='{hint_norm}', src={captcha_src if captcha_src else 'empty'}"
     )
 
     image_data_urls: list[str] = []
-    has_login_scope_hints = False
+    has_scope_hints = False  # True once we have form/input anchor xpaths
 
     def _add_candidate(data_url: str | None) -> None:
         if not isinstance(data_url, str):
@@ -268,7 +312,13 @@ async def solve_captcha_from_page(
             captcha_id_norm = str(captcha_id or "").strip().lower()
             input_xpaths: list[str] = []
             form_xpaths: list[str] = []
-            login_anchor_xpaths: list[str] = []
+            anchor_xpaths: list[str] = []  # any nearby input as proximity anchor
+
+            # Build a hint-specific matcher when the caller tells us which input
+            # field the captcha belongs to (e.g. placeholder='图形验证码').
+            hint_re = (
+                re.compile(re.escape(hint_norm), re.IGNORECASE) if hint_norm else None
+            )
 
             for node in (controller.selector_map or {}).values():
                 tag = str(getattr(node, "tag_name", "") or "").lower()
@@ -277,39 +327,59 @@ async def solve_captcha_from_page(
                 attrs = getattr(node, "attributes", {}) or {}
                 xp = str(getattr(node, "xpath", "") or "")
                 inp_type = str(attrs.get("type") or "").lower()
-                if inp_type == "password":
-                    if xp:
-                        login_anchor_xpaths.append(xp)
-                    form_xpath = _extract_form_ancestor_xpath(xp)
-                    if form_xpath and form_xpath not in form_xpaths:
-                        form_xpaths.append(form_xpath)
-                    continue
+
+                # Build a rich signature from every attribute the LLM might use
+                # as a hint: id, name, placeholder, aria-label, class, label text
                 sig = " ".join(
                     [
                         str(attrs.get("id") or ""),
                         str(attrs.get("name") or ""),
                         str(attrs.get("placeholder") or ""),
+                        str(attrs.get("aria-label") or ""),
                         str(attrs.get("class") or ""),
                         str(getattr(node, "node_value", "") or ""),
                     ]
                 ).lower()
-                if re.search(r"captcha|验证码|verify.*code|auth.*code|code", sig):
+
+                # Password inputs → mark as login-form anchor
+                if inp_type == "password":
+                    if xp:
+                        anchor_xpaths.append(xp)
+                    form_xpath = _extract_form_ancestor_xpath(xp)
+                    if form_xpath and form_xpath not in form_xpaths:
+                        form_xpaths.append(form_xpath)
+                    continue
+
+                # Priority 1: explicit hint from caller (most precise anchor)
+                if hint_re and hint_re.search(sig):
                     if xp:
                         input_xpaths.append(xp)
-                        login_anchor_xpaths.append(xp)
-                        form_xpath = _extract_form_ancestor_xpath(xp)
-                        if form_xpath and form_xpath not in form_xpaths:
-                            form_xpaths.append(form_xpath)
-                # 记录用户名/密码表单，提高验证码图像在登录表单内的优先级。
-                elif re.search(r"user|account|login|pass|pwd|用户名|账号|密码", sig):
-                    xp = str(getattr(node, "xpath", "") or "")
+                        anchor_xpaths.append(xp)
+                    form_xpath = _extract_form_ancestor_xpath(xp)
+                    if form_xpath and form_xpath not in form_xpaths:
+                        form_xpaths.append(form_xpath)
+                    continue
+
+                # Priority 2: any input whose attributes indicate an image-code field
+                if _CAPTCHA_INPUT_PATTERN.search(sig):
                     if xp:
-                        login_anchor_xpaths.append(xp)
+                        input_xpaths.append(xp)
+                        anchor_xpaths.append(xp)
+                    form_xpath = _extract_form_ancestor_xpath(xp)
+                    if form_xpath and form_xpath not in form_xpaths:
+                        form_xpaths.append(form_xpath)
+                    continue
+
+                # Priority 3: adjacent credential fields (username / account)
+                # used only as proximity anchors, not as direct scope markers
+                if re.search(r"user|account|login|用户名|账号", sig):
+                    if xp:
+                        anchor_xpaths.append(xp)
                     form_xpath = _extract_form_ancestor_xpath(xp)
                     if form_xpath and form_xpath not in form_xpaths:
                         form_xpaths.append(form_xpath)
 
-            has_login_scope_hints = bool(form_xpaths or login_anchor_xpaths)
+            has_scope_hints = bool(form_xpaths or anchor_xpaths)
 
             ranked_img_indices: list[tuple[int, int]] = []
             for idx, node in (controller.selector_map or {}).items():
@@ -321,7 +391,7 @@ async def solve_captcha_from_page(
                 if not _should_keep_img_candidate(
                     img_xpath=img_xpath,
                     form_xpaths=form_xpaths,
-                    login_anchor_xpaths=login_anchor_xpaths,
+                    login_anchor_xpaths=anchor_xpaths,
                 ):
                     continue
                 score = _score_captcha_img_node(
@@ -329,10 +399,13 @@ async def solve_captcha_from_page(
                     node_value=str(getattr(node, "node_value", "") or ""),
                     img_xpath=img_xpath,
                     captcha_id_norm=captcha_id_norm,
-                    input_xpaths=input_xpaths or login_anchor_xpaths,
+                    input_xpaths=input_xpaths or anchor_xpaths,
                     form_xpaths=form_xpaths,
                 )
-                if score > 0:
+                # Keep any image that passed the proximity/form filter,
+                # even if its own semantic attributes score 0.
+                # Negative score (NON_CAPTCHA_PATTERN match) still excluded.
+                if score >= 0:
                     ranked_img_indices.append((score, int(idx)))
 
             ranked_img_indices.sort(reverse=True)
@@ -347,8 +420,10 @@ async def solve_captcha_from_page(
     except Exception as e:
         print(f"[CAPTCHA] Strategy 0 (browser-use selector_map) failed: {e}")
 
-    if not image_data_urls and not has_login_scope_hints and captcha_tag == "img":
-        print(f"[CAPTCHA] Strategy 1: captcha is <img>. src={captcha_src if captcha_src else 'empty'}")
+    if not image_data_urls and not has_scope_hints and captcha_tag == "img":
+        print(
+            f"[CAPTCHA] Strategy 1: captcha is <img>. src={captcha_src if captcha_src else 'empty'}"
+        )
         if captcha_src.startswith("data:image"):
             _add_candidate(captcha_src)
         elif captcha_src:
@@ -426,91 +501,86 @@ async def solve_captcha_from_page(
 
     if not image_data_urls:
         try:
-            scope_restricted = "true" if has_login_scope_hints else "false"
+            scope_restricted = "true" if has_scope_hints else "false"
+            # JS uses hint_norm to find the anchor input; falls back to general captcha keywords.
+            js_hint_pattern = hint_norm.replace("'", "\\'") if hint_norm else ""
             screenshot_script = f"""
             (...args) => {{
                 const scopeRestricted = {scope_restricted};
-                const pwd = document.querySelector('input[type="password"]');
-                const loginForm = pwd && typeof pwd.closest === 'function' ? pwd.closest('form') : null;
-                const scopeRoot = (scopeRestricted && loginForm) ? loginForm : document;
-                const queryAll = (selector) => Array.from(scopeRoot.querySelectorAll(selector));
+                const hintPattern = '{js_hint_pattern}';
                 const isVisible = (node) => {{
                     if (!node) return false;
                     const rect = node.getBoundingClientRect();
                     return rect.width > 0 && rect.height > 0;
                 }};
-                let el = document.getElementById('{captcha_id}');
-                if (el && scopeRestricted && loginForm && !loginForm.contains(el)) {{
-                    el = null;
+                // Locate anchor input: prefer hint-matched input, then captcha-keyword input,
+                // then password input (login context), then nothing.
+                let anchorInput = null;
+                const allInputs = Array.from(document.querySelectorAll('input'));
+                if (hintPattern) {{
+                    const hintRe = new RegExp(hintPattern, 'i');
+                    anchorInput = allInputs.find(inp => {{
+                        const sig = ((inp.name||'')+(inp.id||'')+(inp.placeholder||'')+(inp.getAttribute('aria-label')||'')+(inp.className||'')).toLowerCase();
+                        return hintRe.test(sig) && isVisible(inp);
+                    }}) || null;
+                }}
+                if (!anchorInput) {{
+                    anchorInput = allInputs.find(inp => {{
+                        const sig = ((inp.name||'')+(inp.id||'')+(inp.placeholder||'')+(inp.getAttribute('aria-label')||'')+(inp.className||'')).toLowerCase();
+                        return /captcha|图形.*码|验证码|verify.*code|auth.*code/.test(sig) && isVisible(inp);
+                    }}) || null;
+                }}
+                // Determine scope root: form that contains the anchor, or document
+                const anchorForm = anchorInput && typeof anchorInput.closest === 'function'
+                    ? anchorInput.closest('form') : null;
+                const scopeRoot = (scopeRestricted && anchorForm) ? anchorForm : document;
+                const queryAll = (sel) => Array.from(scopeRoot.querySelectorAll(sel));
+                let el = {('document.getElementById("' + captcha_id + '")') if captcha_id else "null"};
+                if (el && scopeRestricted && anchorForm && !anchorForm.contains(el)) el = null;
+                if (!el) {{
+                    for (const img of queryAll('img')) {{
+                        const sig = ((img.src||'')+(img.alt||'')+(img.title||'')+(img.id||'')+(img.className||'')).toLowerCase();
+                        if (/captcha|验证码|verify|auth|code/i.test(sig) && isVisible(img)) {{ el = img; break; }}
+                    }}
                 }}
                 if (!el) {{
-                    const imgs = queryAll('img');
-                    for (let i = 0; i < imgs.length; i++) {{
-                        const sig = (imgs[i].src + imgs[i].alt + imgs[i].title + imgs[i].id + imgs[i].className).toLowerCase();
-                        if (/captcha|验证码|verify|auth|code/i.test(sig) && isVisible(imgs[i])) {{
-                            el = imgs[i];
-                            break;
-                        }}
+                    for (const cv of queryAll('canvas')) {{
+                        const sig = ((cv.id||'')+(cv.className||'')).toLowerCase();
+                        if (/captcha|验证码|verify|auth|code/i.test(sig) && isVisible(cv)) {{ el = cv; break; }}
                     }}
                 }}
-                if (!el) {{
-                    const canvases = queryAll('canvas');
-                    for (let j = 0; j < canvases.length; j++) {{
-                        const sig = ((canvases[j].id || '') + (canvases[j].className || '')).toLowerCase();
-                        if (/captcha|验证码|verify|auth|code/i.test(sig) && isVisible(canvases[j])) {{
-                            el = canvases[j];
-                            break;
-                        }}
+                // Proximity fallback: nearest visible image to the anchor input
+                if (!el && anchorInput && isVisible(anchorInput)) {{
+                    const a = anchorInput.getBoundingClientRect();
+                    const ax = a.left + a.width / 2, ay = a.top + a.height / 2;
+                    let best = null, bestD = Infinity;
+                    for (const img of queryAll('img')) {{
+                        if (!isVisible(img)) continue;
+                        const r = img.getBoundingClientRect();
+                        const d = Math.hypot(r.left + r.width/2 - ax, r.top + r.height/2 - ay);
+                        if (d < bestD) {{ bestD = d; best = img; }}
                     }}
-                }}
-                // Strong fallback in login scope: choose nearest visible image to captcha-like input.
-                if (!el && scopeRestricted) {{
-                    const inputs = queryAll('input');
-                    let anchor = null;
-                    for (const inp of inputs) {{
-                        const sig = ((inp.name || '') + (inp.id || '') + (inp.placeholder || '') + (inp.className || '')).toLowerCase();
-                        if (/captcha|验证码|verify.*code|auth.*code|code/i.test(sig) && isVisible(inp)) {{
-                            anchor = inp;
-                            break;
-                        }}
-                    }}
-                    if (anchor) {{
-                        const a = anchor.getBoundingClientRect();
-                        const ax = a.left + a.width / 2;
-                        const ay = a.top + a.height / 2;
-                        let best = null;
-                        let bestD = Number.POSITIVE_INFINITY;
-                        for (const img of queryAll('img')) {{
-                            if (!isVisible(img)) continue;
-                            const r = img.getBoundingClientRect();
-                            const cx = r.left + r.width / 2;
-                            const cy = r.top + r.height / 2;
-                            const d = Math.hypot(cx - ax, cy - ay);
-                            if (d < bestD) {{
-                                bestD = d;
-                                best = img;
-                            }}
-                        }}
-                        if (best) el = best;
-                    }}
+                    if (best) el = best;
                 }}
                 if (el) {{
                     const rect = el.getBoundingClientRect();
                     return {{
-                        x: Math.round(rect.left),
-                        y: Math.round(rect.top),
-                        width: Math.round(rect.width),
-                        height: Math.round(rect.height),
+                        x: Math.round(rect.left), y: Math.round(rect.top),
+                        width: Math.round(rect.width), height: Math.round(rect.height),
                         scopeRestricted,
-                        selectedTag: (el.tagName || '').toLowerCase(),
-                        selectedSig: ((el.id || '') + '|' + (el.className || '') + '|' + (el.getAttribute && el.getAttribute('title') || '')).slice(0, 120),
+                        selectedTag: (el.tagName||'').toLowerCase(),
+                        selectedSig: ((el.id||'')+'|'+(el.className||'')+'|'+(el.getAttribute&&el.getAttribute('title')||'')).slice(0,120),
                     }};
                 }}
                 return null;
             }}
             """
             bbox_raw = await page.evaluate(screenshot_script)
-            bbox = cast(dict[str, int], _parse_evaluate_result(bbox_raw)) if bbox_raw else None
+            bbox = (
+                cast(dict[str, int], _parse_evaluate_result(bbox_raw))
+                if bbox_raw
+                else None
+            )
             if bbox and bbox.get("width", 0) > 0 and bbox.get("height", 0) > 0:
                 bs = page._browser_session
                 if bs and hasattr(bs, "cdp_client"):
@@ -534,7 +604,7 @@ async def solve_captcha_from_page(
         except Exception as e:
             print(f"[CAPTCHA] Strategy 3 failed: {e}")
 
-    if not image_data_urls and not has_login_scope_hints:
+    if not image_data_urls and not has_scope_hints:
         try:
             bs = page._browser_session
             if bs and hasattr(bs, "cdp_client"):
@@ -550,7 +620,9 @@ async def solve_captcha_from_page(
             print(f"[CAPTCHA] Strategy 4 failed: {e}")
 
     if not image_data_urls:
-        print("[CAPTCHA] All strategies failed. Could not extract CAPTCHA image from page.")
+        print(
+            "[CAPTCHA] All strategies failed. Could not extract CAPTCHA image from page."
+        )
         return ""
 
     print(f"[CAPTCHA] Sending {len(image_data_urls)} candidate image(s) to recognizer.")

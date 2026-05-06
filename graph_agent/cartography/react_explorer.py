@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from urllib.parse import parse_qsl, urlparse
 
@@ -23,7 +24,6 @@ from graph_agent.cartography.inference_core import (
     SemanticInferenceInput,
     infer_transition_semantics,
 )
-from graph_agent.cartography.login import detect_login_info
 from graph_agent.cartography.react_prompts import (
     build_system_prompt,
     build_user_prompt,
@@ -72,7 +72,9 @@ def _build_state_identity(url: str, spa_route: str, view_fingerprint: str) -> st
     return f"state:{digest}"
 
 
-def _rank_selector_chain(selector: str, attrs: dict[str, object], tag: str) -> list[str]:
+def _rank_selector_chain(
+    selector: str, attrs: dict[str, object], tag: str
+) -> list[str]:
     chain: list[str] = []
     test_id = attrs.get("data-testid") or attrs.get("data-test") or attrs.get("data-qa")
     if test_id:
@@ -142,15 +144,17 @@ class ReActExplorer(BaseAgent):
         self._semantic_conflict_count = 0
 
         # Extra actions supported by PageController but not in BaseAgent defaults
-        self._supported_actions.update({
-            "scroll_horizontally",
-            "close_overlay",
-            "execute_javascript",
-            "query_knowledge",
-            "discover_zones",
-            "extract_menu",
-            "solve_captcha",
-        })
+        self._supported_actions.update(
+            {
+                "scroll_horizontally",
+                "close_overlay",
+                "execute_javascript",
+                "query_knowledge",
+                "discover_zones",
+                "extract_menu",
+                "solve_captcha",
+            }
+        )
         self._dynamic_action_model = self._build_dynamic_action_model()
 
     # ------------------------------------------------------------------
@@ -242,7 +246,10 @@ class ReActExplorer(BaseAgent):
         try:
             dom_text = await controller.update_tree()
         except Exception as e:
-            logger.warning("PageController.update_tree() failed, falling back to browser_use snapshot: %s", e)
+            logger.warning(
+                "PageController.update_tree() failed, falling back to browser_use snapshot: %s",
+                e,
+            )
             return await super()._get_browser_snapshot()
 
         title = ""
@@ -338,39 +345,56 @@ class ReActExplorer(BaseAgent):
                     return "Menu extraction delegated to pipeline analysis"
                 case "solve_captcha":
                     page = await self.browser.get_current_page()
-                    login_info = await detect_login_info(page)
-                    # Always attempt captcha extraction; detect_login_info may miss captcha img hints.
-                    captcha_code = await solve_captcha_from_page(page, login_info, self.llm)
+                    if page is None:
+                        return "solve_captcha: no active page"
                     input_index = params.get("input_index")
+                    input_hint = str(params.get("input_hint") or "")
+                    # Pass None as login_info — solve_captcha_from_page will infer
+                    # image scope from the DOM directly, anchored by input_index/input_hint
+                    # rather than assuming a password-form login context.
+                    captcha_code = await solve_captcha_from_page(
+                        page, None, self.llm, input_hint=input_hint
+                    )
                     if captcha_code and input_index is not None:
-                        input_result = await controller.input_text(input_index, captcha_code)
+                        input_result = await controller.input_text(
+                            input_index, captcha_code
+                        )
                         return f"Solved captcha and filled [{input_index}]: {input_result.message}"
                     if captcha_code:
-                        fill_script = r"""
-                        (...args) => {
-                            const [captchaCode] = args;
+                        # Fallback: locate the target input by hint or general captcha keywords
+                        hint_pattern = (
+                            re.escape(input_hint)
+                            if input_hint
+                            else r"captcha|验证码|verify.*code|auth.*code"
+                        )
+                        fill_script = f"""
+                        (...args) => {{
+                            const [captchaCode, hintPattern] = args;
+                            const re = new RegExp(hintPattern, 'i');
                             const inputs = document.querySelectorAll('input');
-                            for (const inp of inputs) {
+                            for (const inp of inputs) {{
                                 const t = inp.type || 'text';
                                 if (t === 'password') continue;
-                                const sig = ((inp.name || '') + (inp.id || '') + (inp.placeholder || '') + (inp.className || '')).toLowerCase();
-                                if (/captcha|验证码|verify.*code|auth.*code|code/i.test(sig)) {
+                                const sig = ((inp.name || '') + (inp.id || '') + (inp.placeholder || '') + (inp.className || '') + (inp.getAttribute('aria-label') || '')).toLowerCase();
+                                if (re.test(sig)) {{
                                     inp.focus();
                                     const proto = Object.getPrototypeOf(inp);
                                     const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
                                     if (desc && desc.set) desc.set.call(inp, captchaCode); else inp.value = captchaCode;
-                                    inp.dispatchEvent(new Event('input', { bubbles: true }));
-                                    inp.dispatchEvent(new Event('change', { bubbles: true }));
+                                    inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                    inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
                                     return true;
-                                }
-                            }
+                                }}
+                            }}
                             return false;
-                        }
+                        }}
                         """
-                        filled = bool(await page.evaluate(fill_script, captcha_code))
+                        filled = bool(
+                            await page.evaluate(fill_script, captcha_code, hint_pattern)
+                        )
                         if filled:
-                            return "Solved captcha and filled captcha input via semantic match"
-                        return "Solved captcha but failed to locate captcha input field"
+                            return f"Solved captcha '{captcha_code}' and filled input via semantic match"
+                        return f"Solved captcha '{captcha_code}' but failed to locate target input field"
                     return "Captcha solve returned empty code"
                 case _:
                     return f"Unknown action: {action_type}"
@@ -417,9 +441,11 @@ class ReActExplorer(BaseAgent):
             return
 
         try:
-            dom_text_after, title_after, selector_map_after = (
-                await self._get_browser_snapshot()
-            )
+            (
+                dom_text_after,
+                title_after,
+                selector_map_after,
+            ) = await self._get_browser_snapshot()
             fp_after = self._compute_page_fingerprint(
                 dom_text_after, title_after, selector_map_after
             )
@@ -553,9 +579,13 @@ class ReActExplorer(BaseAgent):
                 )
             )
             transition.intent = semantic.transition_patch.intent
-            transition.intent_failure_reason = semantic.transition_patch.intent_failure_reason
+            transition.intent_failure_reason = (
+                semantic.transition_patch.intent_failure_reason
+            )
             transition.selector_chain = semantic.transition_patch.selector_chain
-            transition.semantic_action_key = semantic.transition_patch.semantic_action_key
+            transition.semantic_action_key = (
+                semantic.transition_patch.semantic_action_key
+            )
             if semantic.transition_patch.confidence_hint > 0:
                 transition.confidence = semantic.transition_patch.confidence_hint
             if semantic.conflict_flags:
@@ -647,6 +677,7 @@ class ReActExplorer(BaseAgent):
 
         # Reset token tracker
         from graph_agent.lib.token_tracker import reset_global_tracker
+
         reset_global_tracker()
 
         try:
@@ -663,6 +694,7 @@ class ReActExplorer(BaseAgent):
 
         # Log token usage
         from graph_agent.lib.token_tracker import get_global_tracker
+
         get_global_tracker().log_summary()
 
         logger.info(
@@ -735,7 +767,9 @@ class ReActExplorer(BaseAgent):
                     )
                     if not rows:
                         return f"No historical states matched: {query_text}"
-                    preview = "; ".join(f"{r.get('title') or r.get('id')}" for r in rows)
+                    preview = "; ".join(
+                        f"{r.get('title') or r.get('id')}" for r in rows
+                    )
                     return f"Historical state hints: {preview}"
 
                 rows = await manager._run_read(

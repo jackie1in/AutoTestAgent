@@ -40,9 +40,12 @@ class ScrollAction(BaseModel):
 
     action_type: Literal["scroll"] = "scroll"
     down: bool = Field(default=True, description="True=scroll down, False=scroll up")
-    pages: float = Field(default=1.0, description="0.5=half page, 1=full page, 10=to bottom/top")
+    pages: float = Field(
+        default=1.0, description="0.5=half page, 1=full page, 10=to bottom/top"
+    )
     index: int | None = Field(
-        default=None, description="Optional element index to scroll within specific element"
+        default=None,
+        description="Optional element index to scroll within specific element",
     )
 
 
@@ -99,18 +102,41 @@ class QueryKnowledgeAction(BaseModel):
 
 
 class SolveCaptchaAction(BaseModel):
-    """Detect and solve a captcha on the current page using LLM vision.
+    """Detect and solve an image-based verification code on the current page using LLM vision.
 
-    Call this when you see a captcha image (e.g. next to a '验证码' input).
-    The tool automatically finds the captcha image, extracts it, and returns
-    the recognized text. If an input_index is provided, it also fills the
-    captcha value into that field.
+    ## 何时调用
+    当页面上存在需要"看图填码"的 input 时调用，判断依据是 input 的 label、
+    placeholder、name 或 id 中含有以下任意特征：
+    - 验证码 / captcha / 图形码 / 图片验证码
+    - 验证码图片旁边有刷新/换一张按钮
+    - 二维码扫码后需要填入的确认码（非扫码本身）
+
+    ## 不调用的情况
+    - 手机短信验证码（placeholder 含"手机"/"短信"/"SMS"）→ 直接用 input_text 填入
+    - 邮箱验证码 → 直接用 input_text 填入
+    - 二维码图片本身（用户需用手机扫描）→ 不需要调用此工具，等待扫码或跳过
+    - 普通密码框 → 直接用 input_text 填入
+
+    ## 工作方式
+    工具自动定位 input_index 对应输入框附近的图像/canvas 元素，
+    用 LLM Vision 识别验证码文字，并自动将结果填入 input_index 指定的输入框。
     """
 
     action_type: Literal["solve_captcha"] = "solve_captcha"
     input_index: int | None = Field(
         default=None,
-        description="Optional index of the captcha input field to fill after solving",
+        description=(
+            "验证码输入框的 index（从 browser_state 的 [N] 编号中取）。"
+            "工具会以此 input 为锚点定位旁边的验证码图像，识别后自动填入。"
+            "如果不确定 index，传 null，工具会用启发式方法寻找验证码图像。"
+        ),
+    )
+    input_hint: str = Field(
+        default="",
+        description=(
+            "可选。验证码输入框的语义特征，如 placeholder 或 label 文本，"
+            "例如 '图形验证码'、'验证码'、'captcha'。用于辅助定位验证码图像。"
+        ),
     )
 
 
