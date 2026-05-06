@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Literal, TypeVar, overload
+from typing import Any, Literal, TypeVar, cast, overload
 
 import httpx
 from browser_use.llm.base import BaseChatModel
@@ -32,6 +32,7 @@ from graph_agent.llm.utils import get_format_instructions
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
+Thinking = Literal["enabled", "disabled"]
 
 
 def _looks_like_schema_object(value: Any) -> bool:
@@ -73,7 +74,7 @@ class ChatZhiPu(BaseChatModel):
 
     # GLM-specific: Thinking mode
     # WARNING: thinking='enabled' causes timeouts with long prompts
-    thinking: Literal["enabled", "disabled"] | None = "disabled"
+    thinking: Thinking | None = "disabled"
     clear_thinking: bool = True  # False = Preserved Thinking
 
     # Client params
@@ -126,9 +127,10 @@ class ChatZhiPu(BaseChatModel):
                 }
 
             else:
-                extra["thinking"] = {"type": self.thinking}
+                thinking_dict: dict[str, Thinking | bool] = {"type": self.thinking}
                 if self.thinking == "enabled":
-                    extra["thinking"]["clear_thinking"] = self.clear_thinking
+                    thinking_dict["clear_thinking"] = self.clear_thinking
+                extra["thinking"] = thinking_dict
 
         return extra if extra else None
 
@@ -181,9 +183,10 @@ class ChatZhiPu(BaseChatModel):
         message = response.choices[0].message
 
         # Method 1: Direct attribute (some providers)
-        if hasattr(message, "reasoning_content") and message.reasoning_content:
-            thinking = message.reasoning_content
-            logger.debug(f"[GLM Thinking] {thinking[:200]}...")
+        _rc = getattr(message, "reasoning_content", None)
+        if _rc:
+            thinking = _rc
+            logger.debug(f"[GLM Thinking] {str(thinking)[:200]}...")
             return thinking
 
         # Method 2: model_extra['reasoning'] (GLM-5.1 vLLM)
@@ -521,15 +524,12 @@ class ChatZhiPu(BaseChatModel):
             try:
                 parsed = self._parse_json_output(raw_content, output_format)
             except Exception as e:
-                raw_keys: list[str] = []
                 schema_like_output = False
                 try:
                     raw_obj = json.loads(raw_content)
                     if isinstance(raw_obj, dict):
-                        raw_keys = list(raw_obj.keys())[:12]
                         schema_like_output = _looks_like_schema_object(raw_obj)
                 except Exception:
-                    raw_keys = []
                     schema_like_output = False
                 required_fields = [
                     name
@@ -615,6 +615,8 @@ class ChatZhiPu(BaseChatModel):
                 )
                 response_format = {"type": "json_object"}
 
+            typed_rf = cast(Any, response_format)
+
             # Make API call (stream or non-stream)
             if self.stream:
                 # ===== STREAM MODE =====
@@ -622,7 +624,7 @@ class ChatZhiPu(BaseChatModel):
                 stream = await self.get_client().chat.completions.create(
                     model=self.model,
                     messages=glm_messages,
-                    response_format=response_format,
+                    response_format=typed_rf,
                     stream=True,
                     **model_params,
                 )
@@ -633,7 +635,7 @@ class ChatZhiPu(BaseChatModel):
                 response = await self.get_client().chat.completions.create(
                     model=self.model,
                     messages=glm_messages,
-                    response_format=response_format,
+                    response_format=typed_rf,
                     stream=False,
                     **model_params,
                 )
