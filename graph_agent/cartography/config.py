@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
@@ -58,6 +59,13 @@ def is_http_url(value: str) -> bool:
     return v.startswith("http://") or v.startswith("https://")
 
 
+def is_login_url(url: str) -> bool:
+    """Return True if the URL looks like a login/auth page."""
+    if not url:
+        return False
+    return bool(re.search(r"login|signin|sign-in|auth", url, re.IGNORECASE))
+
+
 def same_origin(a: str, b: str) -> bool:
     if not a or not b:
         return False
@@ -65,7 +73,10 @@ def same_origin(a: str, b: str) -> bool:
         pa, pb = urlparse(a), urlparse(b)
         if not pa.scheme or not pb.scheme or not pa.netloc or not pb.netloc:
             return False
-        return pa.scheme.lower() == pb.scheme.lower() and pa.netloc.lower() == pb.netloc.lower()
+        return (
+            pa.scheme.lower() == pb.scheme.lower()
+            and pa.netloc.lower() == pb.netloc.lower()
+        )
     except Exception:
         return False
 

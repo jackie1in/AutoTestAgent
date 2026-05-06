@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import time
+from typing import cast
 from urllib.parse import parse_qsl, urlparse
 
 from browser_use.browser.session import BrowserSession as Browser
@@ -254,9 +255,11 @@ class ReActExplorer(BaseAgent):
 
         title = ""
         try:
-            page = await self.browser.get_current_page()
-            if page is not None:
-                title = await page.get_title() or ""
+            _browser = self.browser
+            if _browser is not None:
+                page = await _browser.get_current_page()
+                if page is not None:
+                    title = await page.get_title() or ""
         except Exception:
             pass
 
@@ -272,45 +275,56 @@ class ReActExplorer(BaseAgent):
         if controller is None:
             return "Controller not initialized"
 
+        browser = self.browser
+        assert browser is not None, (
+            "BrowserSession must be set before executing actions"
+        )
+
         # Track explored indices for click/input/select
         if action_type in ("click", "input", "select_dropdown"):
-            idx = params.get("index")
-            if idx is not None:
-                self._explored_indices.add(idx)
+            _raw_idx = params.get("index")
+            if _raw_idx is not None:
+                self._explored_indices.add(cast(int, _raw_idx))
 
         try:
             match action_type:
                 case "click":
-                    idx = params.get("index", 0)
+                    idx = cast(int, params.get("index", 0))
                     r = await controller.click_element(idx)
                     return r.message
                 case "input":
-                    idx = params.get("index", 0)
-                    text = params.get("text", "")
+                    idx = cast(int, params.get("index", 0))
+                    text = cast(str, params.get("text", ""))
                     r = await controller.input_text(idx, text)
                     return r.message
                 case "select_dropdown":
-                    idx = params.get("index", 0)
-                    opt = params.get("option_text", params.get("text", ""))
+                    idx = cast(int, params.get("index", 0))
+                    opt = cast(str, params.get("option_text", params.get("text", "")))
                     r = await controller.select_option(idx, opt)
                     return r.message
                 case "scroll":
                     # Schema uses down (bool) + pages (float)
                     down = params.get("down", True)
-                    pages = params.get("pages", 1.0)
+                    pages = cast(float, params.get("pages", 1.0))
                     direction = "down" if down else "up"
                     amount = int(pages * 500)
-                    idx = params.get("index")
+                    _idx_raw = params.get("index")
+                    idx: int | None = (
+                        cast(int, _idx_raw) if _idx_raw is not None else None
+                    )
                     r = await controller.scroll(direction, amount, idx)
                     return r.message
                 case "scroll_horizontally":
-                    direction = params.get("direction", "right")
-                    amount = params.get("amount", params.get("pixels", 300))
-                    idx = params.get("index")
-                    r = await controller.scroll_horizontally(direction, amount, idx)
+                    direction = cast(str, params.get("direction", "right"))
+                    amount = cast(int, params.get("amount", params.get("pixels", 300)))
+                    _idx_raw2 = params.get("index")
+                    idx2: int | None = (
+                        cast(int, _idx_raw2) if _idx_raw2 is not None else None
+                    )
+                    r = await controller.scroll_horizontally(direction, amount, idx2)
                     return r.message
                 case "wait":
-                    seconds = min(params.get("seconds", 1), 10)
+                    seconds = min(cast(int, params.get("seconds", 1)), 10)
                     self._total_wait_time += seconds
                     last_update = await controller.get_last_update_time()
                     elapsed = time.time() - last_update if last_update > 0 else 0
@@ -319,35 +333,42 @@ class ReActExplorer(BaseAgent):
                     return f"Waited {seconds}s (actual {actual:.1f}s)"
                 case "go_back":
                     try:
-                        page = await self.browser.get_current_page()
+                        page = await browser.get_current_page()
+                        if page is None:
+                            return "Go back failed: no active page"
                         await page.go_back()
                         return "Navigated back"
                     except Exception as e:
                         return f"Go back failed: {e}"
                 case "close_overlay":
                     try:
-                        page = await self.browser.get_current_page()
+                        page = await browser.get_current_page()
                         closed = await self._close_overlays(page)
                         return f"Closed {closed} overlay(s)"
                     except Exception as e:
                         return f"Close overlay failed: {e}"
                 case "execute_javascript":
-                    script = params.get("script", "")
+                    script = cast(str, params.get("script", ""))
                     r = await controller.execute_javascript(script)
                     return r.message
                 case "query_knowledge":
-                    query_text = (params.get("query_text") or "").strip()
-                    target_type = (params.get("target_type") or "all").strip()
+                    query_text = cast(str, params.get("query_text") or "").strip()
+                    target_type = cast(str, params.get("target_type") or "all").strip()
                     return await self._query_knowledge(query_text, target_type)
                 case "discover_zones":
                     return "Zone discovery delegated to pipeline analysis"
                 case "extract_menu":
                     return "Menu extraction delegated to pipeline analysis"
                 case "solve_captcha":
-                    page = await self.browser.get_current_page()
+                    page = await browser.get_current_page()
                     if page is None:
-                        return "solve_captcha: no active page"
-                    input_index = params.get("input_index")
+                        return "No page available"
+                    _input_index_raw = params.get("input_index")
+                    input_index: int | None = (
+                        cast(int, _input_index_raw)
+                        if _input_index_raw is not None
+                        else None
+                    )
                     input_hint = str(params.get("input_hint") or "")
                     # Pass None as login_info — solve_captcha_from_page will infer
                     # image scope from the DOM directly, anchored by input_index/input_hint
@@ -367,7 +388,7 @@ class ReActExplorer(BaseAgent):
                             if input_hint
                             else r"captcha|验证码|verify.*code|auth.*code"
                         )
-                        fill_script = f"""
+                        fill_script = """
                         (...args) => {{
                             const [captchaCode, hintPattern] = args;
                             const re = new RegExp(hintPattern, 'i');
@@ -409,8 +430,12 @@ class ReActExplorer(BaseAgent):
         # Health check every 10 steps
         if step % 10 == 0:
             try:
-                page = await self.browser.get_current_page()
-                await page.evaluate("() => 1")
+                browser = self.browser
+                if browser is None:
+                    return
+                page = await browser.get_current_page()
+                if page is not None:
+                    await page.evaluate("() => 1")
             except Exception as e:
                 logger.warning("Browser health check failed at step %d: %s", step, e)
 
@@ -571,11 +596,14 @@ class ReActExplorer(BaseAgent):
                     to_state_id=to_state_id,
                     step_index=step,
                     transition_id=transition.id,
-                    existing_semantic_keys={
-                        t.semantic_action_key
-                        for t in self._result.transitions
-                        if getattr(t, "semantic_action_key", None)
-                    },
+                    existing_semantic_keys=cast(
+                        "set[str]",
+                        {
+                            t.semantic_action_key
+                            for t in self._result.transitions
+                            if getattr(t, "semantic_action_key", None) is not None
+                        },
+                    ),
                 )
             )
             transition.intent = semantic.transition_patch.intent
@@ -617,8 +645,11 @@ class ReActExplorer(BaseAgent):
 
         if url_after != url_before:
             try:
-                page = await self.browser.get_current_page()
-                await page.go_back()
+                _browser = self.browser
+                if _browser is not None:
+                    page = await _browser.get_current_page()
+                    if page is not None:
+                        await page.go_back()
             except Exception:
                 pass
             await asyncio.sleep(0.5)
@@ -661,6 +692,7 @@ class ReActExplorer(BaseAgent):
             bs = session or self._browser_session
             self._state_id = state_id
 
+        assert bs is not None, "BrowserSession must not be None at this point"
         self._controller = PageController(bs)
         self._page_title = page_title
         self._result = CartographyResult()

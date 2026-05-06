@@ -1,7 +1,7 @@
 """FastAPI app: GET /api/graph, GET /api/intents, POST /api/playback (SSE), GET /api/graph/stream (SSE)."""
 
-import json
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
@@ -15,10 +15,10 @@ from pydantic import BaseModel
 
 from graph_agent.cartography.config import resolve_knowledge_trigger_profile
 from graph_agent.graph.pathfinding import (
-    get_path_from_query,
-    get_path_from_nl_query,
-    neo4j_transition_to_edge_data,
     _edge_to_model,
+    get_path_from_nl_query,
+    get_path_from_query,
+    neo4j_transition_to_edge_data,
 )
 from graph_agent.models import GraphEdge
 from graph_agent.playback.engine import run_playback
@@ -59,8 +59,8 @@ async def _ensure_graphrag() -> tuple[Any, Any] | None:
         return (_neo4j_driver, _embedder) if _graphrag_available else None
 
     try:
-        from graph_agent.neo4j_client.driver import Neo4jDriver
         from graph_agent.cartography.nl_resolver import _get_embedder
+        from graph_agent.neo4j_client.driver import Neo4jDriver
 
         _neo4j_driver = Neo4jDriver()
         await _neo4j_driver.connect()
@@ -299,7 +299,9 @@ async def _get_graph_from_neo4j(driver) -> dict[str, Any] | None:
                 "metadata": {
                     "filtered_non_ui_edges": 0,
                     "intent_missing_count": missing_count,
-                    "intent_success_rate": 1.0 - (missing_count / len(edges)) if edges else 1.0,
+                    "intent_success_rate": 1.0 - (missing_count / len(edges))
+                    if edges
+                    else 1.0,
                     "business_template_count": 0,
                     "business_template_generation_failures": 0,
                     "semantic_consistency_rate": 1.0,
@@ -438,7 +440,11 @@ def _resolve_start_url(edge_list: list[GraphEdge]) -> str:
     """Resolve playback start URL from first edge source_url, fallback to default."""
     if edge_list:
         first = edge_list[0]
-        if first.source_url and isinstance(first.source_url, str) and first.source_url.startswith("http"):
+        if (
+            first.source_url
+            and isinstance(first.source_url, str)
+            and first.source_url.startswith("http")
+        ):
             return first.source_url
     return DEFAULT_START_URL
 
@@ -447,7 +453,11 @@ def _resolve_end_url(edge_list: list[GraphEdge]) -> str | None:
     """Resolve expected end URL from last edge target_url."""
     if edge_list:
         last = edge_list[-1]
-        if last.target_url and isinstance(last.target_url, str) and last.target_url.startswith("http"):
+        if (
+            last.target_url
+            and isinstance(last.target_url, str)
+            and last.target_url.startswith("http")
+        ):
             return last.target_url
     return None
 
@@ -638,14 +648,22 @@ async def get_dashboard():
                 knowledge_avg_latency_ms = 0.0
                 session_trigger_profile = "balanced"
                 if sess:
-                    knowledge_query_count = int(sess.get("knowledge_query_count", 0) or 0)
+                    knowledge_query_count = int(
+                        sess.get("knowledge_query_count", 0) or 0
+                    )
                     knowledge_hit_count = int(sess.get("knowledge_hit_count", 0) or 0)
-                    knowledge_cache_hit_count = int(sess.get("knowledge_cache_hit_count", 0) or 0)
-                    knowledge_timeout_count = int(sess.get("knowledge_timeout_count", 0) or 0)
+                    knowledge_cache_hit_count = int(
+                        sess.get("knowledge_cache_hit_count", 0) or 0
+                    )
+                    knowledge_timeout_count = int(
+                        sess.get("knowledge_timeout_count", 0) or 0
+                    )
                     knowledge_circuit_open_count = int(
                         sess.get("knowledge_circuit_open_count", 0) or 0
                     )
-                    knowledge_error_count = int(sess.get("knowledge_error_count", 0) or 0)
+                    knowledge_error_count = int(
+                        sess.get("knowledge_error_count", 0) or 0
+                    )
                     knowledge_avg_latency_ms = float(
                         sess.get("knowledge_avg_latency_ms", 0.0) or 0.0
                     )
@@ -756,14 +774,18 @@ async def post_playback(body: PlaybackRequest):
         edges = await _get_edges_from_neo4j(driver)
     except Exception as e:
         logger.warning("Failed to load edges from Neo4j: %s", e)
+
         def error_stream():
             yield f"data: {json.dumps({'level': 'error', 'error': 'Failed to load graph data'})}\n\n"
+
         return StreamingResponse(error_stream(), media_type="text/event-stream")
 
     edge_list = get_path_from_query(body.intent, edges)
     if not edge_list:
+
         def no_path_stream():
             yield f"data: {json.dumps({'level': 'error', 'error': 'no matching path'})}\n\n"
+
         return StreamingResponse(no_path_stream(), media_type="text/event-stream")
 
     start_url = _resolve_start_url(edge_list)
@@ -788,11 +810,13 @@ async def post_nl_resolve(body: NLResolveRequest):
         edges = await _get_edges_from_neo4j(driver)
     except Exception as e:
         logger.warning("Failed to load edges from Neo4j: %s", e)
-        return JSONResponse(status_code=400, content={"error": "Failed to load graph data"})
+        return JSONResponse(
+            status_code=400, content={"error": "Failed to load graph data"}
+        )
 
     # Try GraphRAG first
     graphrag = await _ensure_graphrag()
-    resolved_intents: list[dict[str, Any]] = []
+    resolved_intents: list[Any] = []
     source = "keyword_fallback"
 
     if graphrag is not None:
@@ -844,8 +868,10 @@ async def post_nl_playback(body: NLPlaybackRequest):
         edges = await _get_edges_from_neo4j(driver)
     except Exception as e:
         logger.warning("Failed to load edges from Neo4j: %s", e)
+
         def error_stream():
             yield f"data: {json.dumps({'level': 'error', 'error': 'Failed to load graph data'})}\n\n"
+
         return StreamingResponse(error_stream(), media_type="text/event-stream")
 
     graphrag = await _ensure_graphrag()
@@ -863,8 +889,10 @@ async def post_nl_playback(body: NLPlaybackRequest):
     )
 
     if not edge_list:
+
         def no_path_stream():
             yield f"data: {json.dumps({'level': 'error', 'error': 'no matching path'})}\n\n"
+
         return StreamingResponse(no_path_stream(), media_type="text/event-stream")
 
     start_url = _resolve_start_url(edge_list)

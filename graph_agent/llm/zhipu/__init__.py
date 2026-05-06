@@ -1,5 +1,5 @@
 """GLM (Zhipu AI) provider for browser-use."""
 
-from graph_agent.llm.zhipu.chat import ChatZhiPu as ChatGLM
+from graph_agent.llm.zhipu.chat import ChatZhiPu
 
-__all__ = ["ChatGLM"]
+__all__ = ["ChatZhiPu"]

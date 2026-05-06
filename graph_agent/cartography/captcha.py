@@ -5,11 +5,13 @@ import re
 from typing import TYPE_CHECKING, cast
 
 from browser_use.llm.messages import (
+    BaseMessage,
     ContentPartImageParam,
     ContentPartTextParam,
     ImageURL,
     UserMessage,
 )
+from pydantic import BaseModel, Field
 
 from graph_agent.cartography.types import LoginInfo
 from graph_agent.lib.page_controller import PageController
@@ -17,6 +19,32 @@ from graph_agent.lib.page_controller import PageController
 if TYPE_CHECKING:
     from browser_use.actor.page import Page
     from browser_use.llm.base import BaseChatModel
+
+
+class CaptchaRecognitionResult(BaseModel):
+    """Structured output for captcha image recognition."""
+
+    code: str = Field(
+        description=(
+            "The exact characters shown in the captcha image. "
+            "For plain character/digit captchas return only the characters you see. "
+            "For arithmetic captchas return the expression as shown (e.g. '7+1=?') only when "
+            "is_arithmetic is true. "
+            "Return empty string if the image is not a captcha or is unreadable."
+        )
+    )
+    is_arithmetic: bool = Field(
+        default=False,
+        description=(
+            "True ONLY when the captcha image literally contains a math expression "
+            "with an arithmetic operator (+, -, ×, ÷) and a question mark or equals sign. "
+            "A plain sequence of digits or letters is NOT arithmetic."
+        ),
+    )
+    confidence: str = Field(
+        default="high",
+        description="Confidence level: 'high', 'medium', or 'low'.",
+    )
 
 
 _CAPTCHA_HINT_PATTERN = re.compile(
@@ -139,34 +167,37 @@ async def recognize_captcha_with_fallback(
     return await recognize_captcha_with_candidates([image_data_url], llm)
 
 
-def _normalize_captcha_code(raw_code: str) -> str:
+def _normalize_captcha_code(raw_code: str, is_arithmetic: bool = False) -> str:
     cleaned = raw_code.replace("```", "").replace("`", "").strip()
     if cleaned.lower() in ("unknown", "", "n/a"):
         return ""
-    # Handle arithmetic captchas like "9+8=?" or "9*3=?".
-    expr = (
-        cleaned.replace(" ", "")
-        .replace("×", "*")
-        .replace("x", "*")
-        .replace("X", "*")
-        .replace("÷", "/")
-    )
-    match = re.search(r"(\d+)([+\-*/])(\d+)", expr)
-    if match:
-        left = int(match.group(1))
-        op = match.group(2)
-        right = int(match.group(3))
-        value: int | None = None
-        if op == "+":
-            value = left + right
-        elif op == "-":
-            value = left - right
-        elif op == "*":
-            value = left * right
-        elif op == "/" and right != 0:
-            value = left // right if left % right == 0 else None
-        if value is not None:
-            return str(value)
+    # Only attempt arithmetic evaluation when the LLM explicitly flagged the
+    # captcha as arithmetic.  Without this guard a plain 4-digit code like
+    # "8374" could be misread as "8+374" or similar and produce a wrong answer.
+    if is_arithmetic:
+        expr = (
+            cleaned.replace(" ", "")
+            .replace("×", "*")
+            .replace("x", "*")
+            .replace("X", "*")
+            .replace("÷", "/")
+        )
+        match = re.search(r"(\d+)([+\-*/])(\d+)", expr)
+        if match:
+            left = int(match.group(1))
+            op = match.group(2)
+            right = int(match.group(3))
+            value: int | None = None
+            if op == "+":
+                value = left + right
+            elif op == "-":
+                value = left - right
+            elif op == "*":
+                value = left * right
+            elif op == "/" and right != 0:
+                value = left // right if left % right == 0 else None
+            if value is not None:
+                return str(value)
     fallback = "".join(ch for ch in cleaned if ch.isalnum())
     return fallback
 
@@ -180,76 +211,115 @@ def _needs_arithmetic_retry(raw_code: str) -> bool:
     return has_equal_or_qmark and not has_operator
 
 
-async def _recognize_arithmetic_with_candidates(
+def _build_captcha_content(
     image_data_urls: list[str],
-    llm: "BaseChatModel",
-) -> str:
+    system_text: str,
+) -> list[ContentPartTextParam | ContentPartImageParam]:
+    """Build a multimodal content list (text + images) for captcha recognition.
+
+    Note: ImageURL is constructed WITHOUT the ``detail`` field because Kimi's
+    API does not support it and rejects requests that include it.
+    """
     content: list[ContentPartTextParam | ContentPartImageParam] = [
-        ContentPartTextParam(
-            text=(
-                "You are reading arithmetic CAPTCHA images. "
-                "Return the expression exactly as shown, including operator and symbols, "
-                "e.g. '7+1=?' or '9-3=?'. "
-                "If it is not an arithmetic captcha, return UNKNOWN. "
-                "Output only the expression text."
-            )
-        )
+        ContentPartTextParam(text=system_text)
     ]
     for idx, data_url in enumerate(image_data_urls, start=1):
-        content.append(ContentPartTextParam(text=f"Arithmetic candidate #{idx}:"))
-        content.append(
-            ContentPartImageParam(image_url=ImageURL(url=data_url, detail="high"))
-        )
-    result = await llm.ainvoke([UserMessage(content=content)])
-    return str(result.completion or "")
+        content.append(ContentPartTextParam(text=f"Candidate image #{idx}:"))
+        # Do NOT pass detail= here — Kimi rejects unknown image_url fields.
+        content.append(ContentPartImageParam(image_url=ImageURL(url=data_url)))
+    return content
 
 
 async def recognize_captcha_with_candidates(
     image_data_urls: list[str],
     llm: "BaseChatModel",
 ) -> str:
+    """Recognise a captcha from one or more candidate image data-URLs.
+
+    Uses json_schema structured output (CaptchaRecognitionResult) so the model
+    returns a well-formed JSON object instead of free text.  Falls back to
+    plain-text parsing if the provider does not support structured output.
+    """
     normalized_urls = [
         u for u in image_data_urls if isinstance(u, str) and u.startswith("data:image")
     ]
     if not normalized_urls:
         return ""
-    print("[CAPTCHA][fallback-llm] using LLM vision for captcha.")
+    print(f"[CAPTCHA] Sending {len(normalized_urls)} image(s) to LLM for recognition.")
+    for i, u in enumerate(normalized_urls, 1):
+        print(f"[CAPTCHA]   image #{i}: {u[:60]}... (total {len(u)} chars)")
     try:
-        content: list[ContentPartTextParam | ContentPartImageParam] = [
-            ContentPartTextParam(
-                text=(
-                    "You are a CAPTCHA solver. You will receive one or more candidate images from a login page. "
-                    "Only one candidate may contain the captcha. First identify which image is the captcha, "
-                    "then return ONLY the exact captcha characters. "
-                    "The captcha is usually 4-6 characters. Pay attention to: "
-                    "- Similar looking characters (0 vs O, 1 vs l vs I, 5 vs S, 8 vs B) "
-                    "- Case sensitivity (uppercase vs lowercase letters) "
-                    "- Ignore page text, logos, and QR codes. "
-                    "- Do NOT guess; if truly unreadable, return 'UNKNOWN'. "
-                    "Return ONLY the characters, no explanation, no quotes, no markdown."
-                )
-            )
-        ]
-        for idx, data_url in enumerate(normalized_urls, start=1):
-            content.append(ContentPartTextParam(text=f"Candidate image #{idx}:"))
-            content.append(
-                ContentPartImageParam(image_url=ImageURL(url=data_url, detail="high"))
-            )
+        system_text = (
+            "You are a CAPTCHA solver. "
+            "You will receive one or more candidate images. "
+            "Identify which image contains the captcha, then read it carefully. "
+            "Rules:\n"
+            "- MOST captchas are plain character/digit codes (4-6 chars). "
+            "Return the exact characters. "
+            "Watch for similar-looking chars: 0/O, 1/l/I, 5/S, 8/B.\n"
+            "- Set is_arithmetic=true ONLY when the image literally shows a "
+            "math expression with an arithmetic operator (+, -, ×, ÷) AND a question mark "
+            "or equals sign (e.g. '9+3=?', '7-2=?'). "
+            "A plain sequence of digits or letters is NOT arithmetic — return it exactly as you see it.\n"
+            "- If no captcha is found or image is unreadable: return code as empty string.\n"
+            "- Ignore logos, banners, QR codes, and decorative images."
+        )
+        content = _build_captcha_content(normalized_urls, system_text)
+        messages: list[BaseMessage] = [UserMessage(content=content)]
 
-        messages = [UserMessage(content=content)]
-        result = await llm.ainvoke(messages)
-        raw_code = str(result.completion or "")
-        normalized_code = _normalize_captcha_code(raw_code)
-        if _needs_arithmetic_retry(raw_code):
-            retry_raw = await _recognize_arithmetic_with_candidates(
-                normalized_urls, llm
+        # Use structured output when supported; fall back to plain text.
+        is_arithmetic = False
+        try:
+            result = await llm.ainvoke(messages, output_format=CaptchaRecognitionResult)
+            recognition: CaptchaRecognitionResult = result.completion  # type: ignore[assignment]
+            raw_code = recognition.code
+            is_arithmetic = recognition.is_arithmetic
+            print(
+                f"[CAPTCHA] Structured result: code={raw_code!r} "
+                f"arithmetic={is_arithmetic} confidence={recognition.confidence}"
             )
-            retry_normalized = _normalize_captcha_code(retry_raw)
+        except Exception as structured_err:
+            print(
+                f"[CAPTCHA] Structured output failed ({structured_err}), falling back to plain text."
+            )
+            result_plain = await llm.ainvoke(messages)
+            raw_code = str(result_plain.completion or "")
+            print(f"[CAPTCHA] Plain-text result: {raw_code!r}")
+
+        normalized_code = _normalize_captcha_code(raw_code, is_arithmetic=is_arithmetic)
+        # If the model returned an expression with '=?' but no operator yet
+        # (e.g. plain-text fallback returned "9?"), retry with an arithmetic prompt.
+        if _needs_arithmetic_retry(raw_code):
+            arith_text = (
+                "You are reading an arithmetic CAPTCHA. "
+                "Return the mathematical expression exactly as shown, "
+                "e.g. '7+1=?' or '9-3=?'. "
+                "If it is not arithmetic, return UNKNOWN."
+            )
+            arith_msgs: list[BaseMessage] = [
+                UserMessage(content=_build_captcha_content(normalized_urls, arith_text))
+            ]
+            try:
+                arith_result = await llm.ainvoke(
+                    arith_msgs,
+                    output_format=CaptchaRecognitionResult,
+                )
+                arith_recognition: CaptchaRecognitionResult = arith_result.completion  # type: ignore[assignment]
+                retry_normalized = _normalize_captcha_code(
+                    arith_recognition.code,
+                    is_arithmetic=arith_recognition.is_arithmetic,
+                )
+            except Exception:
+                arith_plain = await llm.ainvoke(arith_msgs)
+                retry_normalized = _normalize_captcha_code(
+                    str(arith_plain.completion or ""), is_arithmetic=True
+                )
             if retry_normalized:
                 normalized_code = retry_normalized
+
         return normalized_code
     except Exception as e:
-        print(f"[CAPTCHA] LLM recognition failed with exception: {e}")
+        print(f"[CAPTCHA] LLM recognition failed: {e}")
         return ""
 
 

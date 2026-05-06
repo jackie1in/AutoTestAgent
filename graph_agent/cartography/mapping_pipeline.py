@@ -8,22 +8,25 @@ from urllib.parse import urljoin
 
 from browser_use.browser.session import BrowserSession as Browser
 from browser_use.llm.base import BaseChatModel
+
 from graph_agent.cartography.browser_lifecycle import is_shutdown_requested
 from graph_agent.cartography.config import (
     clean_url,
     is_http_url,
+    is_login_url,
     resolve_knowledge_min_interval_sec,
     resolve_knowledge_on_demand_enabled,
     resolve_knowledge_query_timeout_ms,
     resolve_knowledge_topk,
-    resolve_knowledge_trigger_score_threshold,
     resolve_knowledge_trigger_profile,
+    resolve_knowledge_trigger_score_threshold,
+    resolve_layout_aware_enabled,
     resolve_layout_confidence_retry_enabled,
     resolve_layout_confidence_threshold,
-    resolve_layout_aware_enabled,
     resolve_layout_snapshot_limit,
     same_origin,
 )
+from graph_agent.cartography.intervention_queue import evaluate_intervention_need
 from graph_agent.cartography.knowledge_broker import (
     KnowledgeBroker,
     KnowledgeQueryInput,
@@ -31,10 +34,9 @@ from graph_agent.cartography.knowledge_broker import (
 from graph_agent.cartography.layout_snapshot import (
     build_layout_summary,
     capture_layout_snapshot,
-    estimate_layout_confidence,
     compute_layout_fingerprint,
+    estimate_layout_confidence,
 )
-from graph_agent.cartography.intervention_queue import evaluate_intervention_need
 from graph_agent.cartography.llm_planning import (
     LLMPageAnalysis,
     analyze_page_with_llm,
@@ -42,11 +44,10 @@ from graph_agent.cartography.llm_planning import (
     build_login_hint_from_env,
     plan_next_exploration_with_llm,
 )
-from graph_agent.cartography.login import click_menu_by_text, is_login_url
 from graph_agent.cartography.types import (
-    LLMTransitionHint,
     LayoutEvidenceItem,
     LayoutMetrics,
+    LLMTransitionHint,
 )
 from graph_agent.lib.observability import observe
 
@@ -55,12 +56,82 @@ if TYPE_CHECKING:
     from graph_agent.models import ZoneType
 
 
+def _parse_evaluate_result(raw: object) -> dict[str, object]:
+    import json
+
+    if raw is None or raw == "":
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+async def click_menu_by_text(browser: Browser, text: str) -> bool:
+    """Click a menu item by its visible text label."""
+    target = (text or "").strip()
+    if not target:
+        return False
+    script = (
+        "(target) => {\n"
+        "  const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();\n"
+        "  const candidates = [\n"
+        "    'a[role=\"menuitem\"]', '[role=\"menuitem\"]',\n"
+        "    '.ant-menu-item', '.el-menu-item', '.el-submenu__title',\n"
+        "    '.ant-menu-submenu-title', '.menu-item', '[class*=\"menu-item\"]',\n"
+        "    'aside a', 'aside button', 'nav a', 'nav button',\n"
+        "    'a', 'button', '[role=\"button\"]'\n"
+        "  ];\n"
+        "  const seen = new Set();\n"
+        "  for (const sel of candidates) {\n"
+        "    const els = Array.from(document.querySelectorAll(sel));\n"
+        "    for (const el of els) {\n"
+        "      if (seen.has(el)) continue;\n"
+        "      seen.add(el);\n"
+        "      const t = norm(el.innerText || el.textContent);\n"
+        "      if (!t) continue;\n"
+        "      if (t === target || (t.length <= 40 && t.includes(target))) {\n"
+        "        const rect = el.getBoundingClientRect();\n"
+        "        if (rect.width === 0 || rect.height === 0) continue;\n"
+        "        el.scrollIntoView({block: 'center'});\n"
+        "        el.click();\n"
+        "        return JSON.stringify({ok: true, tag: el.tagName, selector: sel});\n"
+        "      }\n"
+        "    }\n"
+        "  }\n"
+        "  return JSON.stringify({ok: false});\n"
+        "}"
+    )
+    try:
+        page = await browser.get_current_page()
+        if page is None:
+            return False
+        raw = await page.evaluate(script, target)
+        parsed = _parse_evaluate_result(raw)
+        if parsed.get("ok"):
+            print(
+                f"[PIPELINE] Menu '{target}' clicked "
+                f"(via {parsed.get('selector', '?')}, tag={parsed.get('tag', '?')})"
+            )
+            return True
+        print(f"[PIPELINE] Menu '{target}' not found on current page")
+        return False
+    except Exception as e:
+        print(f"[PIPELINE] click_menu_by_text error: {e}")
+        return False
+
+
 def rank_warm_start_candidates(
     candidates: list[dict[str, object]],
 ) -> list[dict[str, object]]:
     def _to_float(value: object) -> float:
         try:
-            return float(value)
+            return float(value)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             return 0.0
 
@@ -221,7 +292,9 @@ def should_query_knowledge(
     return True
 
 
-def build_knowledge_hint_text(summary: str, transition_hints: list[dict[str, object]]) -> str:
+def build_knowledge_hint_text(
+    summary: str, transition_hints: list[dict[str, object]]
+) -> str:
     if not summary and not transition_hints:
         return ""
     lines = [
@@ -234,7 +307,7 @@ def build_knowledge_hint_text(summary: str, transition_hints: list[dict[str, obj
             "- action={action}, selector={selector}, conf={confidence:.2f}".format(
                 action=str(item.get("action") or ""),
                 selector=str(item.get("selector") or ""),
-                confidence=float(item.get("confidence") or 0.0),
+                confidence=float(item.get("confidence") or 0.0),  # type: ignore[arg-type]
             )
         )
     lines.append("- If hint conflicts with current page evidence, ignore the hint.")
@@ -322,9 +395,7 @@ async def run_orchestrated_mapping(
         else max(100, knowledge_query_timeout_ms)
     )
     knowledge_topk_val = (
-        resolve_knowledge_topk()
-        if knowledge_topk is None
-        else max(1, knowledge_topk)
+        resolve_knowledge_topk() if knowledge_topk is None else max(1, knowledge_topk)
     )
     knowledge_broker = KnowledgeBroker() if knowledge_enabled else None
     last_knowledge_query_ts = 0.0
@@ -390,7 +461,9 @@ async def run_orchestrated_mapping(
     start_time = loop.time()
     first_page = True
 
-    while (pages_to_explore or pending_menus) and orchestration_step < max_orchestration_steps:
+    while (
+        pages_to_explore or pending_menus
+    ) and orchestration_step < max_orchestration_steps:
         if is_shutdown_requested():
             print("[PIPELINE] Shutdown requested, stopping exploration.")
             break
@@ -413,7 +486,9 @@ async def run_orchestrated_mapping(
 
         orchestration_step += 1
         elapsed_ms = (loop.time() - start_time) * 1000
-        print(f"\n[PIPELINE] Step {orchestration_step}/{max_orchestration_steps}: {url[:80]} (reason: {reason}) [queue={len(pages_to_explore)}, pending_menus={len(pending_menus)}]")
+        print(
+            f"\n[PIPELINE] Step {orchestration_step}/{max_orchestration_steps}: {url[:80]} (reason: {reason}) [queue={len(pages_to_explore)}, pending_menus={len(pending_menus)}]"
+        )
 
         if not await ensure_browser_ready(browser, url):
             print(f"[PIPELINE] Browser unrecoverable, skipping {url[:80]}")
@@ -433,7 +508,9 @@ async def run_orchestrated_mapping(
         if pending_menu_task is not None:
             clicked = await click_menu_by_text(browser, pending_menu_task["text"])
             if not clicked:
-                print(f"[PIPELINE] Menu click failed for '{pending_menu_task['text']}', skipping")
+                print(
+                    f"[PIPELINE] Menu click failed for '{pending_menu_task['text']}', skipping"
+                )
                 failed_action_count += 1
                 continue
             await asyncio.sleep(2)
@@ -451,12 +528,18 @@ async def run_orchestrated_mapping(
 
         current_page_url = await browser.get_current_page_url() or url
         if is_login_url(current_page_url):
-            print("[PIPELINE] Login page detected; delegating login (including captcha) to LLM explorer.")
+            print(
+                "[PIPELINE] Login page detected; delegating login (including captcha) to LLM explorer."
+            )
 
         layout_summary = ""
         layout_fingerprint = ""
         layout_confidence = 0.0
-        layout_summary, layout_fingerprint, layout_confidence = await collect_layout_context(
+        (
+            layout_summary,
+            layout_fingerprint,
+            layout_confidence,
+        ) = await collect_layout_context(
             browser,
             enabled=layout_enabled,
             limit=layout_limit,
@@ -505,17 +588,36 @@ async def run_orchestrated_mapping(
 
         for m in page_analysis.menu_items:
             menu_items_discovered.append(
-                {"text": m.text, "href": m.href, "level": m.level, "source_url": current_page_url}
+                {
+                    "text": m.text,
+                    "href": m.href,
+                    "level": m.level,
+                    "source_url": current_page_url,
+                }
             )
         for z in page_analysis.functional_zones:
             zones_discovered.append(
-                {"zone_type": z.zone_type, "selector": z.selector, "description": z.description, "source_url": current_page_url}
+                {
+                    "zone_type": z.zone_type,
+                    "selector": z.selector,
+                    "description": z.description,
+                    "source_url": current_page_url,
+                }
             )
             mapped_zone_type = map_llm_zone_type(z.zone_type)
             if mapped_zone_type is None:
                 continue
-            zone_id = f"zone:{z.zone_type}:{hashlib.md5(z.selector.encode()).hexdigest()[:8]}"
-            all_zones.append(Zone(id=zone_id, zone_type=mapped_zone_type, root_selector=z.selector, summary=z.description))
+            zone_id = (
+                f"zone:{z.zone_type}:{hashlib.md5(z.selector.encode()).hexdigest()[:8]}"
+            )
+            all_zones.append(
+                Zone(
+                    id=zone_id,
+                    zone_type=mapped_zone_type,
+                    root_selector=z.selector,
+                    summary=z.description,
+                )
+            )
 
         enqueued_menu_count = 0
         pending_menu_added = 0
@@ -539,7 +641,11 @@ async def run_orchestrated_mapping(
                         # Runtime evidence shows this often represents current-page nav badge.
                         # Keep queue clean by skipping no-op menu clicks.
                         continue
-                    full_href = urljoin(current_page_url, href) if href and not href.startswith("http") else href
+                    full_href = (
+                        urljoin(current_page_url, href)
+                        if href and not href.startswith("http")
+                        else href
+                    )
                     if full_href and is_http_url(full_href):
                         before = len(pages_to_explore)
                         _enqueue_page(full_href, f"menu: {text}")
@@ -547,15 +653,24 @@ async def run_orchestrated_mapping(
                             enqueued_menu_count += 1
                             if len(menu_enqueue_debug) < 8:
                                 menu_enqueue_debug.append(
-                                    {"type": "url", "text": text[:80], "href": full_href[:120]}
+                                    {
+                                        "type": "url",
+                                        "text": text[:80],
+                                        "href": full_href[:120],
+                                    }
                                 )
                     elif text:
                         key = (current_page_url, text)
                         if key in menus_clicked:
                             continue
-                        if any(p["source_url"] == current_page_url and p["text"] == text for p in pending_menus):
+                        if any(
+                            p["source_url"] == current_page_url and p["text"] == text
+                            for p in pending_menus
+                        ):
                             continue
-                        pending_menus.append({"text": text, "source_url": current_page_url})
+                        pending_menus.append(
+                            {"text": text, "source_url": current_page_url}
+                        )
                         pending_menu_added += 1
                         if len(menu_enqueue_debug) < 8:
                             menu_enqueue_debug.append(
@@ -569,7 +684,9 @@ async def run_orchestrated_mapping(
             and pending_menu_task is None
             and not low_layout_conf
         ):
-            print(f"[PIPELINE] Skip in-page exploration for {page_analysis.page_type}; {enqueued_menu_count} url-menu(s), {pending_menu_added} click-menu(s) queued.")
+            print(
+                f"[PIPELINE] Skip in-page exploration for {page_analysis.page_type}; {enqueued_menu_count} url-menu(s), {pending_menu_added} click-menu(s) queued."
+            )
             pages_explored.add(clean_url(current_page_url))
             continue
 
@@ -631,7 +748,11 @@ async def run_orchestrated_mapping(
                 knowledge_circuit_open_count += 1
             if knowledge_result.meta.error:
                 knowledge_error_count += 1
-            if knowledge_result.transition_hints or knowledge_result.intent_hints or knowledge_result.state_hints:
+            if (
+                knowledge_result.transition_hints
+                or knowledge_result.intent_hints
+                or knowledge_result.state_hints
+            ):
                 knowledge_hit_count += 1
                 knowledge_hint_text = build_knowledge_hint_text(
                     knowledge_result.summary,
@@ -714,7 +835,9 @@ async def run_orchestrated_mapping(
                 if len(pages_to_explore) > before:
                     harvested += 1
             if harvested:
-                print(f"[PIPELINE] Harvested {harvested} same-origin URL(s) from in-page states")
+                print(
+                    f"[PIPELINE] Harvested {harvested} same-origin URL(s) from in-page states"
+                )
 
             surviving_url = await _cleanup_foreign_tabs()
             try:
@@ -724,10 +847,14 @@ async def run_orchestrated_mapping(
             needs_recovery = (
                 not post_url
                 or post_url in ("about:blank", "chrome://newtab/")
-                or (primary_origin_url and not same_origin(post_url, primary_origin_url))
+                or (
+                    primary_origin_url and not same_origin(post_url, primary_origin_url)
+                )
             )
             if needs_recovery:
-                recover_target = surviving_url or current_page_url or url or primary_origin_url
+                recover_target = (
+                    surviving_url or current_page_url or url or primary_origin_url
+                )
                 try:
                     await browser.navigate_to(recover_target)
                     await asyncio.sleep(1)
@@ -780,10 +907,10 @@ async def run_orchestrated_mapping(
     result.layout_evidence = [dict(item) for item in layout_evidence]
     result.layout_metrics = dict(
         summarize_layout_metrics(
-        samples=layout_confidence_samples,
-        low_confidence_hits=low_layout_confidence_hits,
-        low_confidence_page_types=dict(low_layout_confidence_page_types),
-        evidence_count=len(layout_evidence),
+            samples=layout_confidence_samples,
+            low_confidence_hits=low_layout_confidence_hits,
+            low_confidence_page_types=dict(low_layout_confidence_page_types),
+            evidence_count=len(layout_evidence),
         )
     )
     result.layout_metrics.update(

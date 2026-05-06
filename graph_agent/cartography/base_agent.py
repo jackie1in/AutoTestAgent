@@ -17,18 +17,16 @@ import logging
 import os
 import re
 from collections import deque
-from typing import TYPE_CHECKING, Awaitable, Callable
-
-from pydantic import BaseModel, create_model
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from browser_use.agent.views import ActionModel
 from browser_use.browser.session import BrowserSession as Browser
 from browser_use.llm.base import BaseChatModel
 from browser_use.tools.service import Tools
+from pydantic import create_model
 
-from graph_agent.cartography.react_schema import AgentAction, AgentOutput
+from graph_agent.cartography.react_schema import AgentOutput
 from graph_agent.llm.utils import ainvoke_structured
-from graph_agent.models import ActionType
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +74,11 @@ class BaseAgent:
         self,
         task: str,
         llm: BaseChatModel,
-        browser: Browser,
+        browser: "Browser | None" = None,
         max_steps: int = 100,
         total_max_steps: int | None = None,
-        step_callback: Callable[[dict[str, object]], object | Awaitable[object]] | None = None,
+        step_callback: Callable[[dict[str, object]], object | Awaitable[object]]
+        | None = None,
         should_stop: Callable[[], bool] | None = None,
         initial_history: list[dict[str, object]] | None = None,
         initial_actions: list[dict[str, object]] | None = None,
@@ -108,7 +107,9 @@ class BaseAgent:
         self._page_load_issue_note: str | None = None
         self._request_failure_log: list[dict[str, object]] = []
         self._use_vision = self._resolve_use_vision_mode(use_vision)
-        self._vision_detail_level = self._resolve_vision_detail_level(vision_detail_level)
+        self._vision_detail_level = self._resolve_vision_detail_level(
+            vision_detail_level
+        )
 
         # Supported actions from browser-use registry
         self._supported_actions: set[str] = {
@@ -128,7 +129,11 @@ class BaseAgent:
     @staticmethod
     def _resolve_use_vision_mode(value: bool | str) -> str:
         """Resolve use_vision mode: auto | true | false."""
-        raw = str(value).strip().lower() if not isinstance(value, bool) else ("true" if value else "false")
+        raw = (
+            str(value).strip().lower()
+            if not isinstance(value, bool)
+            else ("true" if value else "false")
+        )
         if raw in {"true", "false", "auto"}:
             return raw
         env_raw = (os.getenv("BROWSER_USE_USE_VISION") or "").strip().lower()
@@ -197,11 +202,15 @@ You are an AI agent that explores a web application.
             history_entries.append(
                 f"Step {h.get('step', i)}: {h.get('action', 'unknown')} -> {h.get('result', '')}"
             )
-        history_text = "\n".join(history_entries) if history_entries else "No previous actions."
+        history_text = (
+            "\n".join(history_entries) if history_entries else "No previous actions."
+        )
 
         note_section = ""
         if self._page_load_issue_note:
-            note_section = f"\n<system_note>\n{self._page_load_issue_note}\n</system_note>\n"
+            note_section = (
+                f"\n<system_note>\n{self._page_load_issue_note}\n</system_note>\n"
+            )
 
         return f"""\
 <task>
@@ -239,9 +248,8 @@ Remaining steps: {remaining}
         # Convert params to AgentAction then to browser-use ActionModel
         action_cls = self._dynamic_action_model
         action_model = action_cls(**{action_type: params})
-        action_result = await self.tools.act(
-            action_model, browser_session=self.browser
-        )
+        assert self.browser is not None, "browser must be set before executing actions"
+        action_result = await self.tools.act(action_model, browser_session=self.browser)
         return action_result.extracted_content or str(action_result)
 
     async def _on_before_step(self, step: int) -> None:
@@ -318,13 +326,15 @@ Remaining steps: {remaining}
 
         # Execute initial_actions before the LLM loop so they appear in history.
         for ia_step, ia in enumerate(self.initial_actions):
-            action_type = ia.get("action_type", "")
+            action_type = str(ia.get("action_type", ""))
             result_text = await self._execute_initial_action(action_type, ia)
-            history.append({
-                "step": f"init-{ia_step}",
-                "action": action_type,
-                "result": result_text,
-            })
+            history.append(
+                {
+                    "step": f"init-{ia_step}",
+                    "action": action_type,
+                    "result": result_text,
+                }
+            )
             logger.info(
                 "[INITIAL_ACTION] step=init-%d action=%s result=%s",
                 ia_step,
@@ -338,6 +348,9 @@ Remaining steps: {remaining}
                 break
 
             # 1. Observe
+            assert self.browser is not None, (
+                "browser must be set before running agent loop"
+            )
             try:
                 dom_text, page_title, selector_map = await self._get_browser_snapshot()
                 current_url = await self.browser.get_current_page_url() or ""
@@ -357,17 +370,21 @@ Remaining steps: {remaining}
                     "The previous action resulted in a page that appears not fully loaded. "
                     "Try clicking a different tab, menu item, or interactive element instead."
                 )
-                history.append({
-                    "step": step,
-                    "action": "load_issue",
-                    "result": f"Page not loaded (DOM={dom_len}), trying alternative action.",
-                })
+                history.append(
+                    {
+                        "step": step,
+                        "action": "load_issue",
+                        "result": f"Page not loaded (DOM={dom_len}), trying alternative action.",
+                    }
+                )
                 continue
 
             url_before = current_url or url_before
             title_before = page_title or title_before
             selector_map_before = selector_map or selector_map_before
-            fp_before = self._compute_page_fingerprint(dom_text, page_title, selector_map)
+            fp_before = self._compute_page_fingerprint(
+                dom_text, page_title, selector_map
+            )
 
             # Subclass hook: before step
             await self._on_before_step(step)
@@ -388,11 +405,13 @@ Remaining steps: {remaining}
                 )
             except Exception as e:
                 logger.warning("LLM structured output failed at step %d: %s", step, e)
-                history.append({
-                    "step": step,
-                    "action": "error",
-                    "result": f"LLM error: {e}",
-                })
+                history.append(
+                    {
+                        "step": step,
+                        "action": "error",
+                        "result": f"LLM error: {e}",
+                    }
+                )
                 continue
 
             action_type = output.action.action_type
@@ -407,7 +426,8 @@ Remaining steps: {remaining}
             if action_type == "done":
                 history.append(
                     self._make_history_entry(
-                        step, "done",
+                        step,
+                        "done",
                         getattr(output.action, "text", "completed"),
                         output,
                     )
@@ -435,28 +455,39 @@ Remaining steps: {remaining}
 
             if self.step_callback:
                 try:
-                    cb_result = self.step_callback({
-                        "step": step,
-                        "action_type": action_type,
-                        "output": output,
-                        "result": result_text,
-                        "url": url_before,
-                    })
+                    cb_result = self.step_callback(
+                        {
+                            "step": step,
+                            "action_type": action_type,
+                            "output": output,
+                            "result": result_text,
+                            "url": url_before,
+                        }
+                    )
                     if cb_result and hasattr(cb_result, "__await__"):
-                        await cb_result
+                        await cb_result  # type: ignore[misc]
                 except Exception as e:
                     logger.debug("Step callback error: %s", e)
 
             # 4. Record transition if state changed
             try:
-                page = await self.browser.get_current_page()
+                page = (
+                    await self.browser.get_current_page()
+                    if self.browser is not None
+                    else None
+                )
             except Exception:
                 page = None
 
             if page:
-                stable_result = await self._wait_for_page_stable(page)
+                stable_result = await self._wait_for_page_stable(page)  # type: ignore[arg-type]
                 if stable_result.get("has_cors_failures"):
-                    failed_count = len(stable_result.get("failed_requests", []))
+                    failed_requests = stable_result.get("failed_requests", [])
+                    failed_count = (
+                        len(failed_requests)
+                        if isinstance(failed_requests, (list, tuple, dict, str))
+                        else 0
+                    )
                     logger.warning(
                         "[CORS] Page has %d CORS failures; trying alternative action.",
                         failed_count,
@@ -465,11 +496,13 @@ Remaining steps: {remaining}
                         f"The previous action caused {failed_count} network request failure(s) "
                         "(likely CORS / cross-origin blocking). Try clicking a different element."
                     )
-                    history.append({
-                        "step": step,
-                        "action": "cors_failure",
-                        "result": f"{failed_count} request failures detected; trying alternative.",
-                    })
+                    history.append(
+                        {
+                            "step": step,
+                            "action": "cors_failure",
+                            "result": f"{failed_count} request failures detected; trying alternative.",
+                        }
+                    )
                     continue
                 self._page_load_issue_note = None
             else:
@@ -477,8 +510,16 @@ Remaining steps: {remaining}
 
             # Check for state change
             try:
-                dom_text_after, title_after, selector_map_after = await self._get_browser_snapshot()
-                url_after = await self.browser.get_current_page_url() or ""
+                (
+                    dom_text_after,
+                    title_after,
+                    selector_map_after,
+                ) = await self._get_browser_snapshot()
+                url_after = (
+                    await self.browser.get_current_page_url()
+                    if self.browser is not None
+                    else url_before
+                ) or ""
                 fp_after = self._compute_page_fingerprint(
                     dom_text_after, title_after, selector_map_after
                 )
@@ -492,8 +533,13 @@ Remaining steps: {remaining}
 
             if changed:
                 await self._on_state_changed(
-                    step, url_before, url_after, action_type, output,
-                    fp_before=fp_before, fp_after=fp_after,
+                    step,
+                    url_before,
+                    url_after,
+                    action_type,
+                    output,
+                    fp_before=fp_before,
+                    fp_after=fp_after,
                 )
 
             await self._on_after_step(
@@ -508,17 +554,24 @@ Remaining steps: {remaining}
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _execute_initial_action(self, action_type: str, action: dict[str, object]) -> str:
+    async def _execute_initial_action(
+        self, action_type: str, action: dict[str, object]
+    ) -> str:
         """Execute a single initial_action."""
         return await self._execute_action(action_type, action)
 
     async def _attach_request_failure_listener(self) -> None:
         """Attach Playwright requestfailed listener to detect CORS issues."""
         try:
-            pw_page = await self.browser.get_current_page()
+            pw_page = (
+                await self.browser.get_current_page()
+                if self.browser is not None
+                else None
+            )
         except Exception:
             pw_page = None
-        if pw_page and hasattr(pw_page, "on"):
+        if pw_page and hasattr(pw_page, "on"):  # type: ignore[union-attr]
+
             def _on_request_failed(request: "Request") -> None:
                 failure = getattr(request, "failure", None)
                 error_text = str(failure.get("errorText", "")) if failure else ""
@@ -526,27 +579,30 @@ Remaining steps: {remaining}
                     kw in error_text.lower()
                     for kw in ("cors", "cross-origin", "access-control")
                 )
-                self._request_failure_log.append({
-                    "url": request.url,
-                    "method": getattr(request, "method", "GET"),
-                    "error": error_text,
-                    "is_cors": is_cors,
-                })
+                self._request_failure_log.append(
+                    {
+                        "url": request.url,
+                        "method": getattr(request, "method", "GET"),
+                        "error": error_text,
+                        "is_cors": is_cors,
+                    }
+                )
 
-            pw_page.on("requestfailed", _on_request_failed)
+            pw_page.on("requestfailed", _on_request_failed)  # type: ignore[union-attr]
 
     def _build_dynamic_action_model(self) -> type[ActionModel]:
         """Build a browser-use compatible ActionModel with supported actions."""
-        fields: dict[str, tuple[type[BaseModel] | None, None]] = {}
+        fields: dict[str, Any] = {}
         for name in sorted(self._supported_actions):
             if name not in self.tools.registry.registry.actions:
                 continue
             param_model = self.tools.registry.registry.actions[name].param_model
-            fields[name] = (param_model | None, None)
+            fields[name] = (Optional[param_model], None)
         return create_model("DynamicAction", __base__=ActionModel, **fields)
 
     async def _get_browser_snapshot(self) -> tuple[str, str, dict]:
         """Get DOM text, page title, and selector map."""
+        assert self.browser is not None, "browser must be set before getting snapshot"
         include_screenshot = self._use_vision == "true"
         browser_summary = await self.browser.get_browser_state_summary(
             include_screenshot=include_screenshot, include_recent_events=False
@@ -568,9 +624,7 @@ Remaining steps: {remaining}
 
         # Check for accumulated request failures BEFORE waiting
         if self._request_failure_log:
-            cors_failures = [
-                r for r in self._request_failure_log if r.get("is_cors")
-            ]
+            cors_failures = [r for r in self._request_failure_log if r.get("is_cors")]
             if len(cors_failures) >= 2:
                 result["stable"] = False
                 result["has_cors_failures"] = True
@@ -603,9 +657,7 @@ Remaining steps: {remaining}
         # After waiting, check again for failures
         if self._request_failure_log:
             result["failed_requests"] = list(self._request_failure_log)
-            cors_failures = [
-                r for r in self._request_failure_log if r.get("is_cors")
-            ]
+            cors_failures = [r for r in self._request_failure_log if r.get("is_cors")]
             if cors_failures:
                 result["has_cors_failures"] = True
             self._request_failure_log.clear()
@@ -620,6 +672,7 @@ Remaining steps: {remaining}
     def _url_origin(url: str) -> str:
         """Extract scheme://host from a URL."""
         from urllib.parse import urlparse
+
         p = urlparse(url or "")
         return f"{p.scheme}://{p.netloc}"
 
@@ -635,9 +688,7 @@ Remaining steps: {remaining}
         text = dom_text or ""
         text = re.sub(r"\[\d+\]", "[]", text)
         text = re.sub(r"\b\d{4}[-/]\d{2}[-/]\d{2}\b", "DATE", text)
-        text = re.sub(
-            r"\b\d{1,2}:\d{2}(?::\d{2})?(?:\s?[APap][Mm])?\b", "TIME", text
-        )
+        text = re.sub(r"\b\d{1,2}:\d{2}(?::\d{2})?(?:\s?[APap][Mm])?\b", "TIME", text)
         text = re.sub(
             r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",
             "UUID",
@@ -677,7 +728,9 @@ Remaining steps: {remaining}
         struct_fp = self._compute_structural_fingerprint(selector_map)
         title_part = hashlib.md5((title or "").encode("utf-8")).hexdigest()[:8]
         composite = f"{dom_fp}:{struct_fp}:{title_part}"
-        include_layout = (os.getenv("CARTOGRAPHY_LAYOUT_INCLUDE_IN_PAGE_FP") or "").strip().lower()
+        include_layout = (
+            (os.getenv("CARTOGRAPHY_LAYOUT_INCLUDE_IN_PAGE_FP") or "").strip().lower()
+        )
         if layout_fingerprint and include_layout in {"1", "true", "yes", "on"}:
             composite = f"{composite}:{layout_fingerprint}"
         return hashlib.md5(composite.encode("utf-8")).hexdigest()[:20]

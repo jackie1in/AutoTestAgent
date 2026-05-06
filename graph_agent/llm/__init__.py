@@ -9,13 +9,13 @@ OpenRouter is provided by browser-use directly.
 """
 
 # Factory functions
-from graph_agent.llm.llm import create_zhipu_llm, get_llm
-
-# Providers
-from graph_agent.llm.zhipu.chat import ChatZhiPu as ChatGLM
-
 # Re-export browser-use's ChatOpenRouter
 from browser_use.llm.openrouter.chat import ChatOpenRouter
+
+# View models (from browser-use for type compatibility)
+from browser_use.llm.views import ChatInvokeCompletion, ChatInvokeUsage
+
+from graph_agent.llm.llm import get_llm
 
 # Utility functions
 from graph_agent.llm.utils import (
@@ -24,13 +24,12 @@ from graph_agent.llm.utils import (
     get_format_instructions,
 )
 
-# View models (from browser-use for type compatibility)
-from browser_use.llm.views import ChatInvokeCompletion, ChatInvokeUsage
+# Providers
+from graph_agent.llm.zhipu.chat import ChatZhiPu as ChatGLM
 
 __all__ = [
     # Factory
     "get_llm",
-    "create_zhipu_llm",
     # Providers
     "ChatGLM",
     "ChatOpenRouter",

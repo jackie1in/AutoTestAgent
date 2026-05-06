@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import os
 import signal
 import sys
@@ -73,7 +71,7 @@ async def managed_browser(browser: Browser):
             elif hasattr(browser, "stop"):
                 await browser.stop()
             elif hasattr(browser, "close"):
-                await browser.close()
+                await browser.close()  # type: ignore[union-attr]
         except Exception as e:
             print(f"[WARN] Browser cleanup error: {e}")
         finally:
@@ -130,7 +128,7 @@ def _load_inventory(inventory_path: str | Path) -> list[dict]:
 
 def _as_float(value: object, default: float = 0.0) -> float:
     try:
-        return float(value)
+        return float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return default
 
@@ -475,7 +473,7 @@ def main() -> None:
     output = (args.output or "").strip() or default_output
     inventory = (args.inventory or "").strip() or default_inventory
     scout_pages_arg = (args.scout_pages or "").strip()
-    scout_pages = [item.strip() for item in scout_pages_arg.split(",") if item.strip()]
+    _scout_pages = [item.strip() for item in scout_pages_arg.split(",") if item.strip()]
     merge_existing = bool(args.merge_existing)
     run_mode = (args.mode or "auto").strip()
     url = _resolve_mapping_url(args.url)

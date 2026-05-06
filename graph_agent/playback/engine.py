@@ -6,12 +6,13 @@ import asyncio
 import json
 import os
 import uuid
-from collections.abc import Callable, Awaitable
+from collections.abc import Awaitable, Callable
 from time import monotonic
 from typing import Any
 from urllib.parse import urlparse
 
-from playwright.async_api import expect, async_playwright
+from playwright.async_api import async_playwright, expect
+
 from graph_agent.models import (
     ActionType,
     ElementConstraints,
@@ -248,9 +249,7 @@ def _element_selector_candidates(edge: GraphEdge) -> list[str]:
         if attrs.get("type") == "submit":
             candidates.append('button[type="submit"]')
         if attrs.get("name") and attrs.get("type"):
-            candidates.append(
-                f'input[type="{attrs["type"]}"][name="{attrs["name"]}"]'
-            )
+            candidates.append(f'input[type="{attrs["type"]}"][name="{attrs["name"]}"]')
         elif attrs.get("name"):
             candidates.append(f'[name="{attrs["name"]}"]')
 
@@ -286,9 +285,7 @@ async def _ensure_frame_attached(
         candidates = _frame_selector_candidates(frame, 1)
         for sel in candidates:
             try:
-                await page.wait_for_selector(
-                    sel, state="attached", timeout=timeout_ms
-                )
+                await page.wait_for_selector(sel, state="attached", timeout=timeout_ms)
                 matched_sel = sel
                 break
             except Exception:
@@ -327,9 +324,7 @@ async def _try_action_with_selector_fallback(
     last_exc: Exception | None = None
     for sel in candidates:
         try:
-            loc = _locator_in_context(
-                page_for_edge, sel, edge.frame_path or []
-            )
+            loc = _locator_in_context(page_for_edge, sel, edge.frame_path or [])
             await action_fn(loc)
             return
         except Exception as exc:
@@ -617,10 +612,12 @@ async def run_playback(
                                     raise ValueError(
                                         "Navigate step is missing a resolvable URL"
                                     )
+                                assert navigate_url is not None
                                 if wait_for_network:
+                                    _nav_url: str = navigate_url  # type: ignore[assignment]
 
                                     async def _goto() -> None:
-                                        await page_for_edge.goto(navigate_url)
+                                        await page_for_edge.goto(_nav_url)
 
                                     await _run_with_http_wait(
                                         page_for_edge,
@@ -628,7 +625,7 @@ async def run_playback(
                                         timeout_ms=timeout_ms,
                                     )
                                 else:
-                                    await page_for_edge.goto(navigate_url)
+                                    await page_for_edge.goto(navigate_url)  # type: ignore[arg-type]
                                 actual_url = page_for_edge.url
                                 last_action_page = page_for_edge
                                 log_entry["success"] = True
@@ -701,6 +698,7 @@ async def run_playback(
                                 continue
 
                             if edge.tab_action == TabActionType.OPEN:
+
                                 async def _do_open_click(loc: Any) -> None:
                                     if wait_for_network:
                                         await _run_with_http_wait(
@@ -853,15 +851,11 @@ async def run_playback(
 
                                 # 1. Tab closure recovery: the click may have closed
                                 #    the current tab (common in SSO / OAuth flows).
-                                if getattr(
-                                    page_for_edge, "is_closed", lambda: False
-                                )():
+                                if getattr(page_for_edge, "is_closed", lambda: False)():
                                     open_pages = [
                                         pg
                                         for pg in browser_context.pages
-                                        if not getattr(
-                                            pg, "is_closed", lambda: False
-                                        )()
+                                        if not getattr(pg, "is_closed", lambda: False)()
                                     ]
                                     if open_pages:
                                         pages_by_tab_id[edge.tab_id] = open_pages[0]
@@ -912,8 +906,13 @@ async def run_playback(
                                         edge.source_url, edge.target_url
                                     )
                                 )
-                                if expected_nav and actual_url and _urls_same_page(
-                                    actual_url, edge.source_url  # type: ignore[arg-type]
+                                if (
+                                    expected_nav
+                                    and actual_url
+                                    and _urls_same_page(
+                                        actual_url,
+                                        edge.source_url,  # type: ignore[arg-type]
+                                    )
                                 ):
                                     # Brief grace period for client-side JS redirects
                                     # that fire after DOMContentLoaded.
@@ -929,15 +928,18 @@ async def run_playback(
                                             )()
                                         ]
                                         if open_pages:
-                                            pages_by_tab_id[edge.tab_id] = (
-                                                open_pages[0]
-                                            )
+                                            pages_by_tab_id[edge.tab_id] = open_pages[0]
                                             page_for_edge = open_pages[0]
                                     actual_url = page_for_edge.url
 
                                 # Still on the source page after expected navigation?
-                                if expected_nav and actual_url and _urls_same_page(
-                                    actual_url, edge.source_url  # type: ignore[arg-type]
+                                if (
+                                    expected_nav
+                                    and actual_url
+                                    and _urls_same_page(
+                                        actual_url,
+                                        edge.source_url,  # type: ignore[arg-type]
+                                    )
                                 ):
                                     is_login = _is_login_like_url(actual_url)
                                     if is_login and saw_auth_credentials:
@@ -990,19 +992,14 @@ async def run_playback(
                                 #    no-op click (e.g. SPA not ready) would
                                 #    leave the page without the iframe, causing
                                 #    downstream failures.
-                                if (
-                                    not edge.frame_path
-                                    and i + 1 < len(ordered_edges)
-                                ):
+                                if not edge.frame_path and i + 1 < len(ordered_edges):
                                     next_edge = ordered_edges[i + 1]
                                     if next_edge.frame_path:
                                         try:
                                             await _ensure_frame_attached(
                                                 page_for_edge,
                                                 next_edge.frame_path,
-                                                timeout_ms=min(
-                                                    timeout_ms, 15_000
-                                                ),
+                                                timeout_ms=min(timeout_ms, 15_000),
                                             )
                                         except Exception:
                                             lookahead_error = (
@@ -1017,9 +1014,7 @@ async def run_playback(
                                             log_entry["error"] = lookahead_error
                                             if log_callback:
                                                 res = log_callback(log_entry)
-                                                if res and hasattr(
-                                                    res, "__await__"
-                                                ):
+                                                if res and hasattr(res, "__await__"):
                                                     await res
                                             return {
                                                 "success": False,
@@ -1052,9 +1047,7 @@ async def run_playback(
                                 open_pages = [
                                     p
                                     for p in browser_context.pages
-                                    if not getattr(
-                                        p, "is_closed", lambda: False
-                                    )()
+                                    if not getattr(p, "is_closed", lambda: False)()
                                 ]
                                 if open_pages:
                                     recovered = open_pages[0]
@@ -1078,9 +1071,7 @@ async def run_playback(
                                                 edge.param_name
                                                 and edge.param_name in test_data
                                             ):
-                                                value = str(
-                                                    test_data[edge.param_name]
-                                                )
+                                                value = str(test_data[edge.param_name])
                                             elif edge.action_value is not None:
                                                 value = str(edge.action_value)
                                             elif edge.constraints:
@@ -1098,10 +1089,12 @@ async def run_playback(
                                                 await loc.fill(value)
 
                                             await _retry_action(
-                                                lambda: _try_action_with_selector_fallback(
-                                                    page_for_edge,
-                                                    edge,
-                                                    _do_fill_r,
+                                                lambda: (
+                                                    _try_action_with_selector_fallback(
+                                                        page_for_edge,
+                                                        edge,
+                                                        _do_fill_r,
+                                                    )
                                                 )
                                             )
                                         elif action == ActionType.RICH_TEXT:
@@ -1110,9 +1103,7 @@ async def run_playback(
                                                 edge.param_name
                                                 and edge.param_name in test_data
                                             ):
-                                                value = str(
-                                                    test_data[edge.param_name]
-                                                )
+                                                value = str(test_data[edge.param_name])
                                             elif edge.action_value is not None:
                                                 value = str(edge.action_value)
                                             elif edge.constraints:
@@ -1133,10 +1124,12 @@ async def run_playback(
                                                 await kb.type(value)
 
                                             await _retry_action(
-                                                lambda: _try_action_with_selector_fallback(
-                                                    page_for_edge,
-                                                    edge,
-                                                    _do_rich_text_r,
+                                                lambda: (
+                                                    _try_action_with_selector_fallback(
+                                                        page_for_edge,
+                                                        edge,
+                                                        _do_rich_text_r,
+                                                    )
                                                 )
                                             )
                                         elif action == ActionType.SELECT:
@@ -1145,9 +1138,7 @@ async def run_playback(
                                                 edge.param_name
                                                 and edge.param_name in test_data
                                             ):
-                                                value = str(
-                                                    test_data[edge.param_name]
-                                                )
+                                                value = str(test_data[edge.param_name])
                                             elif edge.action_value is not None:
                                                 value = str(edge.action_value)
                                             else:
@@ -1159,23 +1150,28 @@ async def run_playback(
                                                 await loc.select_option(value)
 
                                             await _retry_action(
-                                                lambda: _try_action_with_selector_fallback(
-                                                    page_for_edge,
-                                                    edge,
-                                                    _do_select_r,
+                                                lambda: (
+                                                    _try_action_with_selector_fallback(
+                                                        page_for_edge,
+                                                        edge,
+                                                        _do_select_r,
+                                                    )
                                                 )
                                             )
                                         elif action == ActionType.CLICK:
+
                                             async def _do_click_r(
                                                 loc: Any,
                                             ) -> None:
                                                 await loc.click()
 
                                             await _retry_action(
-                                                lambda: _try_action_with_selector_fallback(
-                                                    page_for_edge,
-                                                    edge,
-                                                    _do_click_r,
+                                                lambda: (
+                                                    _try_action_with_selector_fallback(
+                                                        page_for_edge,
+                                                        edge,
+                                                        _do_click_r,
+                                                    )
                                                 )
                                             )
                                         actual_url = page_for_edge.url
@@ -1183,9 +1179,7 @@ async def run_playback(
                                         log_entry["success"] = True
                                         if log_callback:
                                             res = log_callback(log_entry)
-                                            if res and hasattr(
-                                                res, "__await__"
-                                            ):
+                                            if res and hasattr(res, "__await__"):
                                                 await res
                                         continue
                                     except Exception:
@@ -1194,8 +1188,8 @@ async def run_playback(
                             formatted_error = _format_replay_error(
                                 step_error, edge, edge.tab_id
                             )
-                            evidence_summary = await _lookup_transition_evidence_summary(
-                                edge.edge_id
+                            evidence_summary = (
+                                await _lookup_transition_evidence_summary(edge.edge_id)
                             )
                             if evidence_summary:
                                 formatted_error = (
