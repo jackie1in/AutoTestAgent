@@ -362,7 +362,7 @@ class ReActExplorer(BaseAgent):
                 case "solve_captcha":
                     page = await browser.get_current_page()
                     if page is None:
-                        return "No page available"
+                        return "CAPTCHA_FAILED no_active_page"
                     _input_index_raw = params.get("input_index")
                     input_index: int | None = (
                         cast(int, _input_index_raw)
@@ -380,7 +380,10 @@ class ReActExplorer(BaseAgent):
                         input_result = await controller.input_text(
                             input_index, captcha_code
                         )
-                        return f"Solved captcha and filled [{input_index}]: {input_result.message}"
+                        return (
+                            f"CAPTCHA_OK filled_index={input_index} "
+                            f"code_len={len(captcha_code)} result={input_result.message}"
+                        )
                     if captcha_code:
                         # Fallback: locate the target input by hint or general captcha keywords
                         hint_pattern = (
@@ -414,9 +417,12 @@ class ReActExplorer(BaseAgent):
                             await page.evaluate(fill_script, captcha_code, hint_pattern)
                         )
                         if filled:
-                            return f"Solved captcha '{captcha_code}' and filled input via semantic match"
-                        return f"Solved captcha '{captcha_code}' but failed to locate target input field"
-                    return "Captcha solve returned empty code"
+                            return (
+                                "CAPTCHA_OK filled_by_semantic_match "
+                                f"code_len={len(captcha_code)}"
+                            )
+                        return "CAPTCHA_FILL_FAILED target_input_not_found"
+                    return "CAPTCHA_EMPTY_CODE"
                 case _:
                     return f"Unknown action: {action_type}"
         except Exception as e:

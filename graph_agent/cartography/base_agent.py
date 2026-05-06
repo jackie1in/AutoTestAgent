@@ -26,12 +26,13 @@ from browser_use.tools.service import Tools
 from pydantic import create_model
 
 from graph_agent.cartography.react_schema import AgentOutput
+from graph_agent.cartography.runtime_guard import RuntimeGuard, guard_history_entry
 from graph_agent.llm.utils import ainvoke_structured
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from playwright.async_api import Page, Request
+    from playwright.async_api import Page, Request, Response
 
 
 def _get_spa_route(url: str) -> str:
@@ -106,6 +107,7 @@ class BaseAgent:
         # Page load tracking
         self._page_load_issue_note: str | None = None
         self._request_failure_log: list[dict[str, object]] = []
+        self.runtime_guard = RuntimeGuard()
         self._use_vision = self._resolve_use_vision_mode(use_vision)
         self._vision_detail_level = self._resolve_vision_detail_level(
             vision_detail_level
@@ -358,8 +360,22 @@ Remaining steps: {remaining}
                 logger.warning("Failed to get browser state at step %d: %s", step, e)
                 break
 
-            # Detect page load failure (empty/minimal DOM)
+            # Detect page load failure / terminal runtime states.
             dom_len = len(dom_text or "")
+            observation_decision = self.runtime_guard.inspect_observation(
+                dom_text=dom_text,
+                url=current_url,
+                dom_len=dom_len,
+            )
+            if observation_decision.should_stop:
+                logger.warning(
+                    "[RUNTIME_GUARD] stop code=%s reason=%s",
+                    observation_decision.code,
+                    observation_decision.reason,
+                )
+                history.append(guard_history_entry(step, observation_decision))
+                break
+
             if dom_len < 50:
                 logger.warning(
                     "[SKIP] Page appears not loaded (DOM length=%d, url=%s).",
@@ -453,6 +469,19 @@ Remaining steps: {remaining}
                 self._make_history_entry(step, action_type, result_text, output)
             )
 
+            action_decision = self.runtime_guard.record_action_result(
+                action_type=action_type,
+                result_text=result_text,
+            )
+            if action_decision.should_stop:
+                logger.warning(
+                    "[RUNTIME_GUARD] stop code=%s reason=%s",
+                    action_decision.code,
+                    action_decision.reason,
+                )
+                history.append(guard_history_entry(step, action_decision))
+                break
+
             if self.step_callback:
                 try:
                     cb_result = self.step_callback(
@@ -481,6 +510,15 @@ Remaining steps: {remaining}
 
             if page:
                 stable_result = await self._wait_for_page_stable(page)  # type: ignore[arg-type]
+                network_decision = self.runtime_guard.inspect_network()
+                if network_decision.should_stop:
+                    logger.warning(
+                        "[RUNTIME_GUARD] stop code=%s reason=%s",
+                        network_decision.code,
+                        network_decision.reason,
+                    )
+                    history.append(guard_history_entry(step, network_decision))
+                    break
                 if stable_result.get("has_cors_failures"):
                     failed_requests = stable_result.get("failed_requests", [])
                     failed_count = (
@@ -579,16 +617,36 @@ Remaining steps: {remaining}
                     kw in error_text.lower()
                     for kw in ("cors", "cross-origin", "access-control")
                 )
-                self._request_failure_log.append(
-                    {
-                        "url": request.url,
-                        "method": getattr(request, "method", "GET"),
-                        "error": error_text,
-                        "is_cors": is_cors,
+                event = {
+                    "kind": "requestfailed",
+                    "url": request.url,
+                    "method": getattr(request, "method", "GET"),
+                    "error": error_text,
+                    "is_cors": is_cors,
+                }
+                self._request_failure_log.append(event)
+                self.runtime_guard.record_network_event(event)
+
+            def _on_response(response: "Response") -> None:
+                try:
+                    status = int(getattr(response, "status", 0) or 0)
+                    if status < 400:
+                        return
+                    request = getattr(response, "request", None)
+                    event = {
+                        "kind": "response",
+                        "url": getattr(response, "url", ""),
+                        "status": status,
+                        "method": getattr(request, "method", "GET")
+                        if request
+                        else "GET",
                     }
-                )
+                    self.runtime_guard.record_network_event(event)
+                except Exception:
+                    return
 
             pw_page.on("requestfailed", _on_request_failed)  # type: ignore[union-attr]
+            pw_page.on("response", _on_response)  # type: ignore[union-attr]
 
     def _build_dynamic_action_model(self) -> type[ActionModel]:
         """Build a browser-use compatible ActionModel with supported actions."""
