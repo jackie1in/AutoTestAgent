@@ -704,7 +704,7 @@ async def solve_captcha_from_page(
         "[CAPTCHA] Sending %d candidate image(s) to recognizer.", len(image_data_urls)
     )
     for idx, data_url in enumerate(image_data_urls, start=1):
-        logger.info("[CAPTCHA] Candidate #%d data_url=%s", idx, data_url)
+        logger.debug("[CAPTCHA] Candidate #%d data_url=%s", idx, data_url)
     code = await recognize_captcha_with_candidates(image_data_urls, llm)
     if code:
         logger.info("[CAPTCHA] Recognized code: '%s'", code)
