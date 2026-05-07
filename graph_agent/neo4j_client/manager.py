@@ -8,8 +8,10 @@ from graph_agent.neo4j_client.driver import Neo4jDriver
 from graph_agent.neo4j_client.repository import GraphRepository
 from graph_agent.models import (
     App,
+    CoverageSnapshot,
     GraphRelease,
     IngestionRun,
+    Intent,
     Session,
     State,
     Transition,
@@ -169,6 +171,7 @@ class GraphManager:
             s.intervention_tasks_json = $intervention_tasks_json,
             s.current_release_id = $current_release_id,
             s.latest_ingest_version_id = $latest_ingest_version_id,
+            s.current_coverage_snapshot_id = $current_coverage_snapshot_id,
             s.name = coalesce(s.focus, s.id)
         """
         await self._run_write(
@@ -191,6 +194,7 @@ class GraphManager:
             intervention_tasks_json=tasks_json,
             current_release_id=stats.get("current_release_id", ""),
             latest_ingest_version_id=stats.get("latest_ingest_version_id", ""),
+            current_coverage_snapshot_id=stats.get("current_coverage_snapshot_id", ""),
         )
     
     # State operations
@@ -215,6 +219,73 @@ class GraphManager:
         if self._repo is None:
             raise RuntimeError("GraphManager not initialized")
         await self._repo.upsert_transition_entity(entity)
+
+    async def add_transition_entity_with_session(
+        self,
+        entity: TransitionEntity,
+        session_id: str,
+    ) -> None:
+        """累积 confirmed_session_count（按 session 去重）。
+
+        SkipAdvisor 在 _query_coverage 里读 ent.confirmed_session_count，
+        作为"该 transition 已被多少个独立 session 复现"的强信号。
+        """
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.upsert_transition_entity_with_session(entity, session_id)
+
+    async def add_coverage_snapshot(self, snapshot: CoverageSnapshot) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.upsert_coverage_snapshot(snapshot)
+
+    async def link_session_coverage(
+        self, session_id: str, coverage_id: str
+    ) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.link_session_achieved_coverage(session_id, coverage_id)
+
+    async def link_release_coverage(
+        self, release_id: str, coverage_id: str
+    ) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.link_release_has_coverage(release_id, coverage_id)
+
+    async def add_intent(self, intent: Intent) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.upsert_intent(intent)
+
+    async def link_transition_intent(self, transition_id: str, intent_id: str) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.link_transition_intent(transition_id, intent_id)
+
+    async def link_zone_covers_intent(
+        self,
+        *,
+        from_state_id: str,
+        selector: str,
+        intent_id: str,
+        confidence: float,
+        session_id: str,
+    ) -> None:
+        """建立 (:Zone)-[:COVERS_INTENT {observed_count, confidence}]->(:Intent)。
+
+        匹配规则：与 from_state 相连的 Zone 中，selector 与 transition.selector
+        互为子串关系的 zone 视为命中。每次命中 observed_count +1。
+        """
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.link_zone_covers_intent(
+            from_state_id=from_state_id,
+            selector=selector,
+            intent_id=intent_id,
+            confidence=confidence,
+            session_id=session_id,
+        )
 
     async def add_transition_revision(self, revision: TransitionRevision) -> None:
         if self._repo is None:
@@ -331,6 +402,8 @@ class GraphManager:
         - (:State)-[:HAS_ZONE]->(:Zone) when state_id is provided
         - (:App)-[:HAS_ZONE]->(:Zone) as aggregate link
         """
+        # exploration_status / last_explored 用 MAX 优先级：避免新 session 把已 explored 的 zone
+        # 倒退回 discovered。SkipAdvisor 依赖这两个字段判定跨 session 跳过。
         query = """
         UNWIND $zones as zone
         MERGE (z:Zone {id: zone.id})
@@ -342,7 +415,31 @@ class GraphManager:
             z.ingest_version_id = zone.ingest_version_id,
             z.name = coalesce(zone.summary, zone.type, zone.id),
             z.updated_at = datetime()
-        WITH z, zone
+        WITH z, zone,
+             coalesce(z.exploration_status, 'undiscovered') AS prev_status,
+             coalesce(zone.exploration_status, 'discovered') AS new_status
+        WITH z, zone, prev_status, new_status,
+             CASE prev_status
+                 WHEN 'validated' THEN 4
+                 WHEN 'explored' THEN 3
+                 WHEN 'partial' THEN 2
+                 WHEN 'discovered' THEN 1
+                 ELSE 0
+             END AS prev_p,
+             CASE new_status
+                 WHEN 'validated' THEN 4
+                 WHEN 'explored' THEN 3
+                 WHEN 'partial' THEN 2
+                 WHEN 'discovered' THEN 1
+                 ELSE 0
+             END AS new_p
+        SET z.exploration_status = CASE WHEN new_p >= prev_p THEN new_status ELSE prev_status END,
+            z.last_explored = CASE
+                WHEN zone.last_explored IS NOT NULL
+                  THEN datetime(zone.last_explored)
+                ELSE z.last_explored
+            END
+        WITH z
         MATCH (a:App {id: $app_id})
         MERGE (a)-[:HAS_ZONE]->(z)
         """

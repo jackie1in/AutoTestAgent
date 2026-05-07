@@ -107,6 +107,7 @@ def build_user_prompt(
     max_steps: int,
     page_title: str = "",
     observations: list[str] | None = None,
+    target_zone_selectors: list[str] | None = None,
 ) -> str:
     """Build the user prompt for each ReAct step.
 
@@ -154,6 +155,19 @@ def build_user_prompt(
     if explored_indices:
         parts.append(
             f"<explored_elements>Already interacted: {sorted(explored_indices)}</explored_elements>\n"
+        )
+
+    # <zone_filter> — SkipAdvisor 决策为 EXPLORE_ZONES_ONLY 时注入；软约束
+    if target_zone_selectors:
+        zone_lines = "\n".join(f"  - {sel}" for sel in target_zone_selectors[:20])
+        parts.append(
+            "<zone_filter>\n"
+            "本页面已被部分探索过，仅以下区域 (root selector) 仍待补充覆盖：\n"
+            f"{zone_lines}\n"
+            "请优先且只与位于这些 selector 子树内的元素交互；"
+            "若全部已尽则立即调用 done。"
+            "如果当前 DOM 中找不到这些 selector，可退化为常规探索。\n"
+            "</zone_filter>\n"
         )
 
     return "\n".join(parts)

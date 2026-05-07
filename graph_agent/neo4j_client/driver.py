@@ -64,6 +64,7 @@ class Neo4jDriver:
                 "CREATE CONSTRAINT IF NOT EXISTS FOR (ent:TransitionEntity) REQUIRE ent.stable_key IS UNIQUE",
                 "CREATE CONSTRAINT IF NOT EXISTS FOR (rev:TransitionRevision) REQUIRE rev.revision_id IS UNIQUE",
                 "CREATE CONSTRAINT IF NOT EXISTS FOR (gr:GraphRelease) REQUIRE gr.id IS UNIQUE",
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (cov:CoverageSnapshot) REQUIRE cov.id IS UNIQUE",
             ]
             indexes = [
                 "CREATE INDEX IF NOT EXISTS FOR (a:App) ON (a.entry_url)",
@@ -92,6 +93,10 @@ class Neo4jDriver:
                 "CREATE INDEX IF NOT EXISTS FOR (rev:TransitionRevision) ON (rev.transition_id, rev.is_active)",
                 "CREATE INDEX IF NOT EXISTS FOR (rev:TransitionRevision) ON (rev.stable_key)",
                 "CREATE INDEX IF NOT EXISTS FOR (gr:GraphRelease) ON (gr.app_id)",
+                "CREATE INDEX IF NOT EXISTS FOR (cov:CoverageSnapshot) ON (cov.app_id)",
+                "CREATE INDEX IF NOT EXISTS FOR (cov:CoverageSnapshot) ON (cov.session_id)",
+                "CREATE INDEX IF NOT EXISTS FOR (cov:CoverageSnapshot) ON (cov.captured_at)",
+                "CREATE INDEX IF NOT EXISTS FOR (ent:TransitionEntity) ON (ent.confirmed_session_count)",
             ]
             for stmt in constraints + indexes:
                 await session.run(stmt)

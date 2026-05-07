@@ -196,3 +196,67 @@ def resolve_knowledge_trigger_profile() -> str:
     if raw in {"conservative", "balanced", "aggressive"}:
         return raw
     return "balanced"
+
+
+def resolve_skip_advisor_enabled() -> bool:
+    """Toggle SkipAdvisor 跨 session 跳过已探索区域。"""
+    return env_bool("CARTOGRAPHY_SKIP_ADVISOR_ENABLED", True)
+
+
+def resolve_skip_policy_profile() -> str:
+    """SkipPolicy profile: conservative | balanced | aggressive."""
+    raw = (os.getenv("CARTOGRAPHY_SKIP_POLICY_PROFILE") or "").strip().lower()
+    if raw in {"conservative", "balanced", "aggressive"}:
+        return raw
+    return "balanced"
+
+
+def resolve_skip_query_timeout_ms() -> int:
+    raw = (os.getenv("CARTOGRAPHY_SKIP_QUERY_TIMEOUT_MS") or "").strip()
+    if not raw:
+        return 300
+    try:
+        val = int(raw)
+    except ValueError:
+        return 300
+    return max(50, min(5000, val))
+
+
+def resolve_skip_cache_ttl_sec() -> float:
+    raw = (os.getenv("CARTOGRAPHY_SKIP_CACHE_TTL_SEC") or "").strip()
+    if not raw:
+        return 60.0
+    try:
+        val = float(raw)
+    except ValueError:
+        return 60.0
+    return max(1.0, min(3600.0, val))
+
+
+def resolve_skip_ttl_hours() -> float | None:
+    """覆盖 SkipPolicy.ttl_hours；为空则使用 profile 默认值。"""
+    raw = (os.getenv("CARTOGRAPHY_SKIP_TTL_HOURS") or "").strip()
+    if not raw:
+        return None
+    try:
+        val = float(raw)
+    except ValueError:
+        return None
+    return max(0.5, min(720.0, val))
+
+
+def resolve_scheduler_warm_start_enabled() -> bool:
+    """是否在 warm-start 阶段调用 ExplorationScheduler 把"已知缺口"注入候选。"""
+    return env_bool("CARTOGRAPHY_SCHEDULER_WARM_START_ENABLED", True)
+
+
+def resolve_scheduler_warm_start_topk() -> int:
+    """ExplorationScheduler 一次最多注入多少 candidate。"""
+    raw = (os.getenv("CARTOGRAPHY_SCHEDULER_WARM_START_TOPK") or "").strip()
+    if not raw:
+        return 50
+    try:
+        val = int(raw)
+    except ValueError:
+        return 50
+    return max(1, min(500, val))

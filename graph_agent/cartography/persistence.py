@@ -68,6 +68,7 @@ async def persist_mapping_result(
     from graph_agent.models import (
         ActionType,
         App,
+        CoverageSnapshot,
         Evidence,
         EvidenceType,
         GraphRelease,
@@ -79,6 +80,7 @@ async def persist_mapping_result(
         TransitionRevision,
         TransitionSourceType,
     )
+    from graph_agent.coverage.analyzer import CoverageAnalyzer
     from graph_agent.neo4j_client.manager import GraphManager
 
     async with GraphManager() as manager:
@@ -208,7 +210,7 @@ async def persist_mapping_result(
                 intent_key = _as_str(transition_to_store.intent.key).strip()
             if not intent_key:
                 intent_key = _as_str(transition_to_store.semantic_action_key).strip()
-            await manager.add_transition_entity(
+            await manager.add_transition_entity_with_session(
                 TransitionEntity(
                     stable_key=stable_key,
                     app_id=app_id,
@@ -217,7 +219,8 @@ async def persist_mapping_result(
                     action=action_value,
                     semantic_action_key=_as_str(transition_to_store.semantic_action_key)
                     or None,
-                )
+                ),
+                session_id=session_id,
             )
             existing_active = await manager.get_active_transition_revision(stable_key)
             source_enum = (
@@ -270,6 +273,35 @@ async def persist_mapping_result(
                 active_revision_ids.append(revision.revision_id)
             else:
                 await manager.attach_transition_revision(stable_key, revision.revision_id)
+
+            # 持久化 Intent + (t)-[:REALIZES]->(i) + (z)-[:COVERS_INTENT]->(i)。
+            # 这是"长期学习沉淀"链路：让 zone 在多 session 之后能直接被 SkipAdvisor
+            # 用 intent_confirm_total 评估"业务意图已被覆盖"。
+            intent_obj = transition_to_store.intent
+            if intent_obj is not None:
+                resolved_intent_id = (
+                    _as_str(intent_obj.id).strip()
+                    or _as_str(intent_obj.key).strip()
+                    or _as_str(intent_obj.summary).strip()
+                )
+                if resolved_intent_id:
+                    if not resolved_intent_id.startswith("intent:"):
+                        resolved_intent_id = f"intent:{resolved_intent_id}"
+                    intent_to_store = intent_obj.model_copy(
+                        update={"id": resolved_intent_id}
+                    )
+                    await manager.add_intent(intent_to_store)
+                    await manager.link_transition_intent(
+                        transition_to_store.id, resolved_intent_id
+                    )
+                    if transition_to_store.from_state_id and transition_to_store.selector:
+                        await manager.link_zone_covers_intent(
+                            from_state_id=_as_str(transition_to_store.from_state_id),
+                            selector=_as_str(transition_to_store.selector),
+                            intent_id=resolved_intent_id,
+                            confidence=_as_float(intent_obj.confidence, 0.5),
+                            session_id=session_id,
+                        )
         stats["semantic_mismatch_warnings"] = int(
             getattr(result, "semantic_conflict_count", 0) or 0
         )
@@ -370,7 +402,45 @@ async def persist_mapping_result(
                         await manager.link_ingestion_emits_menu(ingest_version_id, menu_id)
 
         if getattr(result, "zone_hints", None):
+            # 按 (zone_type, selector) 聚合状态：同一 zone 在多页出现时取“最高”状态
+            _status_priority = {
+                "undiscovered": 0,
+                "stale": 0,
+                "discovered": 1,
+                "partial": 2,
+                "explored": 3,
+                "validated": 4,
+            }
+            zone_state_map: dict[tuple[str, str], dict[str, object]] = {}
+            for zone in result.zone_hints:
+                if not isinstance(zone, dict):
+                    continue
+                selector = _as_str(zone.get("selector")).strip()
+                z_type = _as_str(zone.get("zone_type") or "content").strip()
+                if not selector:
+                    continue
+                key = (z_type, selector)
+                status_raw = _as_str(
+                    zone.get("exploration_status") or "discovered"
+                ).strip().lower() or "discovered"
+                last_explored_iso = (
+                    zone.get("last_explored") if zone.get("last_explored") else None
+                )
+                existing = zone_state_map.get(key)
+                if existing is None or _status_priority.get(
+                    status_raw, 0
+                ) > _status_priority.get(
+                    str(existing.get("status") or ""), 0
+                ):
+                    zone_state_map[key] = {
+                        "status": status_raw,
+                        "last_explored": last_explored_iso,
+                    }
+                elif last_explored_iso and not existing.get("last_explored"):
+                    existing["last_explored"] = last_explored_iso
+
             zone_rows: list[dict[str, object]] = []
+            seen_zone_ids: set[str] = set()
             for zone in result.zone_hints:
                 if not isinstance(zone, dict):
                     continue
@@ -380,15 +450,24 @@ async def persist_mapping_result(
                 if not selector:
                     continue
                 zid_src = f"{app_id}|{z_type}|{selector}"
+                zone_id = f"zone:{hashlib.md5(zid_src.encode()).hexdigest()[:12]}"
+                if zone_id in seen_zone_ids:
+                    continue
+                seen_zone_ids.add(zone_id)
+                state_info = zone_state_map.get((z_type, selector), {})
                 zone_rows.append(
                     {
-                        "id": f"zone:{hashlib.md5(zid_src.encode()).hexdigest()[:12]}",
+                        "id": zone_id,
                         "type": z_type,
                         "selector": selector,
                         "element_count": 0,
                         "bounds": "",
                         "text_sample": summary,
                         "ingest_version_id": ingest_version_id,
+                        "exploration_status": str(
+                            state_info.get("status") or "discovered"
+                        ),
+                        "last_explored": state_info.get("last_explored"),
                     }
                 )
             if zone_rows:
@@ -442,6 +521,37 @@ async def persist_mapping_result(
         for revision_id in active_revision_ids:
             await manager.link_release_revision(release_id, revision_id)
 
+        # CoverageSnapshot —— 用本次 session 计算 app 范围的覆盖率，写为持久节点；
+        # 同时关联 Session 与 GraphRelease，让 SkipAdvisor / Scheduler 后续可直接读。
+        coverage_snapshot_id: str | None = None
+        try:
+            analyzer = CoverageAnalyzer(manager._driver.driver)
+            report = await analyzer.compute(app_id=app_id)
+            coverage_snapshot_id = (
+                f"cov:{session_id}:"
+                f"{hashlib.md5(release_id.encode()).hexdigest()[:8]}"
+            )
+            snapshot = CoverageSnapshot(
+                id=coverage_snapshot_id,
+                app_id=app_id,
+                session_id=session_id,
+                release_id=release_id,
+                menu_coverage=report.menu_coverage,
+                zone_coverage=report.zone_coverage,
+                interaction_coverage=report.interaction_coverage,
+                state_coverage=0.0,  # CoverageReport 未单独暴露 state_coverage 字段
+                overall_completeness=report.overall_completeness,
+                transition_high=report.transition_confidence.high,
+                transition_medium=report.transition_confidence.medium,
+                transition_low=report.transition_confidence.low,
+                recommendation=report.recommendation,
+            )
+            await manager.add_coverage_snapshot(snapshot)
+            await manager.link_session_coverage(session_id, coverage_snapshot_id)
+            await manager.link_release_coverage(release_id, coverage_snapshot_id)
+        except Exception as e:  # noqa: BLE001
+            print(f"[PERSIST] coverage snapshot skipped: {e}")
+
         await manager.update_session_stats(
             session_id=session_id,
             stats={
@@ -451,6 +561,7 @@ async def persist_mapping_result(
                 "start_url": resolved_url,
                 "current_release_id": release_id,
                 "latest_ingest_version_id": ingest_version_id,
+                "current_coverage_snapshot_id": coverage_snapshot_id or "",
                 "intervention_task_count": len(getattr(result, "intervention_tasks", []) or []),
                 "intervention_tasks": list(getattr(result, "intervention_tasks", []) or []),
                 **stats,

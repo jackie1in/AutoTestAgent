@@ -117,6 +117,7 @@ class ReActExplorer(BaseAgent):
         extra_system_prompt: str = "",
         use_vision: bool | str = "auto",
         vision_detail_level: str = "auto",
+        target_zone_selectors: list[str] | None = None,
     ):
         llm = get_llm()
         env_use_vision = (os.getenv("BROWSER_USE_USE_VISION") or "").strip()
@@ -143,6 +144,9 @@ class ReActExplorer(BaseAgent):
         self._result = CartographyResult()
         self._extra_system_prompt = extra_system_prompt
         self._semantic_conflict_count = 0
+        self._target_zone_selectors: list[str] | None = (
+            list(target_zone_selectors) if target_zone_selectors else None
+        )
 
         # Extra actions supported by PageController but not in BaseAgent defaults
         self._supported_actions.update(
@@ -209,6 +213,7 @@ class ReActExplorer(BaseAgent):
             max_steps=self.total_max_steps,
             page_title=page_title,
             observations=observations,
+            target_zone_selectors=self._target_zone_selectors,
         )
 
     # ------------------------------------------------------------------

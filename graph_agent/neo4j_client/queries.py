@@ -472,6 +472,81 @@ class CypherQueries:
     MERGE (rev)-[:IN_RELEASE]->(r)
     """
 
+    UPSERT_COVERAGE_SNAPSHOT = """
+    MERGE (cov:CoverageSnapshot {id: $id})
+    SET cov += $props
+    SET cov.name = coalesce(cov.session_id, cov.id)
+    RETURN cov
+    """
+
+    LINK_SESSION_ACHIEVED_COVERAGE = """
+    MATCH (sess:Session {id: $session_id}),
+          (cov:CoverageSnapshot {id: $coverage_id})
+    MERGE (sess)-[:ACHIEVED]->(cov)
+    """
+
+    LINK_RELEASE_HAS_COVERAGE = """
+    MATCH (r:GraphRelease {id: $release_id}),
+          (cov:CoverageSnapshot {id: $coverage_id})
+    MERGE (r)-[:HAS_COVERAGE]->(cov)
+    SET r.coverage_overall = cov.overall_completeness,
+        r.coverage_zone = cov.zone_coverage,
+        r.coverage_interaction = cov.interaction_coverage,
+        r.coverage_state = cov.state_coverage,
+        r.coverage_menu = cov.menu_coverage,
+        r.coverage_recommendation = cov.recommendation
+    """
+
+    UPSERT_TRANSITION_ENTITY_WITH_SESSION = """
+    MERGE (ent:TransitionEntity {stable_key: $stable_key})
+    ON CREATE SET ent += $props,
+                  ent.confirmed_session_count = 1,
+                  ent.first_seen_session = $session_id,
+                  ent.last_confirm_session = $session_id,
+                  ent.last_confirmed_at = $now
+    ON MATCH SET ent.app_id = coalesce(ent.app_id, $props.app_id),
+                 ent.from_state_id = coalesce(ent.from_state_id, $props.from_state_id),
+                 ent.to_state_id = coalesce(ent.to_state_id, $props.to_state_id),
+                 ent.action = coalesce(ent.action, $props.action),
+                 ent.semantic_action_key = coalesce(ent.semantic_action_key, $props.semantic_action_key),
+                 ent.confirmed_session_count = CASE
+                     WHEN ent.last_confirm_session = $session_id
+                       THEN coalesce(ent.confirmed_session_count, 1)
+                     ELSE coalesce(ent.confirmed_session_count, 0) + 1
+                 END,
+                 ent.last_confirm_session = $session_id,
+                 ent.last_confirmed_at = $now,
+                 ent.first_seen_session = coalesce(ent.first_seen_session, $session_id)
+    RETURN ent
+    """
+
+    LINK_ZONE_COVERS_INTENT = """
+    OPTIONAL MATCH (s:State {id: $from_state_id})-[:HAS_ZONE]->(z:Zone)
+    WHERE z.selector IS NOT NULL
+      AND z.selector <> ''
+      AND ( $selector = z.selector
+            OR $selector CONTAINS z.selector
+            OR z.selector CONTAINS $selector )
+    WITH collect(DISTINCT z) AS matched_zones
+    WITH CASE WHEN size(matched_zones) > 0 THEN matched_zones ELSE [] END AS zones
+    UNWIND zones AS z
+    MATCH (i:Intent {id: $intent_id})
+    MERGE (z)-[r:COVERS_INTENT]->(i)
+    ON CREATE SET r.observed_count = 1,
+                  r.first_confirmed_at = $now,
+                  r.last_confirmed_at = $now,
+                  r.confidence = $confidence,
+                  r.last_session_id = $session_id
+    ON MATCH SET r.observed_count = coalesce(r.observed_count, 0) + 1,
+                 r.last_confirmed_at = $now,
+                 r.last_session_id = $session_id,
+                 r.confidence = CASE
+                     WHEN $confidence > coalesce(r.confidence, 0.0)
+                       THEN $confidence
+                     ELSE r.confidence
+                 END
+    """
+
     LINK_SESSION_GENERATED_CHECKPOINT = """
     MATCH (sess:Session {id: $session_id}), (c:Checkpoint {id: $checkpoint_id})
     MERGE (sess)-[:GENERATED]->(c)

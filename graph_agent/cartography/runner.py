@@ -24,11 +24,13 @@ from graph_agent.cartography.mapping_pipeline import (
     run_orchestrated_mapping,
 )
 from graph_agent.cartography.persistence import persist_mapping_result
+from graph_agent.cartography.skip_advisor import SkipAdvisor, SkipPolicy
 from graph_agent.cartography.types import (
     EvidenceBundleItem,
 )
 from graph_agent.lib.observability import initialize_laminar, observe
 from graph_agent.llm import get_llm
+from graph_agent.neo4j_client.manager import GraphManager
 
 if TYPE_CHECKING:
     from graph_agent.graph.merger import CartographyResult
@@ -156,6 +158,7 @@ async def _run_orchestrated_mapping(
     knowledge_query_timeout_ms: int | None = None,
     knowledge_topk: int | None = None,
     knowledge_release_id: str = "",
+    skip_advisor: SkipAdvisor | None = None,
 ) -> "CartographyResult":
     return await run_orchestrated_mapping(
         browser=browser,
@@ -174,6 +177,7 @@ async def _run_orchestrated_mapping(
         knowledge_query_timeout_ms=knowledge_query_timeout_ms,
         knowledge_topk=knowledge_topk,
         knowledge_release_id=knowledge_release_id,
+        skip_advisor=skip_advisor,
     )
 
 
@@ -261,9 +265,8 @@ async def run_mapping(
         )
         session_id = f"session:{app_id}:{datetime.now(timezone.utc).isoformat()}"
         warm_start_candidates: list[dict[str, object]] = []
+        scheduler_candidates: list[dict[str, object]] = []
         try:
-            from graph_agent.neo4j_client.manager import GraphManager
-
             async with GraphManager() as warm_manager:
                 warm_start_candidates = await warm_manager._run_read(
                     """
@@ -283,6 +286,60 @@ async def run_mapping(
         except Exception as e:
             print(f"[PIPELINE] Warm-start candidate query skipped: {e}")
 
+        # ExplorationScheduler —— 把"未探页面 / 未探 zone / stale zone"组成的优先级队列
+        # 转换为 warm_start candidate，让本次 mapping 优先去补这些"已知缺口"。
+        # 任务中带 ``scheduler_priority``、``scheduler_reason``、``scheduler_task_type``，
+        # mapping_pipeline 据此把 stale 任务标记为 ``EXPLORE_ZONES_ONLY``。
+        if cartography_config.resolve_scheduler_warm_start_enabled():
+            try:
+                from graph_agent.coverage.scheduler import ExplorationScheduler
+
+                scheduler = ExplorationScheduler()
+                async with GraphManager() as sched_manager:
+                    scheduler_tasks = await scheduler.schedule(
+                        sched_manager._driver.driver,
+                        focus="breadth",
+                        max_tasks=cartography_config.resolve_scheduler_warm_start_topk(),
+                        app_id=app_id,
+                    )
+                    seen_urls: set[str] = set()
+                    for task in scheduler_tasks:
+                        ctx = task.context or {}
+                        target_url = str(ctx.get("url") or "").strip()
+                        if not target_url and task.type == "explore_zone":
+                            # explore_zone 任务没有 url，反查它所属 state.url
+                            sid = str(ctx.get("state_id") or "")
+                            if sid:
+                                rows = await sched_manager._run_read(
+                                    "MATCH (s:State {id: $sid}) RETURN s.url AS url",
+                                    sid=sid,
+                                )
+                                if rows:
+                                    target_url = str(rows[0].get("url") or "").strip()
+                        if not target_url or target_url in seen_urls:
+                            continue
+                        seen_urls.add(target_url)
+                        scheduler_candidates.append(
+                            {
+                                "transition_id": f"sched:{task.target_id}",
+                                "confidence": min(1.0, task.priority / 100.0),
+                                "target_url": target_url,
+                                "zone_unexplored": task.type == "discover_page",
+                                "scheduler_priority": task.priority,
+                                "scheduler_reason": str(ctx.get("reason") or task.type),
+                                "scheduler_task_type": task.type,
+                            }
+                        )
+                if scheduler_candidates:
+                    print(
+                        f"[RUNNER] ExplorationScheduler injected {len(scheduler_candidates)} candidate(s)"
+                    )
+            except Exception as e:  # noqa: BLE001
+                print(f"[RUNNER] scheduler warm-start skipped: {e}")
+        # 调度任务排在静态 warm-start 之前（discover_page 优先级最高）
+        if scheduler_candidates:
+            warm_start_candidates = scheduler_candidates + (warm_start_candidates or [])
+
         knowledge_on_demand_enabled = _resolve_knowledge_on_demand_enabled()
         knowledge_min_interval_sec = _resolve_knowledge_min_interval_sec()
         knowledge_trigger_score_threshold = _resolve_knowledge_trigger_score_threshold()
@@ -290,6 +347,54 @@ async def run_mapping(
         knowledge_query_timeout_ms = _resolve_knowledge_query_timeout_ms()
         knowledge_topk = _resolve_knowledge_topk()
         knowledge_release_id = _resolve_knowledge_release_id()
+        # 若没有显式设置 MAPPING_RELEASE_ID，则尝试拉取该 app 当前最新的 active release，
+        # 让 KnowledgeBroker 优先走 release-first 路径（学习沉淀的最权威基线）。
+        if not knowledge_release_id and app_name:
+            try:
+                async with GraphManager() as _km:
+                    rel_rows = await _km._run_read(
+                        """
+                        MATCH (a:App {name: $app_name})
+                        WITH a ORDER BY coalesce(a.last_session_at, a.created_at) DESC LIMIT 1
+                        MATCH (rel:GraphRelease {app_id: a.id, status: 'active'})
+                        RETURN rel.id AS id, rel.created_at AS created_at
+                        ORDER BY rel.created_at DESC
+                        LIMIT 1
+                        """,
+                        app_name=app_name,
+                    )
+                if rel_rows:
+                    knowledge_release_id = str(rel_rows[0].get("id") or "")
+                    if knowledge_release_id:
+                        print(
+                            f"[RUNNER] auto-resolved active release_id={knowledge_release_id}"
+                        )
+            except Exception as e:  # noqa: BLE001
+                print(f"[RUNNER] release_id auto-resolve skipped: {e}")
+
+        # SkipAdvisor — 跨 session 跳过已探索区域；失败/超时一律退化为 FULL_EXPLORE
+        skip_advisor: SkipAdvisor | None = None
+        if cartography_config.resolve_skip_advisor_enabled():
+            policy = SkipPolicy.from_profile(
+                cartography_config.resolve_skip_policy_profile()
+            )
+            ttl_override = cartography_config.resolve_skip_ttl_hours()
+            if ttl_override is not None:
+                policy.ttl_hours = ttl_override
+            policy.query_timeout_ms = (
+                cartography_config.resolve_skip_query_timeout_ms()
+            )
+            policy.cache_ttl_sec = cartography_config.resolve_skip_cache_ttl_sec()
+            skip_advisor = SkipAdvisor(
+                app_name=app_name,
+                primary_origin_url=resolved_url,
+                policy=policy,
+            )
+            print(
+                f"[RUNNER] SkipAdvisor enabled (profile={policy.profile}, "
+                f"ttl_h={policy.ttl_hours}, timeout_ms={policy.query_timeout_ms}, "
+                f"cache_s={policy.cache_ttl_sec})"
+            )
 
         # Check for shutdown request before running
         if browser_lifecycle.is_shutdown_requested():
@@ -314,6 +419,7 @@ async def run_mapping(
                 knowledge_query_timeout_ms=knowledge_query_timeout_ms,
                 knowledge_topk=knowledge_topk,
                 knowledge_release_id=knowledge_release_id,
+                skip_advisor=skip_advisor,
             )
         except asyncio.CancelledError:
             print("[INFO] Orchestrated exploration cancelled, cleaning up...")

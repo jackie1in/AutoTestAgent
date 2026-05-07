@@ -24,12 +24,23 @@ from graph_agent.cartography.config import (
     resolve_layout_confidence_retry_enabled,
     resolve_layout_confidence_threshold,
     resolve_layout_snapshot_limit,
+    resolve_skip_advisor_enabled,
+    resolve_skip_cache_ttl_sec,
+    resolve_skip_policy_profile,
+    resolve_skip_query_timeout_ms,
+    resolve_skip_ttl_hours,
     same_origin,
 )
 from graph_agent.cartography.intervention_queue import evaluate_intervention_need
 from graph_agent.cartography.knowledge_broker import (
     KnowledgeBroker,
     KnowledgeQueryInput,
+)
+from graph_agent.cartography.skip_advisor import (
+    SkipAdvisor,
+    SkipDecision,
+    SkipKind,
+    SkipPolicy,
 )
 from graph_agent.cartography.layout_snapshot import (
     build_layout_summary,
@@ -54,6 +65,12 @@ from graph_agent.lib.observability import observe
 if TYPE_CHECKING:
     from graph_agent.graph.merger import CartographyResult
     from graph_agent.models import ZoneType
+
+
+def _now_utc():
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc)
 
 
 def _parse_evaluate_result(raw: object) -> dict[str, object]:
@@ -129,15 +146,30 @@ async def click_menu_by_text(browser: Browser, text: str) -> bool:
 def rank_warm_start_candidates(
     candidates: list[dict[str, object]],
 ) -> list[dict[str, object]]:
+    """排序优先级（越靠前越先探索）：
+
+    1. ExplorationScheduler 注入的高优先任务（按 ``scheduler_priority`` 降序）
+    2. 历史发现但 zone 未探的（``zone_unexplored=True``）
+    3. 历史 transition 置信度高
+    """
+
     def _to_float(value: object) -> float:
         try:
             return float(value)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             return 0.0
 
+    def _to_int(value: object) -> int:
+        try:
+            return int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0
+
     return sorted(
         candidates,
         key=lambda item: (
+            # scheduler_priority 越大越靠前 → 取负
+            -_to_int(item.get("scheduler_priority") or 0),
             0 if item.get("zone_unexplored") else 1,
             -(_to_float(item.get("confidence") or 0.0)),
             str(item.get("transition_id") or ""),
@@ -335,11 +367,12 @@ async def run_orchestrated_mapping(
     knowledge_query_timeout_ms: int | None = None,
     knowledge_topk: int | None = None,
     knowledge_release_id: str = "",
+    skip_advisor: SkipAdvisor | None = None,
 ) -> "CartographyResult":
     from graph_agent.cartography.react_explorer import ReActExplorer
     from graph_agent.cartography.snapshot import capture_composite_fingerprint
     from graph_agent.graph.merger import CartographyResult
-    from graph_agent.models import State, Transition, Zone
+    from graph_agent.models import ExplorationStatus, State, Transition, Zone
 
     print("[PIPELINE] === LLM-first orchestrated exploration starting ===")
     all_states: list[State] = []
@@ -349,7 +382,9 @@ async def run_orchestrated_mapping(
     explored_urls: list[str] = []
     menu_items_discovered: list[dict[str, object]] = []
     zones_discovered: list[dict[str, object]] = []
-    pages_to_explore: list[tuple[str, str]] = [(current_url or start_url, "start page")]
+    pages_to_explore: list[tuple[str, str, SkipDecision | None]] = [
+        (current_url or start_url, "start page", None)
+    ]
     pages_explored: set[str] = set()
     pending_menus: list[dict[str, str]] = []
     menu_scanned_urls: set[str] = set()
@@ -407,16 +442,72 @@ async def run_orchestrated_mapping(
     knowledge_error_count = 0
     knowledge_latency_total_ms = 0.0
 
-    def _enqueue_page(url: str, reason: str) -> None:
+    skip_metrics: dict[str, int] = {
+        "skip_page_in_enqueue": 0,
+        "skip_page_in_loop": 0,
+        "zones_only_in_loop": 0,
+        "scheduler_zones_only_forced": 0,
+    }
+
+    def _force_zones_only(
+        decision: SkipDecision, scheduler_hint: str
+    ) -> SkipDecision:
+        """Convert any decision into EXPLORE_ZONES_ONLY while preserving
+        the long-term learning signals SkipAdvisor returned."""
+        return SkipDecision(
+            kind=SkipKind.EXPLORE_ZONES_ONLY,
+            reason=f"scheduler_override:{scheduler_hint}",
+            confidence=decision.confidence,
+            target_zone_selectors=list(decision.target_zone_selectors),
+            coverage=decision.coverage,
+            state_count=decision.state_count,
+            last_visited_age_h=decision.last_visited_age_h,
+            last_explored_age_h=decision.last_explored_age_h,
+            release_coverage=decision.release_coverage,
+            intent_confirm_total=decision.intent_confirm_total,
+            entity_confirm_total=decision.entity_confirm_total,
+            intent_confirmed_zone_count=decision.intent_confirmed_zone_count,
+        )
+
+    async def _enqueue_page(
+        url: str,
+        reason: str,
+        *,
+        scheduler_hint: str = "",
+    ) -> None:
+        """``scheduler_hint`` 可选；当 candidate 来自 ExplorationScheduler 的
+        ``explore_zone`` / ``stale_re_explore`` 任务时传入，会强制走 zones-only
+        以避免对已知页面再做完整 ReAct 循环（仍允许 SkipAdvisor 选择 SKIP_PAGE
+        外的所有结果，但 scheduler 总会要求至少补 zone）。"""
         clean = clean_url(url)
         if clean in pages_explored:
             return
-        if clean in {clean_url(u) for u, _ in pages_to_explore}:
+        if clean in {clean_url(u) for u, _, _ in pages_to_explore}:
             return
         if primary_origin_url and not same_origin(url, primary_origin_url):
             print(f"[PIPELINE] Skip foreign-origin URL: {url[:80]}")
             return
-        pages_to_explore.append((url, reason))
+        decision: SkipDecision | None = None
+        if skip_advisor is not None:
+            decision = await skip_advisor.evaluate(url)
+            if decision.kind is SkipKind.SKIP_PAGE:
+                if scheduler_hint:
+                    decision = _force_zones_only(decision, scheduler_hint)
+                    skip_metrics["scheduler_zones_only_forced"] += 1
+                else:
+                    skip_metrics["skip_page_in_enqueue"] += 1
+                    print(
+                        f"[PIPELINE] SkipAdvisor SKIP_PAGE -> {url[:80]} "
+                        f"(coverage={decision.coverage:.2f}, reason={decision.reason})"
+                    )
+                    return
+            elif (
+                scheduler_hint in ("stale_re_explore", "explore_zone")
+                and decision.kind is SkipKind.FULL_EXPLORE
+            ):
+                decision = _force_zones_only(decision, scheduler_hint)
+                skip_metrics["scheduler_zones_only_forced"] += 1
+        pages_to_explore.append((url, reason, decision))
 
     async def _cleanup_foreign_tabs() -> str:
         nonlocal cross_origin_seen
@@ -453,7 +544,21 @@ async def run_orchestrated_mapping(
             continue
         if primary_origin_url and not same_origin(target_url, primary_origin_url):
             continue
-        pages_to_explore.append((target_url, "warm-start"))
+        # ExplorationScheduler 注入的任务带 scheduler_task_type / scheduler_reason，
+        # 把它们透传到 _enqueue_page，让"已知缺口"任务总能至少跑 zones-only。
+        sched_task_type = str(item.get("scheduler_task_type") or "")
+        sched_hint = ""
+        if sched_task_type == "explore_zone":
+            sched_reason = str(item.get("scheduler_reason") or "")
+            sched_hint = (
+                "stale_re_explore"
+                if sched_reason == "stale_re_explore"
+                else "explore_zone"
+            )
+        reason = (
+            f"scheduler:{sched_task_type}" if sched_task_type else "warm-start"
+        )
+        await _enqueue_page(target_url, reason, scheduler_hint=sched_hint)
 
     orchestration_step = 0
     max_orchestration_steps = 50
@@ -469,11 +574,28 @@ async def run_orchestrated_mapping(
             break
 
         pending_menu_task: dict[str, str] | None = None
+        skip_decision: SkipDecision | None = None
         if pages_to_explore:
-            url, reason = pages_to_explore.pop(0)
+            url, reason, skip_decision = pages_to_explore.pop(0)
             url_clean = clean_url(url)
             if url_clean in pages_explored:
                 continue
+            # 入队时若 advisor 不可用，pop 时再补一次 evaluate（命中缓存几乎零开销）
+            if skip_decision is None and skip_advisor is not None:
+                skip_decision = await skip_advisor.evaluate(url)
+                if skip_decision.kind is SkipKind.SKIP_PAGE:
+                    skip_metrics["skip_page_in_loop"] += 1
+                    print(
+                        f"[PIPELINE] SkipAdvisor SKIP_PAGE (loop) -> {url[:80]} "
+                        f"(coverage={skip_decision.coverage:.2f})"
+                    )
+                    pages_explored.add(url_clean)
+                    continue
+            if (
+                skip_decision is not None
+                and skip_decision.kind is SkipKind.EXPLORE_ZONES_ONLY
+            ):
+                skip_metrics["zones_only_in_loop"] += 1
         else:
             pending_menu_task = pending_menus.pop(0)
             key = (pending_menu_task["source_url"], pending_menu_task["text"])
@@ -602,6 +724,8 @@ async def run_orchestrated_mapping(
                     "selector": z.selector,
                     "description": z.description,
                     "source_url": current_page_url,
+                    "exploration_status": ExplorationStatus.DISCOVERED.value,
+                    "last_explored": None,
                 }
             )
             mapped_zone_type = map_llm_zone_type(z.zone_type)
@@ -616,6 +740,7 @@ async def run_orchestrated_mapping(
                     zone_type=mapped_zone_type,
                     root_selector=z.selector,
                     summary=z.description,
+                    exploration_status=ExplorationStatus.DISCOVERED,
                 )
             )
 
@@ -648,7 +773,7 @@ async def run_orchestrated_mapping(
                     )
                     if full_href and is_http_url(full_href):
                         before = len(pages_to_explore)
-                        _enqueue_page(full_href, f"menu: {text}")
+                        await _enqueue_page(full_href, f"menu: {text}")
                         if len(pages_to_explore) > before:
                             enqueued_menu_count += 1
                             if len(menu_enqueue_debug) < 8:
@@ -773,6 +898,22 @@ async def run_orchestrated_mapping(
         if low_layout_conf:
             page_cap = min(60, page_cap + 10)
 
+        # 区域限定模式：缩小 page_cap，附 zone_filter 提示给 explorer
+        target_zone_selectors: list[str] = []
+        if (
+            skip_decision is not None
+            and skip_decision.kind is SkipKind.EXPLORE_ZONES_ONLY
+            and skip_decision.target_zone_selectors
+        ):
+            target_zone_selectors = list(skip_decision.target_zone_selectors)
+            zones_only_cap = min(15, page_cap)
+            print(
+                f"[PIPELINE] EXPLORE_ZONES_ONLY -> {url[:80]} "
+                f"(pending_zones={len(target_zone_selectors)}, "
+                f"page_cap {page_cap}->{zones_only_cap})"
+            )
+            page_cap = zones_only_cap
+
         per_page_steps = min(
             steps_remaining,
             page_cap,
@@ -781,6 +922,7 @@ async def run_orchestrated_mapping(
             max_steps=per_page_steps,
             browser_session=browser,
             extra_system_prompt=build_login_hint_from_env() + "\n\n" + explorer_hint,
+            target_zone_selectors=target_zone_selectors or None,
         )
         try:
             transition_count_before = len(all_transitions)
@@ -811,10 +953,71 @@ async def run_orchestrated_mapping(
             semantic_conflict_count += int(
                 getattr(explore_result, "semantic_conflict_count", 0) or 0
             )
+            new_transitions_this_page = (
+                len(all_transitions) - transition_count_before
+            )
             if len(all_transitions) == transition_count_before:
                 stuck_steps += 1
             else:
                 stuck_steps = 0
+
+            # Phase 0: 回写本页 zone 探索状态，给 SkipAdvisor 提供跨 session 信号
+            page_zone_keys: set[tuple[str, str]] = {
+                (str(z.zone_type), str(z.selector))
+                for z in page_analysis.functional_zones
+                if map_llm_zone_type(z.zone_type) is not None
+            }
+            if page_zone_keys and new_transitions_this_page > 0:
+                _status_priority = {
+                    ExplorationStatus.UNDISCOVERED.value: 0,
+                    ExplorationStatus.STALE.value: 0,
+                    ExplorationStatus.DISCOVERED.value: 1,
+                    ExplorationStatus.PARTIAL.value: 2,
+                    ExplorationStatus.EXPLORED.value: 3,
+                    ExplorationStatus.VALIDATED.value: 4,
+                }
+                target_status = (
+                    ExplorationStatus.EXPLORED
+                    if new_transitions_this_page >= 3
+                    else ExplorationStatus.PARTIAL
+                )
+                target_priority = _status_priority[target_status.value]
+                now_ts = _now_utc()
+                # 1) 更新 all_zones 里的 Zone 对象（用 zone_type+selector 等价匹配）
+                page_zone_id_set = {
+                    f"zone:{ztype}:{hashlib.md5(selector.encode()).hexdigest()[:8]}"
+                    for ztype, selector in page_zone_keys
+                }
+                for z in all_zones:
+                    if z.id not in page_zone_id_set:
+                        continue
+                    current_val = (
+                        z.exploration_status.value
+                        if hasattr(z.exploration_status, "value")
+                        else str(z.exploration_status)
+                    )
+                    if _status_priority.get(current_val, 0) < target_priority:
+                        z.exploration_status = target_status
+                    z.last_explored = now_ts
+                # 2) 同步把状态写到 zones_discovered（dict 形式），
+                #    persistence 层据此把 exploration_status/last_explored 落 Neo4j。
+                target_status_val = target_status.value
+                now_iso = now_ts.isoformat()
+                for hint in zones_discovered:
+                    if (
+                        str(hint.get("zone_type") or ""),
+                        str(hint.get("selector") or ""),
+                    ) not in page_zone_keys:
+                        continue
+                    if hint.get("source_url") and hint.get("source_url") != current_page_url:
+                        continue
+                    current_val = str(
+                        hint.get("exploration_status")
+                        or ExplorationStatus.DISCOVERED.value
+                    )
+                    if _status_priority.get(current_val, 0) < target_priority:
+                        hint["exploration_status"] = target_status_val
+                    hint["last_explored"] = now_iso
 
             explored_urls.append(current_page_url)
             pages_explored.add(url_clean)
@@ -831,7 +1034,7 @@ async def run_orchestrated_mapping(
                 if clean_url(s_url) == url_clean:
                     continue
                 before = len(pages_to_explore)
-                _enqueue_page(s_url, "in-page discovery")
+                await _enqueue_page(s_url, "in-page discovery")
                 if len(pages_to_explore) > before:
                     harvested += 1
             if harvested:
@@ -895,7 +1098,9 @@ async def run_orchestrated_mapping(
                     break
             for task in plan.tasks:
                 if task.task_type == "explore_page" and task.target_url:
-                    _enqueue_page(task.target_url, f"llm-plan: {task.description}")
+                    await _enqueue_page(
+                        task.target_url, f"llm-plan: {task.description}"
+                    )
 
     result = CartographyResult()
     result.states = all_states
@@ -929,6 +1134,17 @@ async def run_orchestrated_mapping(
             "knowledge_trigger_profile": knowledge_profile,
         }
     )
+    # SkipAdvisor 指标合入 layout_metrics（保持单一可观测面）
+    result.layout_metrics.update(
+        {
+            "skip_advisor_enabled": skip_advisor is not None,
+            "skip_page_in_enqueue": skip_metrics["skip_page_in_enqueue"],
+            "skip_page_in_loop": skip_metrics["skip_page_in_loop"],
+            "skip_zones_only_in_loop": skip_metrics["zones_only_in_loop"],
+        }
+    )
+    if skip_advisor is not None:
+        result.layout_metrics.update(skip_advisor.metrics)
     intervention_tasks = evaluate_intervention_need(
         session_id=session_id,
         source_url=current_url or start_url,

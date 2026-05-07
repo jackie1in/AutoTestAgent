@@ -373,6 +373,26 @@ class GraphRelease(BaseModel):
     status: str = "active"
 
 
+class CoverageSnapshot(BaseModel):
+    """Per-session coverage snapshot. Persisted so SkipAdvisor / Scheduler can
+    consult historical coverage without recomputing from raw zones every time."""
+
+    id: str
+    app_id: str
+    session_id: str
+    release_id: str = ""
+    captured_at: datetime = Field(default_factory=datetime.utcnow)
+    menu_coverage: float = 0.0
+    zone_coverage: float = 0.0
+    interaction_coverage: float = 0.0
+    state_coverage: float = 0.0
+    overall_completeness: float = 0.0
+    transition_high: int = 0
+    transition_medium: int = 0
+    transition_low: int = 0
+    recommendation: str = "needs_more"
+
+
 # ===== Coverage Model =====
 
 class TransitionConfidenceDistribution(BaseModel):

@@ -7,6 +7,7 @@ from graph_agent.models import (
     App, State, Transition, Zone, FrameNode, Entity, EntityInstance,
     Intent, Checkpoint, FieldConstraint, TestCase, Session, Menu, Evidence,
     GraphRelease, IngestionRun, TransitionEntity, TransitionRevision,
+    CoverageSnapshot,
 )
 from graph_agent.neo4j_client.queries import CypherQueries
 
@@ -429,6 +430,90 @@ class GraphRepository:
                 CypherQueries.UPSERT_TRANSITION_ENTITY,
                 stable_key=entity.stable_key,
                 props=_model_to_props(entity),
+            )
+
+    async def upsert_transition_entity_with_session(
+        self,
+        entity: TransitionEntity,
+        session_id: str,
+    ) -> None:
+        """Upsert TransitionEntity 并按 session 累计 confirmed_session_count。
+
+        与普通 upsert 的区别：本方法对 ``confirmed_session_count`` 做去重累加
+        （同一 session 重复提交不再 +1），用于 SkipAdvisor 跨 session 学习沉淀。
+        """
+        props = _model_to_props(entity)
+        # 这些字段由 Cypher 自己负责递增/初始化，不从 props 覆盖。
+        for k in (
+            "confirmed_session_count",
+            "last_confirm_session",
+            "last_confirmed_at",
+            "first_seen_session",
+        ):
+            props.pop(k, None)
+        # 用空串补齐 ON MATCH 里 coalesce 取值时的 NULL 防御。
+        props.setdefault("app_id", "")
+        props.setdefault("from_state_id", "")
+        props.setdefault("to_state_id", "")
+        props.setdefault("action", "")
+        props.setdefault("semantic_action_key", "")
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.UPSERT_TRANSITION_ENTITY_WITH_SESSION,
+                stable_key=entity.stable_key,
+                props=props,
+                session_id=session_id,
+                now=datetime.utcnow().isoformat(),
+            )
+
+    async def upsert_coverage_snapshot(self, snapshot: CoverageSnapshot) -> None:
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.UPSERT_COVERAGE_SNAPSHOT,
+                id=snapshot.id,
+                props=_model_to_props(snapshot),
+            )
+
+    async def link_session_achieved_coverage(
+        self, session_id: str, coverage_id: str
+    ) -> None:
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.LINK_SESSION_ACHIEVED_COVERAGE,
+                session_id=session_id,
+                coverage_id=coverage_id,
+            )
+
+    async def link_release_has_coverage(
+        self, release_id: str, coverage_id: str
+    ) -> None:
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.LINK_RELEASE_HAS_COVERAGE,
+                release_id=release_id,
+                coverage_id=coverage_id,
+            )
+
+    async def link_zone_covers_intent(
+        self,
+        *,
+        from_state_id: str,
+        selector: str,
+        intent_id: str,
+        confidence: float,
+        session_id: str,
+    ) -> None:
+        if not from_state_id or not selector or not intent_id:
+            return
+        async with self._driver.session() as session:
+            await session.run(
+                CypherQueries.LINK_ZONE_COVERS_INTENT,
+                from_state_id=from_state_id,
+                selector=selector,
+                intent_id=intent_id,
+                confidence=max(0.0, min(1.0, float(confidence or 0.0))),
+                session_id=session_id or "",
+                now=datetime.utcnow().isoformat(),
             )
 
     async def upsert_transition_revision(self, revision: TransitionRevision) -> None:
