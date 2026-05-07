@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from graph_agent.cartography.llm_planning import (
     PAGE_TYPE_ACTION_POLICY,
+    LLMFunctionalZone,
+    LLMPageAnalysis,
+    build_exploration_guidance,
     build_login_hint_from_env,
 )
 from graph_agent.cartography.captcha import _normalize_captcha_code
@@ -23,6 +26,24 @@ def test_build_login_hint_includes_captcha_instruction(monkeypatch):
     assert "username=demo_user" in hint
     assert "password=demo_pass" in hint
     assert "验证码" in hint
+
+
+def test_login_guidance_skips_zone_order_when_disabled():
+    guidance = build_exploration_guidance(
+        LLMPageAnalysis(
+            page_type="login",
+            functional_zones=[
+                LLMFunctionalZone(
+                    zone_type="form",
+                    selector="form#login",
+                    description="login form",
+                )
+            ],
+        ),
+        include_zone_order=False,
+    )
+    assert "ACTION POLICY: Login page" in guidance
+    assert "ZONE ORDER" not in guidance
 
 
 def test_normalize_captcha_code_solves_arithmetic_expression():

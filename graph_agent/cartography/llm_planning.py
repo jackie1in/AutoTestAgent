@@ -93,12 +93,16 @@ def build_login_hint_from_env() -> str:
     )
 
 
-def build_exploration_guidance(page_analysis: LLMPageAnalysis) -> str:
+def build_exploration_guidance(
+    page_analysis: LLMPageAnalysis,
+    *,
+    include_zone_order: bool = True,
+) -> str:
     blocks: list[str] = [UNIVERSAL_EXPLORER_RULES]
     policy_text = PAGE_TYPE_ACTION_POLICY.get(page_analysis.page_type)
     if policy_text:
         blocks.append(policy_text)
-    if page_analysis.functional_zones:
+    if include_zone_order and page_analysis.functional_zones:
         zone_lines = [
             f"  {i+1}. [{z.zone_type}] {z.selector}" + (f" — {z.description}" if z.description else "")
             for i, z in enumerate(page_analysis.functional_zones[:5])

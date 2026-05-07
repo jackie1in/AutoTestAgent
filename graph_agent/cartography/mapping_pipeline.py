@@ -1270,7 +1270,10 @@ async def run_orchestrated_mapping(
             break
 
         explorer_hint = f"You are exploring the page at {current_page_url}."
-        exploration_guidance = build_exploration_guidance(page_analysis)
+        exploration_guidance = build_exploration_guidance(
+            page_analysis,
+            include_zone_order=not is_login_context,
+        )
         if exploration_guidance:
             explorer_hint += "\n\n" + exploration_guidance
 
