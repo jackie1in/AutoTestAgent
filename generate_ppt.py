@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Generate Graph Agent design document PPT."""
 
+import logging
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
@@ -8,6 +9,9 @@ from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.oxml.ns import nsmap
 from pptx.oxml import parse_xml
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 # ── Theme ──────────────────────────────────────────────────────────
 PRIMARY   = RGBColor(0x1A, 0x36, 0x5D)   # Deep navy
@@ -312,4 +316,4 @@ for i, (title, desc, color) in enumerate(shapes):
 # ── Save ───────────────────────────────────────────────────────────
 output_path = "/Users/linhai/AutoTestAgent/GraphAgent_设计汇报_20260422.pptx"
 prs.save(output_path)
-print(f"PPT saved to: {output_path}")
+logger.info("PPT saved to: %s", output_path)

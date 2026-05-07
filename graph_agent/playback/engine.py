@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import uuid
 from collections.abc import Awaitable, Callable
@@ -26,6 +27,8 @@ NETWORK_OBSERVE_MS = 150
 NETWORK_POLL_MS = 25
 PLAYBACK_RETRY_COUNT = 2
 PLAYBACK_RETRY_DELAY_S = 0.3
+
+logger = logging.getLogger(__name__)
 
 
 _LOGIN_URL_TOKENS: frozenset[str] = frozenset(
@@ -1027,8 +1030,8 @@ async def run_playback(
                             else:
                                 # Unknown action, log warning but continue? Or fail?
                                 # For now, just log
-                                print(
-                                    f"Warning: Unknown action type {action} at step {i}"
+                                logger.warning(
+                                    "Unknown action type %s at step %d", action, i
                                 )
 
                             log_entry["success"] = True

@@ -347,8 +347,8 @@ async def migration_status(driver: Any) -> dict[str, Any]:
     Usage:
         from graph_agent.neo4j_client.migrations import migration_status
         status = await migration_status(driver)
-        print(f"Current version: {status['current_version']}")
-        print(f"Pending: {status['pending']}")
+        logger.info("Current version: %s", status["current_version"])
+        logger.info("Pending: %s", status["pending"])
     """
     manager = MigrationManager(driver)
     return await manager.status()

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from neo4j import AsyncDriver
@@ -118,7 +118,7 @@ class ExplorationScheduler:
 
                 # P30: Stale zones — previously explored but older than threshold
                 stale_cutoff = (
-                    datetime.utcnow() - timedelta(hours=_ZONE_STALE_HOURS)
+                    datetime.now(UTC) - timedelta(hours=_ZONE_STALE_HOURS)
                 ).isoformat()
                 if app_id:
                     qs = (

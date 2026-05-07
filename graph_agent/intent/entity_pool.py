@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from neo4j import AsyncDriver
@@ -43,7 +43,7 @@ class EntityPool:
         self, entity: Entity, data: dict[str, Any], session_id: str
     ) -> EntityInstance:
         """Create a new entity instance and persist to Neo4j."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(UTC).isoformat()
         instance = EntityInstance(
             id=f"instance:{entity.id}:{now}",
             data=json.dumps(data),

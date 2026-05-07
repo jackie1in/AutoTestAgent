@@ -16,6 +16,7 @@ import hashlib
 import logging
 import os
 import re
+import time
 from collections import deque
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
@@ -112,6 +113,7 @@ class BaseAgent:
         self._vision_detail_level = self._resolve_vision_detail_level(
             vision_detail_level
         )
+        self._max_runtime_sec = self._resolve_max_runtime_sec()
 
         # Supported actions from browser-use registry
         self._supported_actions: set[str] = {
@@ -127,6 +129,17 @@ class BaseAgent:
         if self._use_vision != "false":
             self._supported_actions.add("screenshot")
         self._dynamic_action_model = self._build_dynamic_action_model()
+
+    @staticmethod
+    def _resolve_max_runtime_sec() -> float:
+        raw = (os.getenv("CARTOGRAPHY_AGENT_MAX_RUNTIME_SEC") or "").strip()
+        if not raw:
+            return 600.0
+        try:
+            val = float(raw)
+        except ValueError:
+            return 600.0
+        return max(30.0, min(4 * 3600.0, val))
 
     @staticmethod
     def _resolve_use_vision_mode(value: bool | str) -> str:
@@ -344,7 +357,21 @@ Remaining steps: {remaining}
                 result_text[:80],
             )
 
+        loop_start = time.monotonic()
         for step in range(self.start_step, self.start_step + self.max_steps):
+            if (time.monotonic() - loop_start) >= self._max_runtime_sec:
+                logger.warning(
+                    "Stopping agent loop due to runtime budget (%.1fs)",
+                    self._max_runtime_sec,
+                )
+                history.append(
+                    {
+                        "step": step,
+                        "action": "runtime_budget",
+                        "result": f"Stopped due to runtime budget {self._max_runtime_sec:.1f}s",
+                    }
+                )
+                break
             if self.should_stop and self.should_stop():
                 logger.info("Stopping agent loop due to shutdown request")
                 break

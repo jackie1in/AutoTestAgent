@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
@@ -15,6 +16,8 @@ INDEX_PATH = "/index"
 IFRAME_PATH = "/embedded"
 COOKIE_NAME = "session"
 COOKIE_VALUE = "ok"
+
+logger = logging.getLogger(__name__)
 
 
 def _html(body: str, *, title: str) -> bytes:
@@ -153,9 +156,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _build_arg_parser().parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     server = ThreadingHTTPServer((args.host, args.port), _Handler)
-    print(f"Test server listening on http://{args.host}:{args.port}/login")
-    print("Credential: demo / demo")
+    logger.info(
+        "Test server listening on http://%s:%s/login", args.host, args.port
+    )
+    logger.info("Credential: demo / demo")
     server.serve_forever()
 
 

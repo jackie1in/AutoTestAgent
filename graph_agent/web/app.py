@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,21 @@ DEFAULT_EXPECTED_END_URL = (
     "https://the-internet.herokuapp.com/secure"  # or None to skip assertion
 )
 
-app = FastAPI(title="Graph Agent API")
+@asynccontextmanager
+async def _app_lifespan(_app: FastAPI):
+    try:
+        yield
+    finally:
+        global _neo4j_driver
+        if _neo4j_driver is not None:
+            try:
+                await _neo4j_driver.close()
+                logger.info("Neo4j driver closed on shutdown")
+            except Exception as e:
+                logger.warning("Error closing Neo4j driver: %s", e)
+
+
+app = FastAPI(title="Graph Agent API", lifespan=_app_lifespan)
 
 logger = logging.getLogger(__name__)
 
@@ -943,18 +958,6 @@ async def graph_stream():
                 _graph_stream_subscribers.remove(q)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Close Neo4j driver on app shutdown."""
-    global _neo4j_driver
-    if _neo4j_driver is not None:
-        try:
-            await _neo4j_driver.close()
-            logger.info("Neo4j driver closed on shutdown")
-        except Exception as e:
-            logger.warning("Error closing Neo4j driver: %s", e)
 
 
 # Serve single-page UI

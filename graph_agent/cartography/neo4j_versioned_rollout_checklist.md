@@ -30,9 +30,12 @@
 ## 阶段 N+3：收敛与固化
 - [ ] 默认启用 release 读取（生产环境）。
 - [ ] 保留 fallback 开关一个发布窗口（至少 1 周期）。
+- [ ] 启用 runner 一体化维护入口（mapping 后自动 gate + retention dry-run）。
+- [ ] 评估并按窗口启用 retention execute（先 dry-run 观测 1 个发布周期）。
 - [ ] 完成稳定性复盘：
   - [ ] 冲突决策可解释（revision source/confidence/supersedes 链完整）。
   - [ ] 回滚演练通过（按 release 切回旧版本）。
+- [ ] checkpoint/resume 恢复演练通过（同 app_id/session_id 可恢复队列进度）。
 - [ ] 决策是否逐步弱化旧字段写入（仅在连续稳定后）。
 
 ## 回滚策略（按风险等级）

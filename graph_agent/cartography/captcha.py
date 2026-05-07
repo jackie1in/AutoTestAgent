@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import TYPE_CHECKING, cast
 
@@ -19,6 +20,8 @@ from graph_agent.lib.page_controller import PageController
 if TYPE_CHECKING:
     from browser_use.actor.page import Page
     from browser_use.llm.base import BaseChatModel
+
+logger = logging.getLogger(__name__)
 
 
 class CaptchaRecognitionResult(BaseModel):
@@ -245,9 +248,11 @@ async def recognize_captcha_with_candidates(
     ]
     if not normalized_urls:
         return ""
-    print(f"[CAPTCHA] Sending {len(normalized_urls)} image(s) to LLM for recognition.")
+    logger.info(
+        "[CAPTCHA] Sending %d image(s) to LLM for recognition.", len(normalized_urls)
+    )
     for i, u in enumerate(normalized_urls, 1):
-        print(f"[CAPTCHA]   image #{i}: {u[:60]}... (total {len(u)} chars)")
+        logger.info("[CAPTCHA]   image #%d: %s... (total %d chars)", i, u[:60], len(u))
     try:
         system_text = (
             "You are a CAPTCHA solver. "
@@ -274,17 +279,17 @@ async def recognize_captcha_with_candidates(
             recognition: CaptchaRecognitionResult = result.completion  # type: ignore[assignment]
             raw_code = recognition.code
             is_arithmetic = recognition.is_arithmetic
-            print(
+            logger.info(
                 f"[CAPTCHA] Structured result: code={raw_code!r} "
                 f"arithmetic={is_arithmetic} confidence={recognition.confidence}"
             )
         except Exception as structured_err:
-            print(
+            logger.warning(
                 f"[CAPTCHA] Structured output failed ({structured_err}), falling back to plain text."
             )
             result_plain = await llm.ainvoke(messages)
             raw_code = str(result_plain.completion or "")
-            print(f"[CAPTCHA] Plain-text result: {raw_code!r}")
+            logger.info("[CAPTCHA] Plain-text result: %r", raw_code)
 
         normalized_code = _normalize_captcha_code(raw_code, is_arithmetic=is_arithmetic)
         # If the model returned an expression with '=?' but no operator yet
@@ -319,7 +324,7 @@ async def recognize_captcha_with_candidates(
 
         return normalized_code
     except Exception as e:
-        print(f"[CAPTCHA] LLM recognition failed: {e}")
+        logger.warning("[CAPTCHA] LLM recognition failed: %s", e)
         return ""
 
 
@@ -356,7 +361,7 @@ async def solve_captcha_from_page(
     captcha_id = login_info.get("captchaId", "")
     captcha_src = login_info.get("captchaSrc", "")
     hint_norm = input_hint.strip().lower()
-    print(
+    logger.info(
         f"[CAPTCHA] solve_captcha_from_page called. tag={captcha_tag}, "
         f"id={captcha_id}, hint='{hint_norm}', src={captcha_src if captcha_src else 'empty'}"
     )
@@ -488,10 +493,10 @@ async def solve_captcha_from_page(
                     else:
                         _add_candidate(f"data:image/png;base64,{message}")
     except Exception as e:
-        print(f"[CAPTCHA] Strategy 0 (browser-use selector_map) failed: {e}")
+        logger.warning("[CAPTCHA] Strategy 0 (browser-use selector_map) failed: %s", e)
 
     if not image_data_urls and not has_scope_hints and captcha_tag == "img":
-        print(
+        logger.info(
             f"[CAPTCHA] Strategy 1: captcha is <img>. src={captcha_src if captcha_src else 'empty'}"
         )
         if captcha_src.startswith("data:image"):
@@ -510,7 +515,7 @@ async def solve_captcha_from_page(
                 """
                 _add_candidate(await page.evaluate(fetch_script))
             except Exception as e:
-                print(f"[CAPTCHA] Strategy 1 failed: {e}")
+                logger.warning("[CAPTCHA] Strategy 1 failed: %s", e)
 
     if not image_data_urls and captcha_tag == "canvas":
         try:
@@ -523,7 +528,7 @@ async def solve_captcha_from_page(
             """
             _add_candidate(await page.evaluate(canvas_script))
         except Exception as e:
-            print(f"[CAPTCHA] Strategy 2 failed: {e}")
+            logger.warning("[CAPTCHA] Strategy 2 failed: %s", e)
 
     if not image_data_urls:
         try:
@@ -567,7 +572,7 @@ async def solve_captcha_from_page(
                 for item in urls_raw:
                     _add_candidate(item if isinstance(item, str) else None)
         except Exception as e:
-            print(f"[CAPTCHA] Candidate collection failed: {e}")
+            logger.warning("[CAPTCHA] Candidate collection failed: %s", e)
 
     if not image_data_urls:
         try:
@@ -672,7 +677,7 @@ async def solve_captcha_from_page(
                     if data:
                         _add_candidate(f"data:image/png;base64,{data}")
         except Exception as e:
-            print(f"[CAPTCHA] Strategy 3 failed: {e}")
+            logger.warning("[CAPTCHA] Strategy 3 failed: %s", e)
 
     if not image_data_urls and not has_scope_hints:
         try:
@@ -687,20 +692,22 @@ async def solve_captcha_from_page(
                 if data:
                     _add_candidate(f"data:image/png;base64,{data}")
         except Exception as e:
-            print(f"[CAPTCHA] Strategy 4 failed: {e}")
+            logger.warning("[CAPTCHA] Strategy 4 failed: %s", e)
 
     if not image_data_urls:
-        print(
+        logger.warning(
             "[CAPTCHA] All strategies failed. Could not extract CAPTCHA image from page."
         )
         return ""
 
-    print(f"[CAPTCHA] Sending {len(image_data_urls)} candidate image(s) to recognizer.")
+    logger.info(
+        "[CAPTCHA] Sending %d candidate image(s) to recognizer.", len(image_data_urls)
+    )
     for idx, data_url in enumerate(image_data_urls, start=1):
-        print(f"[CAPTCHA] Candidate #{idx} data_url={data_url}")
+        logger.info("[CAPTCHA] Candidate #%d data_url=%s", idx, data_url)
     code = await recognize_captcha_with_candidates(image_data_urls, llm)
     if code:
-        print(f"[CAPTCHA] Recognized code: '{code}'")
+        logger.info("[CAPTCHA] Recognized code: '%s'", code)
     else:
-        print("[CAPTCHA] Recognizer returned empty code.")
+        logger.info("[CAPTCHA] Recognizer returned empty code.")
     return code

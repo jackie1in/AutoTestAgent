@@ -120,9 +120,10 @@ class _BrokerFakeManager:
     async def __aexit__(self, *args):
         return None
 
-    async def _run_read(self, query: str, **kwargs):
-        if "GraphRelease" in query:
-            return []
+    async def get_knowledge_release_rows(self, **kwargs):
+        return []
+
+    async def get_knowledge_legacy_rows(self, **kwargs):
         return [
             {
                 "id": "t:legacy",

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import signal
 import sys
 from contextlib import asynccontextmanager
 from types import FrameType
 
 from browser_use.browser.session import BrowserSession as Browser
+
+logger = logging.getLogger(__name__)
 
 _active_browsers: list[Browser] = []
 _shutdown_requested = False
@@ -35,34 +38,34 @@ async def cleanup_all_browsers() -> None:
     if not _active_browsers:
         return
 
-    print(f"\n[INFO] Cleaning up {len(_active_browsers)} browser session(s)...")
+    logger.info("Cleaning up %d browser session(s)...", len(_active_browsers))
     for browser in list(_active_browsers):
         try:
             if hasattr(browser, "kill"):
                 await browser.kill()
-                print("  [OK] Browser killed")
+                logger.info("Browser killed")
             elif hasattr(browser, "stop"):
                 await browser.stop()
-                print("  [OK] Browser stopped")
+                logger.info("Browser stopped")
             elif hasattr(browser, "close"):
                 await browser.close()
-                print("  [OK] Browser closed")
+                logger.info("Browser closed")
         except Exception as e:
-            print(f"  [WARN] Error during browser cleanup: {e}")
+            logger.warning("Error during browser cleanup: %s", e)
         finally:
             unregister_browser(browser)
-    print("[INFO] Browser cleanup complete")
+    logger.info("Browser cleanup complete")
 
 
 def _signal_handler(signum: int, _frame: FrameType | None) -> None:
     global _shutdown_requested
     if _shutdown_requested:
-        print("\n[FORCE] Force exit requested")
+        logger.warning("Force exit requested")
         sys.exit(1)
     _shutdown_requested = True
     signal_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
-    print(f"\n[INFO] Received {signal_name}, shutting down gracefully...")
-    print("[INFO] Press Ctrl+C again to force exit")
+    logger.info("Received %s, shutting down gracefully...", signal_name)
+    logger.info("Press Ctrl+C again to force exit")
 
 
 def install_signal_handlers() -> None:
@@ -84,6 +87,6 @@ async def managed_browser(browser: Browser):
             elif hasattr(browser, "close"):
                 await browser.close()
         except Exception as e:
-            print(f"[WARN] Browser cleanup error: {e}")
+            logger.warning("Browser cleanup error: %s", e)
         finally:
             unregister_browser(browser)

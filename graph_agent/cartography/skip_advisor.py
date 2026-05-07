@@ -141,10 +141,12 @@ class SkipAdvisor:
     def __init__(
         self,
         *,
+        app_id: str = "",
         app_name: str,
         primary_origin_url: str = "",
         policy: SkipPolicy | None = None,
     ) -> None:
+        self._app_id = (app_id or "").strip()
         self._app_name = (app_name or "").strip()
         self._primary_origin_url = (primary_origin_url or "").strip()
         self._policy = policy or SkipPolicy()
@@ -220,10 +222,10 @@ class SkipAdvisor:
         started = time.monotonic()
         self._eval_count += 1
         url_clean = clean_url(url or "")
-        if not self._app_name or not url_clean:
+        if (not self._app_id and not self._app_name) or not url_clean:
             decision = SkipDecision(
                 kind=SkipKind.FULL_EXPLORE,
-                reason="missing_app_name_or_url",
+                reason="missing_app_identity_or_url",
             )
             self._account_decision(decision)
             return decision
@@ -315,38 +317,12 @@ class SkipAdvisor:
           中超过 1 的部分总和（衡量"已被多个独立 session 复现"的强度）。
         """
         async with GraphManager() as manager:
-            # 1) zone 状态 + release coverage —— 与原查询同形态，新增 release 字段
-            base_rows = await manager._run_read(
-                """
-                MATCH (a:App {name: $app_name})
-                WITH a
-                ORDER BY coalesce(a.last_session_at, a.created_at) DESC
-                LIMIT 1
-                OPTIONAL MATCH (rel:GraphRelease {app_id: a.id, status: 'active'})
-                WITH a, rel
-                ORDER BY rel.created_at DESC
-                WITH a, head(collect(rel)) AS active_release
-                OPTIONAL MATCH (a)-[:HAS_STATE]->(s:State)
-                WHERE split(split(coalesce(s.url, ''), '?')[0], '#')[0] = $url_clean
-                OPTIONAL MATCH (s)-[:HAS_ZONE]->(z:Zone)
-                OPTIONAL MATCH (z)-[ci:COVERS_INTENT]->(:Intent)
-                WITH a, active_release, s, z,
-                     sum(coalesce(ci.observed_count, 0)) AS zone_intent_total
-                RETURN
-                    count(DISTINCT s) AS state_count,
-                    max(s.last_visited) AS last_visited,
-                    coalesce(active_release.coverage_overall, 0.0) AS release_coverage,
-                    collect({
-                        selector: coalesce(z.selector, ''),
-                        status: coalesce(z.exploration_status, 'undiscovered'),
-                        last_explored: z.last_explored,
-                        intent_confirm: zone_intent_total
-                    }) AS zones
-                """,
-                app_name=self._app_name,
+            row = await manager.get_skip_advisor_coverage(
                 url_clean=url_clean,
+                app_id=self._app_id,
+                app_name=self._app_name,
             )
-            if not base_rows:
+            if not row:
                 return {
                     "state_count": 0,
                     "last_visited": None,
@@ -354,29 +330,6 @@ class SkipAdvisor:
                     "release_coverage": 0.0,
                     "entity_confirm_total": 0,
                 }
-            row = dict(base_rows[0])
-
-            # 2) entity_confirm_total —— 单独一条查询，避免与 zone 聚合产生笛卡尔爆炸
-            entity_rows = await manager._run_read(
-                """
-                MATCH (a:App {name: $app_name})
-                WITH a
-                ORDER BY coalesce(a.last_session_at, a.created_at) DESC
-                LIMIT 1
-                OPTIONAL MATCH (a)-[:HAS_STATE]->(s:State)
-                WHERE split(split(coalesce(s.url, ''), '?')[0], '#')[0] = $url_clean
-                OPTIONAL MATCH (ent:TransitionEntity)
-                WHERE s IS NOT NULL AND ent.from_state_id = s.id
-                WITH coalesce(ent.confirmed_session_count, 0) AS n
-                RETURN sum(CASE WHEN n > 1 THEN n - 1 ELSE 0 END) AS entity_confirm_total
-                """,
-                app_name=self._app_name,
-                url_clean=url_clean,
-            )
-            entity_total = 0
-            if entity_rows:
-                entity_total = int(entity_rows[0].get("entity_confirm_total") or 0)
-            row["entity_confirm_total"] = entity_total
             return row
 
     def _build_decision(self, row: dict[str, Any]) -> SkipDecision:

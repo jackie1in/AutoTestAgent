@@ -405,6 +405,7 @@ class CoverageReport(BaseModel):
     menu_coverage: float = 0.0
     zone_coverage: float = 0.0
     interaction_coverage: float = 0.0
+    state_coverage: float = 0.0
     transition_confidence: TransitionConfidenceDistribution = Field(
         default_factory=TransitionConfidenceDistribution
     )

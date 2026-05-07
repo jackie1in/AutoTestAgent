@@ -260,3 +260,22 @@ def resolve_scheduler_warm_start_topk() -> int:
     except ValueError:
         return 50
     return max(1, min(500, val))
+
+
+def resolve_orchestration_max_runtime_sec() -> float:
+    raw = (os.getenv("CARTOGRAPHY_ORCHESTRATION_MAX_RUNTIME_SEC") or "").strip()
+    if not raw:
+        return 1800.0
+    try:
+        val = float(raw)
+    except ValueError:
+        return 1800.0
+    return max(60.0, min(8 * 3600.0, val))
+
+
+def resolve_pipeline_checkpoint_path() -> str:
+    return (os.getenv("CARTOGRAPHY_PIPELINE_CHECKPOINT_PATH") or "").strip()
+
+
+def resolve_pipeline_resume_from_checkpoint() -> bool:
+    return env_bool("CARTOGRAPHY_PIPELINE_RESUME_CHECKPOINT", False)

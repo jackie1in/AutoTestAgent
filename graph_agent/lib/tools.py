@@ -7,6 +7,7 @@ Aligned with page-agent's tools/index.ts:
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -213,4 +214,4 @@ def format_tools_for_prompt() -> str:
 
 # Example output verification
 if __name__ == "__main__":
-    print(format_tools_for_prompt())
+    sys.stdout.write(format_tools_for_prompt() + "\n")

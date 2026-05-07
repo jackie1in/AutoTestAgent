@@ -333,3 +333,55 @@ async def test_long_term_signals_round_trip_through_cache():
     assert second.intent_confirm_total == first.intent_confirm_total
     assert second.entity_confirm_total == first.entity_confirm_total
     assert second.intent_confirmed_zone_count == first.intent_confirmed_zone_count
+
+
+@pytest.mark.asyncio
+async def test_query_coverage_prefers_app_id_over_app_name():
+    calls: list[dict[str, str]] = []
+
+    class _FakeManager:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get_skip_advisor_coverage(
+            self, *, url_clean: str, app_id: str = "", app_name: str = ""
+        ) -> dict[str, Any]:
+            calls.append({"url_clean": url_clean, "app_id": app_id, "app_name": app_name})
+            return _build_row(state_count=0, last_visited=None, zones=[])
+
+    advisor = SkipAdvisor(app_id="app:demo:1", app_name="demo")
+    with patch("graph_agent.cartography.skip_advisor.GraphManager", lambda: _FakeManager()):
+        await advisor._query_coverage("https://example.com/path")
+
+    assert calls, "expected get_skip_advisor_coverage call"
+    assert calls[0]["app_id"] == "app:demo:1"
+    assert calls[0]["app_name"] == "demo"
+
+
+@pytest.mark.asyncio
+async def test_query_coverage_falls_back_to_app_name_when_no_app_id():
+    calls: list[dict[str, str]] = []
+
+    class _FakeManager:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get_skip_advisor_coverage(
+            self, *, url_clean: str, app_id: str = "", app_name: str = ""
+        ) -> dict[str, Any]:
+            calls.append({"url_clean": url_clean, "app_id": app_id, "app_name": app_name})
+            return _build_row(state_count=0, last_visited=None, zones=[])
+
+    advisor = SkipAdvisor(app_name="demo")
+    with patch("graph_agent.cartography.skip_advisor.GraphManager", lambda: _FakeManager()):
+        await advisor._query_coverage("https://example.com/path")
+
+    assert calls, "expected get_skip_advisor_coverage call"
+    assert calls[0]["app_id"] == ""
+    assert calls[0]["app_name"] == "demo"

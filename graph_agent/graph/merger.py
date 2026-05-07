@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 
 from neo4j import AsyncDriver
 
@@ -140,7 +140,7 @@ class GraphMerger:
             id=state.id,
         )
         existing = await result.single()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(UTC).isoformat()
         if existing is None:
             await tx.run(
                 "CREATE (s:State {id: $id, url: $url, title: $title, "
@@ -234,7 +234,7 @@ class GraphMerger:
         supersedes_revision_ids: list[str],
     ) -> str:
         revision_id = (
-            f"trev:{hashlib.md5(f'{stable_key}|{transition_id}|{session_id}|{datetime.utcnow().isoformat()}'.encode()).hexdigest()[:16]}"
+            f"trev:{hashlib.md5(f'{stable_key}|{transition_id}|{session_id}|{datetime.now(UTC).isoformat()}'.encode()).hexdigest()[:16]}"
         )
         action_val = (
             transition.action.value
@@ -265,7 +265,7 @@ class GraphMerger:
             to_state_id=str(transition.to_state_id or ""),
             action=action_val,
             semantic_action_key=str(transition.semantic_action_key or ""),
-            now=datetime.utcnow().isoformat(),
+            now=datetime.now(UTC).isoformat(),
         )
         await tx.run(
             "MERGE (rev:TransitionRevision {revision_id: $revision_id}) "
@@ -296,7 +296,7 @@ class GraphMerger:
             to_state_id=str(transition.to_state_id or ""),
             session_id=session_id,
             ingest_version_id=str(getattr(transition, "ingest_version_id", "") or ""),
-            now=datetime.utcnow().isoformat(),
+            now=datetime.now(UTC).isoformat(),
             is_active=active,
         )
         await tx.run(
@@ -334,7 +334,7 @@ class GraphMerger:
             selector=transition.selector,
         )
         existing = await result.single()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(UTC).isoformat()
         stable_key = self._transition_stable_key(transition)
         active_revision_result = await tx.run(
             "MATCH (:TransitionEntity {stable_key: $stable_key})-[:HAS_REVISION]->(rev:TransitionRevision {is_active: true}) "
@@ -699,7 +699,7 @@ class GraphMerger:
                 "t.validation_count = t.validation_count + 1",
                 id=transition_id,
                 delta=delta,
-                now=datetime.utcnow().isoformat(),
+                now=datetime.now(UTC).isoformat(),
             )
             rel = "VALIDATED" if passed else "INVALIDATED"
             await session.run(

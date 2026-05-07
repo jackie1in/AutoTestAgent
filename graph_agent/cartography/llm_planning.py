@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 
 from browser_use.llm.base import BaseChatModel
@@ -7,6 +8,8 @@ from pydantic import BaseModel, Field
 
 from graph_agent.cartography.types import LLMTransitionHint
 from graph_agent.llm.utils import ainvoke_structured
+
+logger = logging.getLogger(__name__)
 
 
 class LLMMenuItem(BaseModel):
@@ -140,7 +143,9 @@ async def analyze_page_with_llm(
             timeout_ms=45_000,
         )
     except Exception as e:
-        print(f"[LLM-ORCH] Page analysis failed: {e}. Falling back to empty analysis.")
+        logger.warning(
+            "[LLM-ORCH] Page analysis failed: %s. Falling back to empty analysis.", e
+        )
         return LLMPageAnalysis(page_type="unknown", reasoning=f"Analysis failed: {e}")
 
 
@@ -193,7 +198,9 @@ async def plan_next_exploration_with_llm(
             timeout_ms=45_000,
         )
     except Exception as e:
-        print(f"[LLM-ORCH] Exploration planning failed: {e}. Falling back to stop.")
+        logger.warning(
+            "[LLM-ORCH] Exploration planning failed: %s. Falling back to stop.", e
+        )
         return LLMExplorationPlan(
             tasks=[LLMExplorationTask(task_type="stop", description=f"Planning failed: {e}")],
             strategy="stop",

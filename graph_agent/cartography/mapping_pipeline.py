@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import logging
 from collections import Counter
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urljoin
 
@@ -24,6 +27,9 @@ from graph_agent.cartography.config import (
     resolve_layout_confidence_retry_enabled,
     resolve_layout_confidence_threshold,
     resolve_layout_snapshot_limit,
+    resolve_orchestration_max_runtime_sec,
+    resolve_pipeline_checkpoint_path,
+    resolve_pipeline_resume_from_checkpoint,
     resolve_skip_advisor_enabled,
     resolve_skip_cache_ttl_sec,
     resolve_skip_policy_profile,
@@ -66,6 +72,8 @@ if TYPE_CHECKING:
     from graph_agent.graph.merger import CartographyResult
     from graph_agent.models import ZoneType
 
+logger = logging.getLogger(__name__)
+
 
 def _now_utc():
     from datetime import datetime, timezone
@@ -87,6 +95,77 @@ def _parse_evaluate_result(raw: object) -> dict[str, object]:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def _serialize_skip_decision(decision: SkipDecision | None) -> dict[str, object] | None:
+    if decision is None:
+        return None
+    return {
+        "kind": decision.kind.value,
+        "reason": decision.reason,
+        "confidence": float(decision.confidence),
+        "target_zone_selectors": list(decision.target_zone_selectors),
+        "coverage": float(decision.coverage),
+        "state_count": int(decision.state_count),
+        "last_visited_age_h": float(decision.last_visited_age_h or 0.0),
+        "last_explored_age_h": float(decision.last_explored_age_h or 0.0),
+        "release_coverage": float(decision.release_coverage),
+        "intent_confirm_total": int(decision.intent_confirm_total),
+        "entity_confirm_total": int(decision.entity_confirm_total),
+        "intent_confirmed_zone_count": int(decision.intent_confirmed_zone_count),
+        "circuit_open": bool(decision.circuit_open),
+    }
+
+
+def _deserialize_skip_decision(raw: object) -> SkipDecision | None:
+    if not isinstance(raw, dict):
+        return None
+    kind_raw = str(raw.get("kind") or "").strip().lower()
+    kind = {
+        SkipKind.SKIP_PAGE.value: SkipKind.SKIP_PAGE,
+        SkipKind.EXPLORE_ZONES_ONLY.value: SkipKind.EXPLORE_ZONES_ONLY,
+        SkipKind.FULL_EXPLORE.value: SkipKind.FULL_EXPLORE,
+    }.get(kind_raw, SkipKind.FULL_EXPLORE)
+    return SkipDecision(
+        kind=kind,
+        reason=str(raw.get("reason") or ""),
+        confidence=float(raw.get("confidence") or 0.0),
+        target_zone_selectors=list(raw.get("target_zone_selectors") or []),
+        coverage=float(raw.get("coverage") or 0.0),
+        state_count=int(raw.get("state_count") or 0),
+        last_visited_age_h=float(raw.get("last_visited_age_h") or 0.0),
+        last_explored_age_h=float(raw.get("last_explored_age_h") or 0.0),
+        release_coverage=float(raw.get("release_coverage") or 0.0),
+        intent_confirm_total=int(raw.get("intent_confirm_total") or 0),
+        entity_confirm_total=int(raw.get("entity_confirm_total") or 0),
+        intent_confirmed_zone_count=int(raw.get("intent_confirmed_zone_count") or 0),
+        circuit_open=bool(raw.get("circuit_open")),
+    )
+
+
+def _classify_pipeline_exception(exc: Exception) -> str:
+    text = str(exc).lower()
+    if "429" in text or "rate" in text and "limit" in text:
+        return "rate_limited"
+    if "401" in text or "403" in text or "forbidden" in text or "unauthorized" in text:
+        return "unauthorized"
+    if "timeout" in text:
+        return "timeout"
+    return "unknown"
+
+
+def _looks_rate_limited(dom_text: str, url: str) -> bool:
+    sample = f"{dom_text or ''} {url or ''}".lower()
+    return any(
+        marker in sample
+        for marker in (
+            "429",
+            "too many requests",
+            "rate limit",
+            "访问受限",
+            "请求过于频繁",
+        )
+    )
 
 
 async def click_menu_by_text(browser: Browser, text: str) -> bool:
@@ -131,15 +210,15 @@ async def click_menu_by_text(browser: Browser, text: str) -> bool:
         raw = await page.evaluate(script, target)
         parsed = _parse_evaluate_result(raw)
         if parsed.get("ok"):
-            print(
+            logger.info(
                 f"[PIPELINE] Menu '{target}' clicked "
                 f"(via {parsed.get('selector', '?')}, tag={parsed.get('tag', '?')})"
             )
             return True
-        print(f"[PIPELINE] Menu '{target}' not found on current page")
+        logger.info(f"[PIPELINE] Menu '{target}' not found on current page")
         return False
     except Exception as e:
-        print(f"[PIPELINE] click_menu_by_text error: {e}")
+        logger.warning("[PIPELINE] click_menu_by_text error: %s", e)
         return False
 
 
@@ -201,6 +280,19 @@ def map_llm_zone_type(zone_type: str) -> "ZoneType | None":
     return mapping.get(zone_type.lower().strip())
 
 
+def _build_runtime_zone_id(
+    *,
+    zone_type: str,
+    selector: str,
+    source_url: str = "",
+) -> str:
+    zone_type_norm = (zone_type or "").strip().lower() or "content"
+    selector_norm = (selector or "").strip()
+    source_key = clean_url(source_url or "") if source_url else ""
+    seed = f"{zone_type_norm}|{selector_norm}|{source_key}"
+    return f"zone:{hashlib.md5(seed.encode()).hexdigest()[:12]}"
+
+
 async def ensure_browser_ready(browser: Browser, target_url: str) -> bool:
     try:
         current = await browser.get_current_page_url()
@@ -209,13 +301,13 @@ async def ensure_browser_ready(browser: Browser, target_url: str) -> bool:
     except Exception:
         pass
     try:
-        print("[PIPELINE] Browser session appears reset, attempting restart...")
+        logger.info("[PIPELINE] Browser session appears reset, attempting restart...")
         await browser.start()
         await browser.navigate_to(target_url)
         await asyncio.sleep(2)
         return True
     except Exception as e:
-        print(f"[PIPELINE] Browser restart failed: {e}")
+        logger.warning("[PIPELINE] Browser restart failed: %s", e)
         return False
 
 
@@ -346,6 +438,279 @@ def build_knowledge_hint_text(
     return "\n".join(lines)
 
 
+async def _enqueue_ranked_warm_candidates(
+    *,
+    warm_start_candidates: list[dict[str, object]],
+    current_url: str,
+    start_url: str,
+    primary_origin_url: str,
+    enqueue_page,
+) -> None:
+    warm_candidates = rank_warm_start_candidates(warm_start_candidates or [])
+    for item in warm_candidates:
+        target_url = str(item.get("target_url") or "").strip()
+        if not target_url:
+            continue
+        if clean_url(target_url) == clean_url(current_url or start_url):
+            continue
+        if primary_origin_url and not same_origin(target_url, primary_origin_url):
+            continue
+        sched_task_type = str(item.get("scheduler_task_type") or "")
+        sched_hint = ""
+        if sched_task_type == "explore_zone":
+            sched_reason = str(item.get("scheduler_reason") or "")
+            sched_hint = (
+                "stale_re_explore"
+                if sched_reason == "stale_re_explore"
+                else "explore_zone"
+            )
+        reason = f"scheduler:{sched_task_type}" if sched_task_type else "warm-start"
+        await enqueue_page(target_url, reason, scheduler_hint=sched_hint)
+
+
+async def _maybe_inject_knowledge_hint(
+    *,
+    knowledge_broker: KnowledgeBroker | None,
+    knowledge_enabled: bool,
+    now_ts: float,
+    last_query_ts: float,
+    min_interval_sec: float,
+    score: float,
+    threshold: float,
+    all_transitions,
+    app_id: str,
+    session_id: str,
+    current_page_url: str,
+    page_type: str,
+    layout_fingerprint: str,
+    knowledge_release_id: str,
+    knowledge_topk_val: int,
+    knowledge_timeout_ms: int,
+) -> tuple[str, dict[str, object], float]:
+    if not should_query_knowledge(
+        enabled=knowledge_enabled,
+        now_ts=now_ts,
+        last_query_ts=last_query_ts,
+        min_interval_sec=min_interval_sec,
+        score=score,
+        threshold=threshold,
+    ) or knowledge_broker is None:
+        return "", {}, last_query_ts
+
+    latest_transition = all_transitions[-1] if all_transitions else None
+    recent_selector = ""
+    recent_action = ""
+    if latest_transition is not None:
+        recent_selector = str(getattr(latest_transition, "selector", "") or "")
+        recent_action = str(getattr(latest_transition, "action", "") or "")
+
+    result = await knowledge_broker.query(
+        KnowledgeQueryInput(
+            app_id=app_id,
+            session_id=session_id,
+            current_url=current_page_url,
+            page_type=page_type,
+            layout_fingerprint=layout_fingerprint,
+            recent_selector=recent_selector,
+            recent_action=recent_action,
+            release_id=knowledge_release_id,
+            signals={"trigger_score": score},
+            top_k=knowledge_topk_val,
+        ),
+        timeout_ms=knowledge_timeout_ms,
+    )
+    metrics_delta: dict[str, object] = {
+        "knowledge_query_count": 1,
+        "knowledge_latency_ms": result.meta.query_latency_ms,
+        "knowledge_cache_hit_count": 1 if result.meta.cache_hit else 0,
+        "knowledge_timeout_count": 1 if result.meta.timed_out else 0,
+        "knowledge_circuit_open_count": 1 if result.meta.circuit_open else 0,
+        "knowledge_error_count": 1 if result.meta.error else 0,
+        "knowledge_hit_count": 1
+        if (result.transition_hints or result.intent_hints or result.state_hints)
+        else 0,
+    }
+    hint_text = ""
+    if metrics_delta["knowledge_hit_count"]:
+        hint_text = build_knowledge_hint_text(result.summary, result.transition_hints)
+    return hint_text, metrics_delta, now_ts
+
+
+def _build_pipeline_result(
+    *,
+    all_states,
+    all_transitions,
+    all_zones,
+    all_history,
+    menu_items_discovered,
+    zones_discovered,
+    layout_evidence,
+    layout_confidence_samples: list[float],
+    low_layout_confidence_hits: int,
+    low_layout_confidence_page_types: Counter[str],
+    knowledge_query_count: int,
+    knowledge_hit_count: int,
+    knowledge_cache_hit_count: int,
+    knowledge_timeout_count: int,
+    knowledge_circuit_open_count: int,
+    knowledge_error_count: int,
+    knowledge_latency_total_ms: float,
+    knowledge_profile: str,
+    skip_advisor: SkipAdvisor | None,
+    skip_metrics: dict[str, int],
+    session_id: str,
+    current_url: str,
+    start_url: str,
+    failed_action_count: int,
+    semantic_conflict_count: int,
+    cross_origin_seen: bool,
+    iframe_seen: bool,
+    captcha_seen: bool,
+) -> "CartographyResult":
+    from graph_agent.graph.merger import CartographyResult
+
+    result = CartographyResult()
+    result.states = all_states
+    result.transitions = all_transitions
+    result.zones = all_zones
+    result.history = all_history
+    result.menus = menu_items_discovered
+    result.zone_hints = zones_discovered
+    result.layout_evidence = [dict(item) for item in layout_evidence]
+    result.layout_metrics = dict(
+        summarize_layout_metrics(
+            samples=layout_confidence_samples,
+            low_confidence_hits=low_layout_confidence_hits,
+            low_confidence_page_types=dict(low_layout_confidence_page_types),
+            evidence_count=len(layout_evidence),
+        )
+    )
+    result.layout_metrics.update(
+        {
+            "knowledge_query_count": knowledge_query_count,
+            "knowledge_hit_count": knowledge_hit_count,
+            "knowledge_cache_hit_count": knowledge_cache_hit_count,
+            "knowledge_timeout_count": knowledge_timeout_count,
+            "knowledge_circuit_open_count": knowledge_circuit_open_count,
+            "knowledge_error_count": knowledge_error_count,
+            "knowledge_avg_latency_ms": round(
+                knowledge_latency_total_ms / knowledge_query_count, 3
+            )
+            if knowledge_query_count > 0
+            else 0.0,
+            "knowledge_trigger_profile": knowledge_profile,
+        }
+    )
+    result.layout_metrics.update(
+        {
+            "skip_advisor_enabled": skip_advisor is not None,
+            "skip_page_in_enqueue": skip_metrics["skip_page_in_enqueue"],
+            "skip_page_in_loop": skip_metrics["skip_page_in_loop"],
+            "skip_zones_only_in_loop": skip_metrics["zones_only_in_loop"],
+            "pipeline_error_rate_limited_count": skip_metrics["error_rate_limited_count"],
+            "pipeline_error_unauthorized_count": skip_metrics["error_unauthorized_count"],
+            "pipeline_error_timeout_count": skip_metrics["error_timeout_count"],
+            "pipeline_error_unknown_count": skip_metrics["error_unknown_count"],
+        }
+    )
+    if skip_advisor is not None:
+        result.layout_metrics.update(skip_advisor.metrics)
+    intervention_tasks = evaluate_intervention_need(
+        session_id=session_id,
+        source_url=current_url or start_url,
+        page_type="mixed",
+        low_layout_confidence_hits=low_layout_confidence_hits,
+        failed_action_count=failed_action_count,
+        semantic_conflict_count=semantic_conflict_count,
+        has_cross_origin=cross_origin_seen,
+        has_iframe=iframe_seen,
+        has_captcha=captcha_seen,
+    )
+    result.intervention_tasks = [
+        {
+            "task_id": task.task_id,
+            "reason": task.reason,
+            "source_url": task.source_url,
+            "page_type": task.page_type,
+            "context": task.context,
+            "status": task.status,
+        }
+        for task in intervention_tasks
+    ]
+    result.semantic_conflict_count = semantic_conflict_count
+    return result
+
+
+def _update_page_zone_progress(
+    *,
+    page_analysis: LLMPageAnalysis,
+    all_zones,
+    zones_discovered: list[dict[str, object]],
+    current_page_url: str,
+    new_transitions_this_page: int,
+) -> None:
+    from graph_agent.models import ExplorationStatus
+
+    page_zone_keys: set[tuple[str, str]] = {
+        (str(z.zone_type), str(z.selector))
+        for z in page_analysis.functional_zones
+        if map_llm_zone_type(z.zone_type) is not None
+    }
+    if not page_zone_keys or new_transitions_this_page <= 0:
+        return
+    _status_priority = {
+        ExplorationStatus.UNDISCOVERED.value: 0,
+        ExplorationStatus.STALE.value: 0,
+        ExplorationStatus.DISCOVERED.value: 1,
+        ExplorationStatus.PARTIAL.value: 2,
+        ExplorationStatus.EXPLORED.value: 3,
+        ExplorationStatus.VALIDATED.value: 4,
+    }
+    target_status = (
+        ExplorationStatus.EXPLORED
+        if new_transitions_this_page >= 3
+        else ExplorationStatus.PARTIAL
+    )
+    target_priority = _status_priority[target_status.value]
+    now_ts = _now_utc()
+    page_zone_id_set = {
+        _build_runtime_zone_id(
+            zone_type=ztype,
+            selector=selector,
+            source_url=current_page_url,
+        )
+        for ztype, selector in page_zone_keys
+    }
+    for z in all_zones:
+        if z.id not in page_zone_id_set:
+            continue
+        current_val = (
+            z.exploration_status.value
+            if hasattr(z.exploration_status, "value")
+            else str(z.exploration_status)
+        )
+        if _status_priority.get(current_val, 0) < target_priority:
+            z.exploration_status = target_status
+        z.last_explored = now_ts
+
+    target_status_val = target_status.value
+    now_iso = now_ts.isoformat()
+    for hint in zones_discovered:
+        if (
+            str(hint.get("zone_type") or ""),
+            str(hint.get("selector") or ""),
+        ) not in page_zone_keys:
+            continue
+        if hint.get("source_url") and hint.get("source_url") != current_page_url:
+            continue
+        current_val = str(
+            hint.get("exploration_status") or ExplorationStatus.DISCOVERED.value
+        )
+        if _status_priority.get(current_val, 0) < target_priority:
+            hint["exploration_status"] = target_status_val
+        hint["last_explored"] = now_iso
+
+
 @observe(
     name="cartography.run_orchestrated_mapping",
     metadata={"component": "cartography", "stage": "pipeline"},
@@ -368,13 +733,16 @@ async def run_orchestrated_mapping(
     knowledge_topk: int | None = None,
     knowledge_release_id: str = "",
     skip_advisor: SkipAdvisor | None = None,
+    checkpoint_path: str = "",
+    resume_from_checkpoint: bool | None = None,
+    orchestration_max_runtime_sec: float | None = None,
 ) -> "CartographyResult":
     from graph_agent.cartography.react_explorer import ReActExplorer
     from graph_agent.cartography.snapshot import capture_composite_fingerprint
     from graph_agent.graph.merger import CartographyResult
     from graph_agent.models import ExplorationStatus, State, Transition, Zone
 
-    print("[PIPELINE] === LLM-first orchestrated exploration starting ===")
+    logger.info("[PIPELINE] === LLM-first orchestrated exploration starting ===")
     all_states: list[State] = []
     all_transitions: list[Transition] = []
     all_zones: list[Zone] = []
@@ -382,9 +750,7 @@ async def run_orchestrated_mapping(
     explored_urls: list[str] = []
     menu_items_discovered: list[dict[str, object]] = []
     zones_discovered: list[dict[str, object]] = []
-    pages_to_explore: list[tuple[str, str, SkipDecision | None]] = [
-        (current_url or start_url, "start page", None)
-    ]
+    pages_to_explore: list[tuple[str, str, SkipDecision | None]] = []
     pages_explored: set[str] = set()
     pending_menus: list[dict[str, str]] = []
     menu_scanned_urls: set[str] = set()
@@ -447,7 +813,88 @@ async def run_orchestrated_mapping(
         "skip_page_in_loop": 0,
         "zones_only_in_loop": 0,
         "scheduler_zones_only_forced": 0,
+        "error_rate_limited_count": 0,
+        "error_unauthorized_count": 0,
+        "error_timeout_count": 0,
+        "error_unknown_count": 0,
     }
+    checkpoint_file = checkpoint_path or resolve_pipeline_checkpoint_path()
+    should_resume = (
+        resolve_pipeline_resume_from_checkpoint()
+        if resume_from_checkpoint is None
+        else resume_from_checkpoint
+    )
+    runtime_limit_sec = (
+        resolve_orchestration_max_runtime_sec()
+        if orchestration_max_runtime_sec is None
+        else max(60.0, orchestration_max_runtime_sec)
+    )
+    orchestration_step = 0
+
+    def _persist_checkpoint() -> None:
+        if not checkpoint_file:
+            return
+        payload = {
+            "app_id": app_id,
+            "session_id": session_id,
+            "pages_to_explore": [
+                {
+                    "url": item[0],
+                    "reason": item[1],
+                    "skip_decision": _serialize_skip_decision(item[2]),
+                }
+                for item in pages_to_explore
+            ],
+            "pages_explored": sorted(pages_explored),
+            "pending_menus": list(pending_menus),
+            "orchestration_step": orchestration_step,
+            "failed_action_count": failed_action_count,
+            "semantic_conflict_count": semantic_conflict_count,
+        }
+        try:
+            target = Path(checkpoint_file)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            return
+
+    if should_resume and checkpoint_file:
+        try:
+            raw = json.loads(Path(checkpoint_file).read_text(encoding="utf-8"))
+            if (
+                isinstance(raw, dict)
+                and str(raw.get("app_id") or "") == app_id
+                and str(raw.get("session_id") or "") == session_id
+            ):
+                restored_queue: list[tuple[str, str, SkipDecision | None]] = []
+                for item in list(raw.get("pages_to_explore") or []):
+                    if not isinstance(item, dict):
+                        continue
+                    restored_queue.append(
+                        (
+                            str(item.get("url") or ""),
+                            str(item.get("reason") or "checkpoint-resume"),
+                            _deserialize_skip_decision(item.get("skip_decision")),
+                        )
+                    )
+                pages_to_explore = restored_queue
+                pages_explored = set(str(x) for x in list(raw.get("pages_explored") or []))
+                pending_menus = [
+                    dict(m)
+                    for m in list(raw.get("pending_menus") or [])
+                    if isinstance(m, dict)
+                ]
+                failed_action_count = int(raw.get("failed_action_count") or 0)
+                semantic_conflict_count = int(raw.get("semantic_conflict_count") or 0)
+                orchestration_step = int(raw.get("orchestration_step") or 0)
+                logger.info(
+                    f"[PIPELINE] Resume from checkpoint: queue={len(pages_to_explore)}, explored={len(pages_explored)}"
+                )
+        except Exception:
+            pass
+
+    if not pages_to_explore:
+        pages_to_explore = [(current_url or start_url, "start page", None)]
 
     def _force_zones_only(
         decision: SkipDecision, scheduler_hint: str
@@ -485,7 +932,7 @@ async def run_orchestrated_mapping(
         if clean in {clean_url(u) for u, _, _ in pages_to_explore}:
             return
         if primary_origin_url and not same_origin(url, primary_origin_url):
-            print(f"[PIPELINE] Skip foreign-origin URL: {url[:80]}")
+            logger.info("[PIPELINE] Skip foreign-origin URL: %s", url[:80])
             return
         decision: SkipDecision | None = None
         if skip_advisor is not None:
@@ -496,7 +943,7 @@ async def run_orchestrated_mapping(
                     skip_metrics["scheduler_zones_only_forced"] += 1
                 else:
                     skip_metrics["skip_page_in_enqueue"] += 1
-                    print(
+                    logger.info(
                         f"[PIPELINE] SkipAdvisor SKIP_PAGE -> {url[:80]} "
                         f"(coverage={decision.coverage:.2f}, reason={decision.reason})"
                     )
@@ -508,6 +955,7 @@ async def run_orchestrated_mapping(
                 decision = _force_zones_only(decision, scheduler_hint)
                 skip_metrics["scheduler_zones_only_forced"] += 1
         pages_to_explore.append((url, reason, decision))
+        _persist_checkpoint()
 
     async def _cleanup_foreign_tabs() -> str:
         nonlocal cross_origin_seen
@@ -516,7 +964,7 @@ async def run_orchestrated_mapping(
         try:
             tabs = await browser.get_tabs()
         except Exception as e:
-            print(f"[PIPELINE] get_tabs failed during cleanup: {e}")
+            logger.warning("[PIPELINE] get_tabs failed during cleanup: %s", e)
             return ""
         surviving = ""
         for t in tabs:
@@ -529,39 +977,23 @@ async def run_orchestrated_mapping(
                 continue
             try:
                 await browser.close_page(target_id)
-                print(f"[PIPELINE] Closed foreign tab ({tab_url[:60] or 'blank'})")
+                logger.info("[PIPELINE] Closed foreign tab (%s)", tab_url[:60] or "blank")
                 cross_origin_seen = True
             except Exception as e:
-                print(f"[PIPELINE] Failed to close foreign tab {target_id}: {e}")
+                logger.warning(
+                    "[PIPELINE] Failed to close foreign tab %s: %s", target_id, e
+                )
         return surviving
 
-    warm_candidates = rank_warm_start_candidates(warm_start_candidates or [])
-    for item in warm_candidates:
-        target_url = str(item.get("target_url") or "").strip()
-        if not target_url:
-            continue
-        if clean_url(target_url) == clean_url(current_url or start_url):
-            continue
-        if primary_origin_url and not same_origin(target_url, primary_origin_url):
-            continue
-        # ExplorationScheduler 注入的任务带 scheduler_task_type / scheduler_reason，
-        # 把它们透传到 _enqueue_page，让"已知缺口"任务总能至少跑 zones-only。
-        sched_task_type = str(item.get("scheduler_task_type") or "")
-        sched_hint = ""
-        if sched_task_type == "explore_zone":
-            sched_reason = str(item.get("scheduler_reason") or "")
-            sched_hint = (
-                "stale_re_explore"
-                if sched_reason == "stale_re_explore"
-                else "explore_zone"
-            )
-        reason = (
-            f"scheduler:{sched_task_type}" if sched_task_type else "warm-start"
-        )
-        await _enqueue_page(target_url, reason, scheduler_hint=sched_hint)
+    await _enqueue_ranked_warm_candidates(
+        warm_start_candidates=warm_start_candidates or [],
+        current_url=current_url,
+        start_url=start_url,
+        primary_origin_url=primary_origin_url,
+        enqueue_page=_enqueue_page,
+    )
 
-    orchestration_step = 0
-    max_orchestration_steps = 50
+    max_orchestration_steps = max(50, max_steps)
     loop = asyncio.get_event_loop()
     start_time = loop.time()
     first_page = True
@@ -570,7 +1002,7 @@ async def run_orchestrated_mapping(
         pages_to_explore or pending_menus
     ) and orchestration_step < max_orchestration_steps:
         if is_shutdown_requested():
-            print("[PIPELINE] Shutdown requested, stopping exploration.")
+            logger.info("[PIPELINE] Shutdown requested, stopping exploration.")
             break
 
         pending_menu_task: dict[str, str] | None = None
@@ -585,7 +1017,7 @@ async def run_orchestrated_mapping(
                 skip_decision = await skip_advisor.evaluate(url)
                 if skip_decision.kind is SkipKind.SKIP_PAGE:
                     skip_metrics["skip_page_in_loop"] += 1
-                    print(
+                    logger.info(
                         f"[PIPELINE] SkipAdvisor SKIP_PAGE (loop) -> {url[:80]} "
                         f"(coverage={skip_decision.coverage:.2f})"
                     )
@@ -608,12 +1040,17 @@ async def run_orchestrated_mapping(
 
         orchestration_step += 1
         elapsed_ms = (loop.time() - start_time) * 1000
-        print(
+        if elapsed_ms >= runtime_limit_sec * 1000.0:
+            logger.info(
+                f"[PIPELINE] Runtime budget exhausted ({elapsed_ms/1000:.1f}s >= {runtime_limit_sec:.1f}s), stopping."
+            )
+            break
+        logger.info(
             f"\n[PIPELINE] Step {orchestration_step}/{max_orchestration_steps}: {url[:80]} (reason: {reason}) [queue={len(pages_to_explore)}, pending_menus={len(pending_menus)}]"
         )
 
         if not await ensure_browser_ready(browser, url):
-            print(f"[PIPELINE] Browser unrecoverable, skipping {url[:80]}")
+            logger.warning("[PIPELINE] Browser unrecoverable, skipping %s", url[:80])
             continue
 
         if first_page and pending_menu_task is None:
@@ -624,13 +1061,13 @@ async def run_orchestrated_mapping(
                 await browser.navigate_to(url)
                 await asyncio.sleep(2)
             except Exception as e:
-                print(f"[PIPELINE] Navigation failed: {e}")
+                logger.warning("[PIPELINE] Navigation failed: %s", e)
                 continue
 
         if pending_menu_task is not None:
             clicked = await click_menu_by_text(browser, pending_menu_task["text"])
             if not clicked:
-                print(
+                logger.info(
                     f"[PIPELINE] Menu click failed for '{pending_menu_task['text']}', skipping"
                 )
                 failed_action_count += 1
@@ -646,11 +1083,21 @@ async def run_orchestrated_mapping(
             dom_text = bs_summary.dom_state.llm_representation()
             page_title = getattr(bs_summary, "title", "") or ""
         except Exception as e:
-            print(f"[PIPELINE] Failed to get DOM text: {e}")
+            logger.warning("[PIPELINE] Failed to get DOM text: %s", e)
 
         current_page_url = await browser.get_current_page_url() or url
+        if _looks_rate_limited(dom_text, current_page_url):
+            skip_metrics["error_rate_limited_count"] += 1
+            logger.info(
+                f"[PIPELINE] Rate-limit signal detected on {current_page_url[:80]}, cooldown 5s."
+            )
+            await asyncio.sleep(5)
+            await _enqueue_page(current_page_url, "rate-limit-retry")
+            pages_explored.add(url_clean)
+            _persist_checkpoint()
+            continue
         if is_login_url(current_page_url):
-            print(
+            logger.info(
                 "[PIPELINE] Login page detected; delegating login (including captcha) to LLM explorer."
             )
 
@@ -685,7 +1132,7 @@ async def run_orchestrated_mapping(
         )
         if low_layout_conf:
             low_layout_confidence_hits += 1
-            print(
+            logger.info(
                 f"[PIPELINE] Low layout confidence ({layout_confidence:.2f} < {layout_conf_threshold:.2f}); "
                 "enabling deeper in-page exploration for this page."
             )
@@ -697,7 +1144,7 @@ async def run_orchestrated_mapping(
             page_title,
             layout_summary=layout_summary,
         )
-        print(
+        logger.info(
             f"[PIPELINE] LLM analysis: page_type={page_analysis.page_type}, "
             f"menus={len(page_analysis.menu_items)}, zones={len(page_analysis.functional_zones)}"
         )
@@ -731,8 +1178,10 @@ async def run_orchestrated_mapping(
             mapped_zone_type = map_llm_zone_type(z.zone_type)
             if mapped_zone_type is None:
                 continue
-            zone_id = (
-                f"zone:{z.zone_type}:{hashlib.md5(z.selector.encode()).hexdigest()[:8]}"
+            zone_id = _build_runtime_zone_id(
+                zone_type=z.zone_type,
+                selector=z.selector,
+                source_url=current_page_url,
             )
             all_zones.append(
                 Zone(
@@ -809,7 +1258,7 @@ async def run_orchestrated_mapping(
             and pending_menu_task is None
             and not low_layout_conf
         ):
-            print(
+            logger.info(
                 f"[PIPELINE] Skip in-page exploration for {page_analysis.page_type}; {enqueued_menu_count} url-menu(s), {pending_menu_added} click-menu(s) queued."
             )
             pages_explored.add(clean_url(current_page_url))
@@ -832,59 +1281,41 @@ async def run_orchestrated_mapping(
             stuck_steps=stuck_steps,
             profile=knowledge_profile,
         )
-        now_ts = loop.time()
-        if knowledge_broker and should_query_knowledge(
-            enabled=knowledge_enabled,
-            now_ts=now_ts,
-            last_query_ts=last_knowledge_query_ts,
-            min_interval_sec=knowledge_interval,
-            score=trigger_score,
-            threshold=knowledge_score_threshold,
-        ):
-            latest_transition = all_transitions[-1] if all_transitions else None
-            recent_selector = ""
-            recent_action = ""
-            if latest_transition is not None:
-                recent_selector = str(getattr(latest_transition, "selector", "") or "")
-                recent_action = str(getattr(latest_transition, "action", "") or "")
-            knowledge_query_count += 1
-            knowledge_result = await knowledge_broker.query(
-                KnowledgeQueryInput(
-                    app_id=app_id,
-                    session_id=session_id,
-                    current_url=current_page_url,
-                    page_type=page_analysis.page_type,
-                    layout_fingerprint=layout_fingerprint,
-                    recent_selector=recent_selector,
-                    recent_action=recent_action,
-                    release_id=knowledge_release_id,
-                    signals={"trigger_score": trigger_score},
-                    top_k=knowledge_topk_val,
-                ),
-                timeout_ms=knowledge_timeout_ms,
+        knowledge_hint_text, knowledge_delta, last_knowledge_query_ts = (
+            await _maybe_inject_knowledge_hint(
+                knowledge_broker=knowledge_broker,
+                knowledge_enabled=knowledge_enabled,
+                now_ts=loop.time(),
+                last_query_ts=last_knowledge_query_ts,
+                min_interval_sec=knowledge_interval,
+                score=trigger_score,
+                threshold=knowledge_score_threshold,
+                all_transitions=all_transitions,
+                app_id=app_id,
+                session_id=session_id,
+                current_page_url=current_page_url,
+                page_type=page_analysis.page_type,
+                layout_fingerprint=layout_fingerprint,
+                knowledge_release_id=knowledge_release_id,
+                knowledge_topk_val=knowledge_topk_val,
+                knowledge_timeout_ms=knowledge_timeout_ms,
             )
-            last_knowledge_query_ts = now_ts
-            knowledge_latency_total_ms += knowledge_result.meta.query_latency_ms
-            if knowledge_result.meta.cache_hit:
-                knowledge_cache_hit_count += 1
-            if knowledge_result.meta.timed_out:
-                knowledge_timeout_count += 1
-            if knowledge_result.meta.circuit_open:
-                knowledge_circuit_open_count += 1
-            if knowledge_result.meta.error:
-                knowledge_error_count += 1
-            if (
-                knowledge_result.transition_hints
-                or knowledge_result.intent_hints
-                or knowledge_result.state_hints
-            ):
-                knowledge_hit_count += 1
-                knowledge_hint_text = build_knowledge_hint_text(
-                    knowledge_result.summary,
-                    knowledge_result.transition_hints,
-                )
-                if knowledge_hint_text:
-                    explorer_hint += "\n\n" + knowledge_hint_text
+        )
+        knowledge_query_count += int(knowledge_delta.get("knowledge_query_count", 0))
+        knowledge_hit_count += int(knowledge_delta.get("knowledge_hit_count", 0))
+        knowledge_cache_hit_count += int(
+            knowledge_delta.get("knowledge_cache_hit_count", 0)
+        )
+        knowledge_timeout_count += int(knowledge_delta.get("knowledge_timeout_count", 0))
+        knowledge_circuit_open_count += int(
+            knowledge_delta.get("knowledge_circuit_open_count", 0)
+        )
+        knowledge_error_count += int(knowledge_delta.get("knowledge_error_count", 0))
+        knowledge_latency_total_ms += float(
+            knowledge_delta.get("knowledge_latency_ms", 0.0)
+        )
+        if knowledge_hint_text:
+            explorer_hint += "\n\n" + knowledge_hint_text
 
         page_cap = {
             "dashboard": 20,
@@ -907,7 +1338,7 @@ async def run_orchestrated_mapping(
         ):
             target_zone_selectors = list(skip_decision.target_zone_selectors)
             zones_only_cap = min(15, page_cap)
-            print(
+            logger.info(
                 f"[PIPELINE] EXPLORE_ZONES_ONLY -> {url[:80]} "
                 f"(pending_zones={len(target_zone_selectors)}, "
                 f"page_cap {page_cap}->{zones_only_cap})"
@@ -961,63 +1392,13 @@ async def run_orchestrated_mapping(
             else:
                 stuck_steps = 0
 
-            # Phase 0: 回写本页 zone 探索状态，给 SkipAdvisor 提供跨 session 信号
-            page_zone_keys: set[tuple[str, str]] = {
-                (str(z.zone_type), str(z.selector))
-                for z in page_analysis.functional_zones
-                if map_llm_zone_type(z.zone_type) is not None
-            }
-            if page_zone_keys and new_transitions_this_page > 0:
-                _status_priority = {
-                    ExplorationStatus.UNDISCOVERED.value: 0,
-                    ExplorationStatus.STALE.value: 0,
-                    ExplorationStatus.DISCOVERED.value: 1,
-                    ExplorationStatus.PARTIAL.value: 2,
-                    ExplorationStatus.EXPLORED.value: 3,
-                    ExplorationStatus.VALIDATED.value: 4,
-                }
-                target_status = (
-                    ExplorationStatus.EXPLORED
-                    if new_transitions_this_page >= 3
-                    else ExplorationStatus.PARTIAL
-                )
-                target_priority = _status_priority[target_status.value]
-                now_ts = _now_utc()
-                # 1) 更新 all_zones 里的 Zone 对象（用 zone_type+selector 等价匹配）
-                page_zone_id_set = {
-                    f"zone:{ztype}:{hashlib.md5(selector.encode()).hexdigest()[:8]}"
-                    for ztype, selector in page_zone_keys
-                }
-                for z in all_zones:
-                    if z.id not in page_zone_id_set:
-                        continue
-                    current_val = (
-                        z.exploration_status.value
-                        if hasattr(z.exploration_status, "value")
-                        else str(z.exploration_status)
-                    )
-                    if _status_priority.get(current_val, 0) < target_priority:
-                        z.exploration_status = target_status
-                    z.last_explored = now_ts
-                # 2) 同步把状态写到 zones_discovered（dict 形式），
-                #    persistence 层据此把 exploration_status/last_explored 落 Neo4j。
-                target_status_val = target_status.value
-                now_iso = now_ts.isoformat()
-                for hint in zones_discovered:
-                    if (
-                        str(hint.get("zone_type") or ""),
-                        str(hint.get("selector") or ""),
-                    ) not in page_zone_keys:
-                        continue
-                    if hint.get("source_url") and hint.get("source_url") != current_page_url:
-                        continue
-                    current_val = str(
-                        hint.get("exploration_status")
-                        or ExplorationStatus.DISCOVERED.value
-                    )
-                    if _status_priority.get(current_val, 0) < target_priority:
-                        hint["exploration_status"] = target_status_val
-                    hint["last_explored"] = now_iso
+            _update_page_zone_progress(
+                page_analysis=page_analysis,
+                all_zones=all_zones,
+                zones_discovered=zones_discovered,
+                current_page_url=current_page_url,
+                new_transitions_this_page=new_transitions_this_page,
+            )
 
             explored_urls.append(current_page_url)
             pages_explored.add(url_clean)
@@ -1038,7 +1419,7 @@ async def run_orchestrated_mapping(
                 if len(pages_to_explore) > before:
                     harvested += 1
             if harvested:
-                print(
+                logger.info(
                     f"[PIPELINE] Harvested {harvested} same-origin URL(s) from in-page states"
                 )
 
@@ -1066,11 +1447,21 @@ async def run_orchestrated_mapping(
             if not await ensure_browser_ready(browser, url):
                 break
         except Exception as e:
-            print(f"[PIPELINE] ReActExplorer failed: {e}")
+            logger.warning("[PIPELINE] ReActExplorer failed: %s", e)
+            err_code = _classify_pipeline_exception(e)
+            if err_code == "rate_limited":
+                skip_metrics["error_rate_limited_count"] += 1
+            elif err_code == "unauthorized":
+                skip_metrics["error_unauthorized_count"] += 1
+            elif err_code == "timeout":
+                skip_metrics["error_timeout_count"] += 1
+            else:
+                skip_metrics["error_unknown_count"] += 1
             failed_action_count += 1
             stuck_steps += 1
             pages_explored.add(url_clean)
             await ensure_browser_ready(browser, url)
+            _persist_checkpoint()
             continue
 
         if orchestration_step % 3 == 0 or not pages_to_explore:
@@ -1101,71 +1492,41 @@ async def run_orchestrated_mapping(
                     await _enqueue_page(
                         task.target_url, f"llm-plan: {task.description}"
                     )
+        _persist_checkpoint()
 
-    result = CartographyResult()
-    result.states = all_states
-    result.transitions = all_transitions
-    result.zones = all_zones
-    result.history = all_history
-    result.menus = menu_items_discovered
-    result.zone_hints = zones_discovered
-    result.layout_evidence = [dict(item) for item in layout_evidence]
-    result.layout_metrics = dict(
-        summarize_layout_metrics(
-            samples=layout_confidence_samples,
-            low_confidence_hits=low_layout_confidence_hits,
-            low_confidence_page_types=dict(low_layout_confidence_page_types),
-            evidence_count=len(layout_evidence),
-        )
-    )
-    result.layout_metrics.update(
-        {
-            "knowledge_query_count": knowledge_query_count,
-            "knowledge_hit_count": knowledge_hit_count,
-            "knowledge_cache_hit_count": knowledge_cache_hit_count,
-            "knowledge_timeout_count": knowledge_timeout_count,
-            "knowledge_circuit_open_count": knowledge_circuit_open_count,
-            "knowledge_error_count": knowledge_error_count,
-            "knowledge_avg_latency_ms": round(
-                knowledge_latency_total_ms / knowledge_query_count, 3
-            )
-            if knowledge_query_count > 0
-            else 0.0,
-            "knowledge_trigger_profile": knowledge_profile,
-        }
-    )
-    # SkipAdvisor 指标合入 layout_metrics（保持单一可观测面）
-    result.layout_metrics.update(
-        {
-            "skip_advisor_enabled": skip_advisor is not None,
-            "skip_page_in_enqueue": skip_metrics["skip_page_in_enqueue"],
-            "skip_page_in_loop": skip_metrics["skip_page_in_loop"],
-            "skip_zones_only_in_loop": skip_metrics["zones_only_in_loop"],
-        }
-    )
-    if skip_advisor is not None:
-        result.layout_metrics.update(skip_advisor.metrics)
-    intervention_tasks = evaluate_intervention_need(
-        session_id=session_id,
-        source_url=current_url or start_url,
-        page_type="mixed",
+    if checkpoint_file:
+        try:
+            Path(checkpoint_file).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    return _build_pipeline_result(
+        all_states=all_states,
+        all_transitions=all_transitions,
+        all_zones=all_zones,
+        all_history=all_history,
+        menu_items_discovered=menu_items_discovered,
+        zones_discovered=zones_discovered,
+        layout_evidence=layout_evidence,
+        layout_confidence_samples=layout_confidence_samples,
         low_layout_confidence_hits=low_layout_confidence_hits,
+        low_layout_confidence_page_types=low_layout_confidence_page_types,
+        knowledge_query_count=knowledge_query_count,
+        knowledge_hit_count=knowledge_hit_count,
+        knowledge_cache_hit_count=knowledge_cache_hit_count,
+        knowledge_timeout_count=knowledge_timeout_count,
+        knowledge_circuit_open_count=knowledge_circuit_open_count,
+        knowledge_error_count=knowledge_error_count,
+        knowledge_latency_total_ms=knowledge_latency_total_ms,
+        knowledge_profile=knowledge_profile,
+        skip_advisor=skip_advisor,
+        skip_metrics=skip_metrics,
+        session_id=session_id,
+        current_url=current_url,
+        start_url=start_url,
         failed_action_count=failed_action_count,
         semantic_conflict_count=semantic_conflict_count,
-        has_cross_origin=cross_origin_seen,
-        has_iframe=iframe_seen,
-        has_captcha=captcha_seen,
+        cross_origin_seen=cross_origin_seen,
+        iframe_seen=iframe_seen,
+        captcha_seen=captcha_seen,
     )
-    result.intervention_tasks = [
-        {
-            "task_id": task.task_id,
-            "reason": task.reason,
-            "source_url": task.source_url,
-            "page_type": task.page_type,
-            "context": task.context,
-            "status": task.status,
-        }
-        for task in intervention_tasks
-    ]
-    result.semantic_conflict_count = semantic_conflict_count
-    return result

@@ -139,6 +139,10 @@ class _CapturedCalls:
     realizes_links: list[tuple[str, str]]
     zone_intent_links: list[dict[str, Any]]
     entity_session_calls: list[tuple[str, str]]
+    app_session_links: list[tuple[str, str]]
+    zone_batches: list[list[dict[str, Any]]]
+    deactivated_release_calls: list[tuple[str, str]]
+    session_stats_payloads: list[dict[str, Any]]
 
 
 class _FakeManager:
@@ -158,6 +162,9 @@ class _FakeManager:
     async def __aexit__(self, *args):
         return None
 
+    def get_driver(self):
+        return self._driver.driver
+
     # — generic no-ops —
     async def add_app(self, *_a, **_k):
         return None
@@ -165,10 +172,16 @@ class _FakeManager:
     async def add_session(self, *_a, **_k):
         return None
 
+    async def link_app_session(self, *_a, **_k):
+        app_id = str(_k.get("app_id") if "app_id" in _k else _a[0])
+        session_id = str(_k.get("session_id") if "session_id" in _k else _a[1])
+        self._captured.app_session_links.append((app_id, session_id))
+        return None
+
     async def add_ingestion_run(self, *_a, **_k):
         return None
 
-    async def link_session_ingestion_run(self, *_a, **_k):
+    async def run_write_transaction(self, *_a, **_k):
         return None
 
     async def set_session_inventory(self, *_a, **_k):
@@ -229,6 +242,9 @@ class _FakeManager:
         return None
 
     async def add_zones(self, *_a, **_k):
+        zones = _k.get("zones")
+        if isinstance(zones, list):
+            self._captured.zone_batches.append(zones)
         return None
 
     async def link_ingestion_emits_zone(self, *_a, **_k):
@@ -240,11 +256,31 @@ class _FakeManager:
     async def add_graph_release(self, *_a, **_k):
         return None
 
+    async def deactivate_other_active_releases(self, *_a, **_k):
+        app_id = str(_k.get("app_id") if "app_id" in _k else _a[0])
+        keep_release_id = str(
+            _k.get("keep_release_id") if "keep_release_id" in _k else _a[1]
+        )
+        self._captured.deactivated_release_calls.append((app_id, keep_release_id))
+        return None
+
     async def link_release_revision(self, *_a, **_k):
         return None
 
     async def update_session_stats(self, *_a, **_k):
+        stats = _k.get("stats")
+        if isinstance(stats, dict):
+            self._captured.session_stats_payloads.append(stats)
         return None
+
+    async def touch_app_last_session(self, *_a, **_k):
+        return None
+
+    async def update_app_stats(self, *_a, **_k):
+        return None
+
+    async def get_latest_semantic_baseline(self, *_a, **_k):
+        return {}
 
     # — 我们关心的几个 —
     async def add_transition_entity_with_session(
@@ -306,12 +342,17 @@ async def test_persist_writes_coverage_snapshot_and_zone_intent_edges():
         realizes_links=[],
         zone_intent_links=[],
         entity_session_calls=[],
+        app_session_links=[],
+        zone_batches=[],
+        deactivated_release_calls=[],
+        session_stats_payloads=[],
     )
 
     fake_report = CoverageReport(
         menu_coverage=0.6,
         zone_coverage=0.8,
         interaction_coverage=0.5,
+        state_coverage=0.4,
         transition_confidence=TransitionConfidenceDistribution(
             high=3, medium=2, low=1
         ),
@@ -334,7 +375,17 @@ async def test_persist_writes_coverage_snapshot_and_zone_intent_edges():
         states=states,
         transitions=transitions,
         zones=[],
+        zone_hints=[
+            {
+                "zone_type": "form",
+                "selector": ".main-form",
+                "description": "Main form",
+                "source_url": "https://demo/users",
+                "exploration_status": "discovered",
+            }
+        ],
         history=[{"url": "https://demo/users", "result": ""}],
+        layout_metrics={"layout_confidence_avg": 0.88, "skip_page_count": 2},
     )
 
     # GraphManager / CoverageAnalyzer 都在 persist_mapping_result 里 lazy-import，
@@ -364,6 +415,7 @@ async def test_persist_writes_coverage_snapshot_and_zone_intent_edges():
     assert snap.session_id == "session:demo:1"
     assert snap.menu_coverage == pytest.approx(0.6)
     assert snap.zone_coverage == pytest.approx(0.8)
+    assert snap.state_coverage == pytest.approx(0.4)
     assert snap.overall_completeness == pytest.approx(0.65)
     assert snap.transition_high == 3
     assert snap.transition_low == 1
@@ -386,3 +438,103 @@ async def test_persist_writes_coverage_snapshot_and_zone_intent_edges():
     # — L4: TransitionEntity 升级到 with_session 接口 —
     assert len(captured.entity_session_calls) == 2
     assert all(sid == "session:demo:1" for _, sid in captured.entity_session_calls)
+
+    # — Phase1: App-Session 关系与 State-Zone 回填 —
+    assert captured.app_session_links == [("app:demo:202605", "session:demo:1")]
+    assert len(captured.zone_batches) == 1
+    assert captured.zone_batches[0][0]["state_ids"] == ["s:from"]
+    assert len(captured.deactivated_release_calls) == 1
+    assert captured.deactivated_release_calls[0][0] == "app:demo:202605"
+    assert captured.deactivated_release_calls[0][1].startswith("release:app:demo:202605:")
+    assert captured.session_stats_payloads, "expected update_session_stats call"
+    session_stats = captured.session_stats_payloads[0]
+    assert session_stats.get("layout_confidence_avg") == pytest.approx(0.88)
+    assert session_stats.get("skip_page_count") == 2
+    assert session_stats.get("semantic_stability_score") == pytest.approx(100.0)
+    assert session_stats.get("semantic_stability_passed") is True
+    assert session_stats.get("semantic_stability_mode") == "bootstrap"
+
+
+@pytest.mark.asyncio
+async def test_zone_hints_with_same_selector_are_scoped_by_source_page():
+    from graph_agent.cartography import persistence
+    from graph_agent.graph.merger import CartographyResult
+
+    captured = _CapturedCalls(
+        coverage_snapshots=[],
+        session_cov_links=[],
+        release_cov_links=[],
+        intent_added=[],
+        realizes_links=[],
+        zone_intent_links=[],
+        entity_session_calls=[],
+        app_session_links=[],
+        zone_batches=[],
+        deactivated_release_calls=[],
+        session_stats_payloads=[],
+    )
+    fake_report = CoverageReport(
+        menu_coverage=0.2,
+        zone_coverage=0.2,
+        interaction_coverage=0.2,
+        state_coverage=0.2,
+        transition_confidence=TransitionConfidenceDistribution(
+            high=0, medium=0, low=0
+        ),
+        overall_completeness=0.2,
+        recommendation="needs_more",
+    )
+    analyzer_mock = MagicMock()
+    analyzer_mock.compute = AsyncMock(return_value=fake_report)
+    analyzer_factory = MagicMock(return_value=analyzer_mock)
+    result = CartographyResult(
+        states=[
+            _make_state(sid="s:list", url="https://demo/users"),
+            _make_state(sid="s:detail", url="https://demo/users/1"),
+        ],
+        transitions=[],
+        zones=[],
+        zone_hints=[
+            {
+                "zone_type": "table",
+                "selector": ".data-table",
+                "description": "User list table",
+                "source_url": "https://demo/users",
+                "exploration_status": "partial",
+            },
+            {
+                "zone_type": "table",
+                "selector": ".data-table",
+                "description": "Related records table",
+                "source_url": "https://demo/users/1",
+                "exploration_status": "explored",
+            },
+        ],
+        history=[{"url": "https://demo/users", "result": ""}],
+    )
+
+    with patch(
+        "graph_agent.neo4j_client.manager.GraphManager",
+        lambda: _FakeManager(captured),
+    ), patch(
+        "graph_agent.coverage.analyzer.CoverageAnalyzer",
+        analyzer_factory,
+    ):
+        await persistence.persist_mapping_result(
+            app_id="app:demo:zone-scope",
+            app_name="demo",
+            session_id="session:demo:zone-scope",
+            resolved_url="https://demo/users",
+            current_url="https://demo/users",
+            inventory=[],
+            initial_actions_log=[],
+            result=result,
+        )
+
+    assert len(captured.zone_batches) == 1
+    rows = captured.zone_batches[0]
+    assert len(rows) == 2
+    selector_rows = [row for row in rows if row["selector"] == ".data-table"]
+    assert len(selector_rows) == 2
+    state_id_sets = {tuple(row["state_ids"]) for row in selector_rows}
+    assert state_id_sets == {("s:list",), ("s:detail",)}

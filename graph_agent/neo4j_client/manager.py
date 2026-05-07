@@ -51,6 +51,23 @@ class GraphManager:
         async with self._driver.driver.session() as session:
             result = await session.run(query, **params)
             return await result.data()
+
+    async def run_read(self, query: str, **params) -> list[Any]:
+        """Public readonly query API for business modules."""
+        return await self._run_read(query, **params)
+
+    def get_driver(self):
+        """Expose connected Neo4j driver through a stable API."""
+        return self._driver.driver
+
+    async def run_write_transaction(
+        self,
+        operations: list[tuple[str, dict[str, Any]]],
+    ) -> None:
+        """Run batched write operations in one transaction."""
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.execute_batch(operations)
     
     # App operations
     async def add_app(self, app: App) -> None:
@@ -118,13 +135,30 @@ class GraphManager:
         if self._repo is None:
             raise RuntimeError("GraphManager not initialized")
         await self._repo.link_app_state(app_id, state_id)
+
+    async def link_app_session(self, app_id: str, session_id: str) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.link_app_session(app_id, session_id)
+
+    async def touch_app_last_session(
+        self,
+        app_id: str,
+    ) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.touch_app_last_session(app_id)
+
+    async def update_app_stats(self, app_id: str) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.update_app_stats(app_id)
     
     async def set_session_inventory(self, session_id: str, inventory: dict) -> None:
         """Store inventory data with a session."""
-        query = """
-        MATCH (s:Session {id: $session_id})
-        SET s.inventory = $inventory
-        """
+        from graph_agent.neo4j_client.queries import CypherQueries
+
+        query = CypherQueries.SET_SESSION_INVENTORY
         await self._run_write(
             query, 
             session_id=session_id, 
@@ -150,32 +184,44 @@ class GraphManager:
                     if text:
                         task_ids.append(text)
         tasks_json = json.dumps(raw_tasks, ensure_ascii=False)
+        dynamic_prefixes = ("layout_", "knowledge_", "skip_", "semantic_")
+        core_keys = {
+            "visited_urls",
+            "mapping_stopped",
+            "stop_reason",
+            "start_url",
+            "states_added",
+            "transitions_added",
+            "filtered_non_ui_edges",
+            "semantic_mismatch_warnings",
+            "url_discontinuity_warnings",
+            "frame_context_transition_warnings",
+            "manual_transition_count",
+            "auto_transition_count",
+            "intervention_task_count",
+            "intervention_tasks",
+            "current_release_id",
+            "latest_ingest_version_id",
+            "current_coverage_snapshot_id",
+        }
+        dynamic_stats: dict[str, Any] = {}
+        for key, value in stats.items():
+            if key in core_keys:
+                continue
+            if not key.startswith(dynamic_prefixes):
+                continue
+            if isinstance(value, (str, int, float, bool, list)) or value is None:
+                dynamic_stats[key] = value
+            elif isinstance(value, dict):
+                dynamic_stats[key] = json.dumps(value, ensure_ascii=False)
+            else:
+                dynamic_stats[key] = str(value)
+        dynamic_metrics_json = json.dumps(dynamic_stats, ensure_ascii=False)
 
-        # Convert stats to a format suitable for Neo4j properties
-        query = """
-        MATCH (s:Session {id: $session_id})
-        SET s.visited_urls = $visited_urls,
-            s.mapping_stopped = $mapping_stopped,
-            s.stop_reason = $stop_reason,
-            s.start_url = $start_url,
-            s.states_added = $states_added,
-            s.transitions_added = $transitions_added,
-            s.filtered_non_ui_edges = $filtered_non_ui_edges,
-            s.semantic_mismatch_warnings = $semantic_mismatch_warnings,
-            s.url_discontinuity_warnings = $url_discontinuity_warnings,
-            s.frame_context_transition_warnings = $frame_context_transition_warnings,
-            s.manual_transition_count = $manual_transition_count,
-            s.auto_transition_count = $auto_transition_count,
-            s.intervention_task_count = $intervention_task_count,
-            s.intervention_tasks = $intervention_tasks,
-            s.intervention_tasks_json = $intervention_tasks_json,
-            s.current_release_id = $current_release_id,
-            s.latest_ingest_version_id = $latest_ingest_version_id,
-            s.current_coverage_snapshot_id = $current_coverage_snapshot_id,
-            s.name = coalesce(s.focus, s.id)
-        """
+        from graph_agent.neo4j_client.queries import CypherQueries
+
         await self._run_write(
-            query,
+            CypherQueries.UPDATE_SESSION_STATS,
             session_id=session_id,
             visited_urls=stats.get("visited_urls", []),
             mapping_stopped=stats.get("mapping_stopped", False),
@@ -195,6 +241,8 @@ class GraphManager:
             current_release_id=stats.get("current_release_id", ""),
             latest_ingest_version_id=stats.get("latest_ingest_version_id", ""),
             current_coverage_snapshot_id=stats.get("current_coverage_snapshot_id", ""),
+            dynamic_metrics_json=dynamic_metrics_json,
+            dynamic_stats=dynamic_stats,
         )
     
     # State operations
@@ -388,6 +436,18 @@ class GraphManager:
         if self._repo is None:
             raise RuntimeError("GraphManager not initialized")
         await self._repo.link_release_revision(release_id, revision_id)
+
+    async def deactivate_other_active_releases(
+        self,
+        app_id: str,
+        keep_release_id: str,
+    ) -> None:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.deactivate_other_active_releases(
+            app_id=app_id,
+            keep_release_id=keep_release_id,
+        )
     
     # Zone operations
     async def add_zones(
@@ -402,56 +462,215 @@ class GraphManager:
         - (:State)-[:HAS_ZONE]->(:Zone) when state_id is provided
         - (:App)-[:HAS_ZONE]->(:Zone) as aggregate link
         """
-        # exploration_status / last_explored 用 MAX 优先级：避免新 session 把已 explored 的 zone
-        # 倒退回 discovered。SkipAdvisor 依赖这两个字段判定跨 session 跳过。
-        query = """
-        UNWIND $zones as zone
-        MERGE (z:Zone {id: zone.id})
-        SET z.type = zone.type,
-            z.selector = zone.selector,
-            z.element_count = zone.element_count,
-            z.bounds = zone.bounds,
-            z.text_sample = zone.text_sample,
-            z.ingest_version_id = zone.ingest_version_id,
-            z.name = coalesce(zone.summary, zone.type, zone.id),
-            z.updated_at = datetime()
-        WITH z, zone,
-             coalesce(z.exploration_status, 'undiscovered') AS prev_status,
-             coalesce(zone.exploration_status, 'discovered') AS new_status
-        WITH z, zone, prev_status, new_status,
-             CASE prev_status
-                 WHEN 'validated' THEN 4
-                 WHEN 'explored' THEN 3
-                 WHEN 'partial' THEN 2
-                 WHEN 'discovered' THEN 1
-                 ELSE 0
-             END AS prev_p,
-             CASE new_status
-                 WHEN 'validated' THEN 4
-                 WHEN 'explored' THEN 3
-                 WHEN 'partial' THEN 2
-                 WHEN 'discovered' THEN 1
-                 ELSE 0
-             END AS new_p
-        SET z.exploration_status = CASE WHEN new_p >= prev_p THEN new_status ELSE prev_status END,
-            z.last_explored = CASE
-                WHEN zone.last_explored IS NOT NULL
-                  THEN datetime(zone.last_explored)
-                ELSE z.last_explored
-            END
-        WITH z
-        MATCH (a:App {id: $app_id})
-        MERGE (a)-[:HAS_ZONE]->(z)
-        """
-        await self._run_write(query, app_id=app_id, zones=zones)
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.upsert_zones_for_app(
+            app_id=app_id,
+            zones=zones,
+            state_id=state_id,
+        )
 
-        if state_id:
-            link_query = """
-            UNWIND $zones as zone
-            MATCH (s:State {id: $state_id}), (z:Zone {id: zone.id})
-            MERGE (s)-[:HAS_ZONE]->(z)
-            """
-            await self._run_write(link_query, zones=zones, state_id=state_id)
+    async def get_skip_advisor_coverage(
+        self,
+        *,
+        url_clean: str,
+        app_id: str = "",
+        app_name: str = "",
+    ) -> dict[str, Any]:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        return await self._repo.get_skip_advisor_coverage(
+            url_clean=url_clean,
+            app_id=app_id,
+            app_name=app_name,
+        )
+
+    async def get_knowledge_release_rows(
+        self,
+        *,
+        app_id: str = "",
+        app_name: str = "",
+        release_id: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        return await self._repo.get_knowledge_release_rows(
+            app_id=app_id,
+            app_name=app_name,
+            release_id=release_id,
+            limit=limit,
+        )
+
+    async def get_knowledge_legacy_rows(
+        self,
+        *,
+        app_id: str = "",
+        app_name: str = "",
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        return await self._repo.get_knowledge_legacy_rows(
+            app_id=app_id,
+            app_name=app_name,
+            limit=limit,
+        )
+
+    async def get_runner_warm_start_candidates(
+        self,
+        *,
+        app_id: str = "",
+        app_name: str = "",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        return await self._repo.get_runner_warm_start_candidates(
+            app_id=app_id,
+            app_name=app_name,
+            limit=limit,
+        )
+
+    async def get_state_url(self, sid: str) -> str:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        return await self._repo.get_state_url(sid)
+
+    async def get_latest_active_release_by_app_name(self, app_name: str) -> str:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        return await self._repo.get_latest_active_release_by_app_name(app_name)
+
+    async def get_latest_active_release_by_app_id(self, app_id: str) -> str:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        return await self._repo.get_latest_active_release_by_app_id(app_id)
+
+    async def get_latest_semantic_baseline(
+        self,
+        *,
+        app_id: str,
+        exclude_session_id: str,
+    ) -> dict[str, Any]:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        return await self._repo.get_latest_semantic_baseline(
+            app_id=app_id,
+            exclude_session_id=exclude_session_id,
+        )
+
+    async def get_semantic_stability_trend(
+        self,
+        *,
+        app_id: str,
+        limit: int = 10,
+        default_threshold: float = 90.0,
+    ) -> list[dict[str, Any]]:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        return await self._repo.get_semantic_stability_trend(
+            app_id=app_id,
+            limit=limit,
+            default_threshold=default_threshold,
+        )
+
+    async def evaluate_semantic_stability_gate(
+        self,
+        *,
+        app_id: str,
+        window: int = 10,
+        min_score: float = 90.0,
+        avg_score: float = 92.0,
+        consecutive_pass_required: int = 3,
+        default_threshold: float = 90.0,
+    ) -> dict[str, Any]:
+        rows = await self.get_semantic_stability_trend(
+            app_id=app_id,
+            limit=window,
+            default_threshold=default_threshold,
+        )
+        scores = [float(row.get("score", 0.0) or 0.0) for row in rows]
+        sample_size = len(rows)
+        min_observed = min(scores) if scores else 0.0
+        avg_observed = (sum(scores) / sample_size) if sample_size else 0.0
+        consecutive_passed = 0
+        for row in reversed(rows):
+            if bool(row.get("passed")):
+                consecutive_passed += 1
+                continue
+            break
+
+        has_window = sample_size >= max(1, int(window))
+        min_ok = has_window and min_observed >= float(min_score)
+        avg_ok = has_window and avg_observed >= float(avg_score)
+        consecutive_ok = consecutive_passed >= max(1, int(consecutive_pass_required))
+        passed = has_window and min_ok and avg_ok and consecutive_ok
+
+        failure_reasons: list[str] = []
+        if not has_window:
+            failure_reasons.append(
+                f"insufficient_samples:{sample_size}<{max(1, int(window))}"
+            )
+        if has_window and not min_ok:
+            failure_reasons.append(
+                f"min_score:{round(min_observed, 2)}<{float(min_score):.2f}"
+            )
+        if has_window and not avg_ok:
+            failure_reasons.append(
+                f"avg_score:{round(avg_observed, 2)}<{float(avg_score):.2f}"
+            )
+        if not consecutive_ok:
+            failure_reasons.append(
+                f"consecutive_passed:{consecutive_passed}<{max(1, int(consecutive_pass_required))}"
+            )
+
+        return {
+            "app_id": app_id,
+            "window": max(1, int(window)),
+            "sample_size": sample_size,
+            "passed": passed,
+            "min_score_threshold": float(min_score),
+            "avg_score_threshold": float(avg_score),
+            "consecutive_pass_required": max(1, int(consecutive_pass_required)),
+            "min_score_observed": round(min_observed, 2),
+            "avg_score_observed": round(avg_observed, 2),
+            "consecutive_pass_observed": consecutive_passed,
+            "failure_reasons": failure_reasons,
+            "rows": rows,
+        }
+
+    async def evaluate_retention_plan(
+        self,
+        *,
+        app_id: str,
+        keep_releases: int = 5,
+        min_age_days: int = 14,
+    ) -> dict[str, Any]:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        return await self._repo.plan_retention(
+            app_id=app_id,
+            keep_releases=keep_releases,
+            min_age_days=min_age_days,
+        )
+
+    async def run_retention(
+        self,
+        *,
+        app_id: str,
+        keep_releases: int = 5,
+        min_age_days: int = 14,
+        batch_size: int = 500,
+    ) -> dict[str, Any]:
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        return await self._repo.execute_retention(
+            app_id=app_id,
+            keep_releases=keep_releases,
+            min_age_days=min_age_days,
+            batch_size=batch_size,
+        )
 
     async def get_zones(self, app_id: str, zone_type: str | None = None) -> list[dict]:
         """Get zones for an app.
@@ -509,7 +728,7 @@ class GraphManager:
             m.href = menu.href,
             m.level = menu.level,
             m.order = menu.order,
-            m.is_active = menu.is_active,
+            m.is_active = coalesce(menu.is_active, true),
             m.ingest_version_id = menu.ingest_version_id,
             m.page_url = $page_url,
             m.name = coalesce(menu.text, menu.label, menu.menu_key, menu.id),
@@ -551,12 +770,10 @@ class GraphManager:
             )
 
     async def _clear_page_menus(self, app_id: str, page_url: str) -> None:
-        """Clear existing menus for a page to avoid duplicates."""
-        query = """
-        MATCH (a:App {id: $app_id})-[:HAS_MENU]->(m:Menu {page_url: $page_url})
-        DETACH DELETE m
-        """
-        await self._run_write(query, app_id=app_id, page_url=page_url)
+        """Mark previous page menus inactive to preserve history."""
+        if self._repo is None:
+            raise RuntimeError("GraphManager not initialized")
+        await self._repo.mark_page_menus_inactive(app_id=app_id, page_url=page_url)
     
     def _flatten_menus(self, menus: list[dict], parent_id: str | None = None) -> list[dict]:
         """Flatten menu hierarchy for Neo4j storage."""

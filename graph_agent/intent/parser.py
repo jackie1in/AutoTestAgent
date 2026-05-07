@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -25,6 +26,8 @@ from graph_agent.models import (
     TabSnapshot,
 )
 from graph_agent.llm import get_llm, ainvoke_structured
+
+logger = logging.getLogger(__name__)
 
 
 class IntentInferenceResult(BaseModel):
@@ -309,11 +312,23 @@ Rules:
             user_prompt=user_prompt,
             output_format=IntentInferenceResult,
         )
-        key = result.key
-        confidence = result.confidence
-        summary = result.summary
-        verb = result.verb
-        obj = result.object
+        if isinstance(result, IntentInferenceResult):
+            parsed_result = result
+        else:
+            raw_text = _response_to_text(result)
+            parsed_obj = _extract_json_object(raw_text)
+            if parsed_obj is None:
+                return None, "parse_error:invalid_json"
+            try:
+                parsed_result = IntentInferenceResult.model_validate(parsed_obj)
+            except Exception:
+                return None, "parse_error:invalid_json"
+
+        key = parsed_result.key
+        confidence = parsed_result.confidence
+        summary = parsed_result.summary
+        verb = parsed_result.verb
+        obj = parsed_result.object
     except asyncio.TimeoutError:
         timeout_ms = os.getenv("MAPPING_INTENT_TIMEOUT_MS", "?")
         return None, f"llm_error:timeout({timeout_ms}ms)"
@@ -346,10 +361,20 @@ Rules:
         return None, f"llm_error:{exc}"
 
     if not key or not summary:
-        print(f"[Intent] parse_error: missing key or summary. key={key!r} summary={summary!r}")
+        logger.warning(
+            "[Intent] parse_error: missing key or summary. key=%r summary=%r",
+            key,
+            summary,
+        )
         return None, "parse_error:missing_key_or_summary"
-    if confidence < MIN_INTENT_CONFIDENCE:
-        print(f"[Intent] low_confidence: {confidence:.2f} < {MIN_INTENT_CONFIDENCE}. key={key!r} summary={summary!r}")
+    if confidence <= MIN_INTENT_CONFIDENCE:
+        logger.info(
+            "[Intent] low_confidence: %.2f < %.2f. key=%r summary=%r",
+            confidence,
+            MIN_INTENT_CONFIDENCE,
+            key,
+            summary,
+        )
         return None, f"low_confidence:{confidence:.2f}"
     confidence = max(0.0, min(1.0, confidence))
 
@@ -427,7 +452,17 @@ Constraints:
         )
     except Exception:
         return raw_key
-    refined = result.key.strip().lower()
+    if isinstance(result, KeyRefinementResult):
+        refined = result.key.strip().lower()
+    else:
+        raw_text = _response_to_text(result)
+        parsed_obj = _extract_json_object(raw_text)
+        if not parsed_obj:
+            return raw_key
+        refined_raw = str(parsed_obj.get("key") or "").strip().lower()
+        if not refined_raw:
+            return raw_key
+        refined = refined_raw
     if not refined or "." not in refined:
         return raw_key
     return refined
@@ -539,9 +574,14 @@ async def infer_intent_progressive(
             action, intent, selector=selector,
             source_url=source_url, target_url=target_url,
         ):
-            print(f"[Intent] OK full: {intent.key!r} {intent.summary!r}")
+            logger.info("[Intent] OK full: %r %r", intent.key, intent.summary)
             return intent, None, "full"
-        print(f"[Intent] conflict full: action={action.value} intent={intent.key!r} selector={selector!r}")
+        logger.info(
+            "[Intent] conflict full: action=%s intent=%r selector=%r",
+            action.value,
+            intent.key,
+            selector,
+        )
         reason = "semantic_conflict:action_intent_mismatch"
 
     if reason and ("low_confidence" in reason or "semantic_conflict" in reason):
@@ -560,10 +600,12 @@ async def infer_intent_progressive(
             action, intent, selector=selector,
             source_url=source_url, target_url=target_url,
         ):
-            print(f"[Intent] OK retry: {intent.key!r} {intent.summary!r}")
+            logger.info("[Intent] OK retry: %r %r", intent.key, intent.summary)
             return intent, None, "full_retry"
 
-    print(f"[Intent] FAILED: action={action.value} sel={selector!r} reason={reason!r}")
+    logger.warning(
+        "[Intent] FAILED: action=%s sel=%r reason=%r", action.value, selector, reason
+    )
     return None, (reason or "intent_inference_failed"), "full"
 
 
@@ -939,8 +981,8 @@ async def parse_browser_use_step(
             action = action.__dict__
         else:
             # Fallback
-            print(
-                f"Warning: action is not a dict and cannot be converted: {type(action)}"
+            logger.warning(
+                "action is not a dict and cannot be converted: %s", type(action)
             )
             action = {}
 
@@ -961,7 +1003,7 @@ async def parse_browser_use_step(
         # Only print if it's truly an unknown/unmapped action key (not just one we explicitly mapped to UNKNOWN)
         known_keys = set(ACTION_MAPPING.keys())
         if not any(k in action for k in known_keys):
-            print(f"Unknown action: {action} in parse_browser_use_step")
+            logger.warning("Unknown action in parse_browser_use_step: %s", action)
 
     raw_thought = _get_next_goal(thought)
     distilled_thought = await distill_ui_thought(
@@ -988,8 +1030,8 @@ async def parse_browser_use_step(
         page_signals=page_signals,
     )
     if intent is None:
-        print(
-            "Intent inference failed:",
+        logger.warning(
+            "Intent inference failed: %s",
             {
                 "action": play_action.value,
                 "selector": selector,

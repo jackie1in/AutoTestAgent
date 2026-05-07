@@ -43,6 +43,12 @@
 复用 `Zone.exploration_status` (`undiscovered/discovered/partial/explored/validated`)
 与 `last_explored` / `State.last_visited` 字段，不引入新节点。
 
+App 定位契约：
+- 优先使用 `app_id` 进行精确匹配（当前主链路）
+- 仅在缺失 `app_id` 时回退 `app_name`（兼容旧数据与历史调用）
+- 自动测绘默认按 `app_name` 生成稳定 `app_id`（`app:{normalized_app_name}`）；
+  同一次运行唯一性由 `session_id` / `ingest_version_id` 提供
+
 ### 决策状态机
 
 ```mermaid
@@ -176,6 +182,134 @@ flowchart LR
 | `(:Intent)`、`(:Transition)-[:REALIZES]->(:Intent)` | 每条 transition 持久化时（之前只有 `merger.py` 写，从不在生产路径触发） | 所有 intent 查询 |
 | `(:Zone)-[:COVERS_INTENT {observed_count, confidence, last_confirmed_at}]->(:Intent)` | 同上，按 zone.selector 与 transition.selector 互为子串关系匹配 | `SkipAdvisor._query_coverage` 聚合为 `intent_confirm_total` |
 | `TransitionEntity.confirmed_session_count` | `add_transition_entity_with_session` 按 session_id 去重累加 | `SkipAdvisor` 的 `entity_confirm_total` |
+
+Coverage 字段口径：
+- `menu_coverage`：可识别菜单状态数 / 总状态数
+- `zone_coverage`：`explored|validated` zone 占比
+- `interaction_coverage`：`validation_count > 0` transition 占比
+- `state_coverage`：不同 `spa_route` 覆盖度（`unique_routes / (total_states * 0.5)`，上限 1.0）
+- `overall_completeness`：`menu 0.2 + zone 0.3 + interaction 0.2 + state 0.3`
+
+业务语义层稳定门禁：
+- `semantic_stability_score`：与上一次 session 的语义集合 Jaccard 相似度加权分（状态 40% + 转移 40% + 意图 20%）
+- `semantic_stability_threshold`：默认 `90.0`
+- `semantic_stability_passed`：`semantic_stability_score >= semantic_stability_threshold`
+- 首次无基线时 `semantic_stability_mode=bootstrap`，默认记为 `100.0`
+
+一次性验收查询（按 app）：
+
+```cypher
+MATCH (a:App {id: $app_id})-[:HAS_SESSION]->(s:Session)
+RETURN s.id AS session_id,
+       s.semantic_stability_mode AS mode,
+       s.semantic_baseline_session_id AS baseline_session_id,
+       s.semantic_state_signature AS state_sig,
+       s.semantic_transition_signature AS transition_sig,
+       s.semantic_intent_signature AS intent_sig,
+       s.semantic_stability_score AS score,
+       s.semantic_stability_threshold AS threshold,
+       s.semantic_stability_passed AS passed
+ORDER BY s.timestamp DESC
+LIMIT 10
+```
+
+连续 N 次趋势查询（上线门禁建议）：
+
+```cypher
+MATCH (a:App {id: $app_id})-[:HAS_SESSION]->(s:Session)
+WHERE s.semantic_stability_score IS NOT NULL
+WITH s ORDER BY s.timestamp DESC LIMIT $n
+WITH collect(s) AS sessions
+UNWIND sessions AS s
+RETURN s.id AS session_id,
+       s.semantic_stability_mode AS mode,
+       s.semantic_baseline_session_id AS baseline_session_id,
+       s.semantic_stability_score AS score,
+       coalesce(s.semantic_stability_threshold, 90.0) AS threshold,
+       s.semantic_stability_passed AS passed
+ORDER BY s.timestamp ASC
+```
+
+门禁建议（`n=10`）：
+- `min(score) >= 90`
+- `avg(score) >= 92`
+- 最近 3 次 `passed=true`
+
+CI 一键门禁（返回码）：
+
+```bash
+uv run python -m graph_agent.cartography.semantic_gate \
+  --app-id app:your_app \
+  --window 10 \
+  --min-score 90 \
+  --avg-score 92 \
+  --consecutive-pass-required 3
+```
+
+- 返回 `0`：通过门禁
+- 返回 `1`：未通过门禁（stdout 会输出失败原因与明细）
+
+Retention（平衡模式）：
+
+```bash
+# dry-run（默认）
+uv run python -m graph_agent.cartography.retention \
+  --app-id app:your_app \
+  --keep-releases 5 \
+  --min-age-days 14 \
+  --batch-size 500
+
+# execute
+uv run python -m graph_agent.cartography.retention \
+  --app-id app:your_app \
+  --keep-releases 5 \
+  --min-age-days 14 \
+  --batch-size 500 \
+  --execute
+```
+
+- dry-run 仅输出候选统计与保护统计，不删除数据
+- execute 会删除超出保留窗口的 inactive release 及其可回收历史数据
+- 返回码：dry-run 固定 `0`；execute 发现保护约束告警时返回 `1`
+
+Runner 一体化维护入口（mapping 后自动 gate+retention）：
+
+```bash
+uv run python -m graph_agent.cartography.runner \
+  --url <APP_URL> \
+  --inventory <INVENTORY_JSON> \
+  --maintenance-after-run \
+  --maintenance-keep-releases 5 \
+  --maintenance-min-age-days 14 \
+  --maintenance-batch-size 500
+```
+
+若希望执行 retention 删除而不是 dry-run：
+
+```bash
+uv run python -m graph_agent.cartography.runner \
+  --url <APP_URL> \
+  --inventory <INVENTORY_JSON> \
+  --maintenance-after-run \
+  --maintenance-retention-execute
+```
+
+恢复与运行预算（长时任务）：
+- `CARTOGRAPHY_PIPELINE_CHECKPOINT_PATH`：pipeline checkpoint 文件路径
+- `CARTOGRAPHY_PIPELINE_RESUME_CHECKPOINT=true`：允许从 checkpoint 恢复队列
+- `CARTOGRAPHY_ORCHESTRATION_MAX_RUNTIME_SEC`：单次 orchestration 最大运行时长（默认 1800s）
+- `CARTOGRAPHY_AGENT_MAX_RUNTIME_SEC`：单个 ReAct agent 循环最大运行时长（默认 600s）
+
+Retention 验收查询（执行后）：
+
+```cypher
+MATCH (r:GraphRelease {app_id: $app_id})
+RETURN r.status AS status,
+       count(*) AS cnt,
+       max(r.created_at) AS latest_created_at,
+       max(r.deactivated_at) AS latest_deactivated_at
+ORDER BY status
+```
 
 ### SkipAdvisor 增强决策
 

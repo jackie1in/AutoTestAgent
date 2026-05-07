@@ -8,11 +8,16 @@
 # @Description
 
 import json
+import logging
+import sys
 
 from openai import OpenAI
 
 API_KEY = '-'
 BASE_URL = 'http://47.109.179.115:8088/v1'
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 
 def f_stream(thinking=True):
@@ -42,14 +47,18 @@ def f_stream(thinking=True):
     for chunk in stream:
         if chunk.choices[0].delta.content:
             if content_first:
-                print('\n</think>')
+                sys.stdout.write('\n</think>\n')
+                sys.stdout.flush()
                 content_first = False
-            print(chunk.choices[0].delta.content, end="", flush=True)
+            sys.stdout.write(chunk.choices[0].delta.content)
+            sys.stdout.flush()
         if hasattr(chunk.choices[0].delta, "reasoning") and chunk.choices[0].delta.reasoning:
             if reasoning_first:
                 reasoning_first = False
-                print('<think>')
-            print(f"{chunk.choices[0].delta.reasoning}", end="", flush=True)
+                sys.stdout.write('<think>\n')
+                sys.stdout.flush()
+            sys.stdout.write(f"{chunk.choices[0].delta.reasoning}")
+            sys.stdout.flush()
 
 
 def f_stream_tools(thinking=True):
@@ -91,19 +100,24 @@ def f_stream_tools(thinking=True):
     for chunk in stream:
         if chunk.choices[0].delta.content:
             if content_first:
-                print('\n</think>')
+                sys.stdout.write('\n</think>\n')
+                sys.stdout.flush()
                 content_first = False
             content += chunk.choices[0].delta.content
-            print(chunk.choices[0].delta.content, end="", flush=True)
+            sys.stdout.write(chunk.choices[0].delta.content)
+            sys.stdout.flush()
         if hasattr(chunk.choices[0].delta, "reasoning") and chunk.choices[0].delta.reasoning:
             if reasoning_first:
-                print('<think>')
+                sys.stdout.write('<think>\n')
+                sys.stdout.flush()
                 reasoning_first = False
             reasoning_content += chunk.choices[0].delta.reasoning
-            print(f"{chunk.choices[0].delta.reasoning}", end="", flush=True)
+            sys.stdout.write(f"{chunk.choices[0].delta.reasoning}")
+            sys.stdout.flush()
         if hasattr(chunk.choices[0].delta, "tool_calls") and chunk.choices[0].delta.tool_calls:
             if content_first:
-                print('\n</think>')
+                sys.stdout.write('\n</think>\n')
+                sys.stdout.flush()
                 content_first = False
             t = chunk.choices[0].delta.tool_calls[0]
             if chunk.choices[0].delta.tool_calls[0].id is not None:
@@ -124,7 +138,10 @@ def f_stream_tools(thinking=True):
         tools.append(tool)
 
     for tool in tools:
-        print(f'\n<tool_call>\n{json.dumps(tool, ensure_ascii=False, indent=2)}\n</tool_call>')
+        sys.stdout.write(
+            f'\n<tool_call>\n{json.dumps(tool, ensure_ascii=False, indent=2)}\n</tool_call>\n'
+        )
+        sys.stdout.flush()
 
 
 def f(thinking=True):
@@ -161,14 +178,12 @@ def f(thinking=True):
     num_prompt_tokens = rsp.usage.prompt_tokens
     num_rsp_tokens = rsp.usage.completion_tokens
 
-    print(f'num_prompt_tokens: {num_prompt_tokens}')
-    print(f'num_rsp_tokens: {num_rsp_tokens}')
-    print(f'finish_reason: {finish_reason}\n')
-
-    print('#' * 50)
-
-    print(f'\n<think>\n{reasoning}\n</think>\n')
-    print(response)
+    logger.info("num_prompt_tokens: %s", num_prompt_tokens)
+    logger.info("num_rsp_tokens: %s", num_rsp_tokens)
+    logger.info("finish_reason: %s", finish_reason)
+    logger.info("%s", "#" * 50)
+    logger.info("<think>\n%s\n</think>", reasoning)
+    logger.info("%s", response)
 
 
 def f_tools(thinking=True):
@@ -230,22 +245,20 @@ def f_tools(thinking=True):
     num_prompt_tokens = rsp.usage.prompt_tokens
     num_rsp_tokens = rsp.usage.completion_tokens
 
-    print(f'num_prompt_tokens: {num_prompt_tokens}')
-    print(f'num_rsp_tokens: {num_rsp_tokens}')
-    print(f'finish_reason: {finish_reason}\n')
-
-    print('#' * 50)
-
-    print(f'\n<think>\n{reasoning_content}\n</think>\n')
+    logger.info("num_prompt_tokens: %s", num_prompt_tokens)
+    logger.info("num_rsp_tokens: %s", num_rsp_tokens)
+    logger.info("finish_reason: %s", finish_reason)
+    logger.info("%s", "#" * 50)
+    logger.info("<think>\n%s\n</think>", reasoning_content)
 
     if response is not None:
-        print(response)
+        logger.info("%s", response)
 
     if tool_calls is not None:
         for t in tool_calls:
-            print('<tool_call>')
-            print(json.dumps(t, ensure_ascii=False, indent=2))
-            print('</tool_call>')
+            logger.info(
+                "<tool_call>\n%s\n</tool_call>", json.dumps(t, ensure_ascii=False, indent=2)
+            )
 
 
 if __name__ == '__main__':

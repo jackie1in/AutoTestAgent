@@ -121,6 +121,7 @@ class CoverageAnalyzer:
                 menu_coverage=round(menu_cov, 4),
                 zone_coverage=round(zone_cov, 4),
                 interaction_coverage=round(interaction_cov, 4),
+                state_coverage=round(state_cov, 4),
                 transition_confidence=dist,
                 overall_completeness=round(overall, 4),
                 recommendation=recommendation,

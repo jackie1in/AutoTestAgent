@@ -612,7 +612,7 @@ class ChatKimi(BaseChatModel):
         """
         # Build model params
         model_params = self._build_model_params()
-        print(f"[DEBUG] model_params: {model_params}, stream={self.stream}")
+        logger.debug("[KIMI DEBUG] model_params=%s, stream=%s", model_params, self.stream)
 
         try:
             # Prepare messages
@@ -647,7 +647,7 @@ class ChatKimi(BaseChatModel):
             # Make API call (stream or non-stream)
             if self.stream:
                 # ===== STREAM MODE =====
-                print("[KIMI DEBUG] Using STREAM mode")
+                logger.debug("[KIMI DEBUG] Using STREAM mode")
                 stream = await self.get_client().chat.completions.create(
                     model=self.model,
                     messages=KIMI_messages,
@@ -658,7 +658,7 @@ class ChatKimi(BaseChatModel):
                 return await self._parse_stream_response(stream, output_format)
             else:
                 # ===== NON-STREAM MODE =====
-                print("[KIMI DEBUG] Using NON-STREAM mode")
+                logger.debug("[KIMI DEBUG] Using NON-STREAM mode")
                 response = await self.get_client().chat.completions.create(
                     model=self.model,
                     messages=KIMI_messages,

@@ -194,54 +194,27 @@ class KnowledgeBroker:
         )
 
     async def _query_release_rows(
-        self, manager: GraphManager, app_name: str, release_id: str, limit: int
+        self,
+        manager: GraphManager,
+        app_id: str,
+        app_name: str,
+        release_id: str,
+        limit: int,
     ) -> list[dict[str, Any]]:
         if not release_id:
             return []
-        return await manager._run_read(
-            """
-            MATCH (a:App {name: $app_name})
-            WITH a ORDER BY coalesce(a.last_session_at, a.created_at) DESC LIMIT 1
-            MATCH (r:GraphRelease {id: $release_id, app_id: a.id, status: 'active'})
-                  <-[:IN_RELEASE]-(rev:TransitionRevision {is_active: true})
-            MATCH (t:Transition {id: rev.transition_id})
-            OPTIONAL MATCH (s:State {id: rev.from_state_id})
-            OPTIONAL MATCH (target:State {id: rev.to_state_id})
-            OPTIONAL MATCH (t)-[:REALIZES]->(i:Intent)
-            RETURN t.id AS id,
-                   rev.confidence AS confidence,
-                   t.selector AS selector,
-                   t.action AS action,
-                   s.url AS source_url,
-                   target.url AS target_url,
-                   i{.*} AS intent
-            ORDER BY rev.confidence DESC
-            LIMIT $limit
-            """,
+        return await manager.get_knowledge_release_rows(
+            app_id=app_id,
             app_name=app_name,
             release_id=release_id,
             limit=limit,
         )
 
     async def _query_legacy_rows(
-        self, manager: GraphManager, app_name: str, limit: int
+        self, manager: GraphManager, app_id: str, app_name: str, limit: int
     ) -> list[dict[str, Any]]:
-        return await manager._run_read(
-            """
-            MATCH (a:App {name: $app_name})
-            WITH a ORDER BY coalesce(a.last_session_at, a.created_at) DESC LIMIT 1
-            MATCH (a)-[:HAS_STATE]->(s:State)<-[:FROM]-(t:Transition)-[:TO]->(target:State)
-            OPTIONAL MATCH (t)-[:REALIZES]->(i:Intent)
-            RETURN t.id AS id,
-                   coalesce(t.confidence, 0.0) AS confidence,
-                   t.selector AS selector,
-                   t.action AS action,
-                   s.url AS source_url,
-                   target.url AS target_url,
-                   i{.*} AS intent
-            ORDER BY confidence DESC
-            LIMIT $limit
-            """,
+        return await manager.get_knowledge_legacy_rows(
+            app_id=app_id,
             app_name=app_name,
             limit=limit,
         )
@@ -277,7 +250,8 @@ class KnowledgeBroker:
             )
             return out
 
-        app_name = _extract_app_name_from_app_id(query.app_id)
+        app_id = (query.app_id or "").strip()
+        app_name = _extract_app_name_from_app_id(app_id)
         limit = max(10, query.top_k * 4)
         try:
             async with GraphManager() as manager:
@@ -286,7 +260,7 @@ class KnowledgeBroker:
                 if query.release_id:
                     rows = await asyncio.wait_for(
                         self._query_release_rows(
-                            manager, app_name, query.release_id, limit
+                            manager, app_id, app_name, query.release_id, limit
                         ),
                         timeout=max(0.1, timeout_ms / 1000.0),
                     )
@@ -294,7 +268,7 @@ class KnowledgeBroker:
                         source = "release"
                 if not rows:
                     rows = await asyncio.wait_for(
-                        self._query_legacy_rows(manager, app_name, limit),
+                        self._query_legacy_rows(manager, app_id, app_name, limit),
                         timeout=max(0.1, timeout_ms / 1000.0),
                     )
                     if rows:

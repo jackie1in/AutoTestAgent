@@ -22,9 +22,44 @@ class CypherQueries:
     MERGE (a)-[:HAS_SESSION]->(sess)
     """
 
+    TOUCH_APP_LAST_SESSION = """
+    MATCH (a:App {id: $app_id})
+    SET a.last_session_at = datetime($last_session_at)
+    """
+
     LINK_SESSION_INGESTION_RUN = """
     MATCH (sess:Session {id: $session_id}), (run:IngestionRun {id: $ingest_id})
     MERGE (sess)-[:GENERATES]->(run)
+    """
+
+    SET_SESSION_INVENTORY = """
+    MATCH (s:Session {id: $session_id})
+    SET s.inventory = $inventory
+    """
+
+    UPDATE_SESSION_STATS = """
+    MATCH (s:Session {id: $session_id})
+    SET s.visited_urls = $visited_urls,
+        s.mapping_stopped = $mapping_stopped,
+        s.stop_reason = $stop_reason,
+        s.start_url = $start_url,
+        s.states_added = $states_added,
+        s.transitions_added = $transitions_added,
+        s.filtered_non_ui_edges = $filtered_non_ui_edges,
+        s.semantic_mismatch_warnings = $semantic_mismatch_warnings,
+        s.url_discontinuity_warnings = $url_discontinuity_warnings,
+        s.frame_context_transition_warnings = $frame_context_transition_warnings,
+        s.manual_transition_count = $manual_transition_count,
+        s.auto_transition_count = $auto_transition_count,
+        s.intervention_task_count = $intervention_task_count,
+        s.intervention_tasks = $intervention_tasks,
+        s.intervention_tasks_json = $intervention_tasks_json,
+        s.current_release_id = $current_release_id,
+        s.latest_ingest_version_id = $latest_ingest_version_id,
+        s.current_coverage_snapshot_id = $current_coverage_snapshot_id,
+        s.dynamic_metrics_json = $dynamic_metrics_json,
+        s.name = coalesce(s.focus, s.id)
+    SET s += $dynamic_stats
     """
 
     GET_APP_STATES = """
@@ -51,8 +86,11 @@ class CypherQueries:
     OPTIONAL MATCH (a)-[:HAS_STATE]->(s2:State)<-[:FROM]-(t:Transition)
     WITH a, sc, count(DISTINCT t) AS tc
     OPTIONAL MATCH (a)-[:HAS_SESSION]->(sess:Session)
-    WITH a, sc, tc, count(sess) AS sessc
-    SET a.total_states = sc, a.total_transitions = tc, a.total_sessions = sessc
+    WITH a, sc, tc, count(sess) AS sessc, max(sess.timestamp) AS last_sess
+    SET a.total_states = sc,
+        a.total_transitions = tc,
+        a.total_sessions = sessc,
+        a.last_session_at = coalesce(last_sess, a.last_session_at)
     """
 
     # ===== State =====
@@ -166,6 +204,59 @@ class CypherQueries:
 
     LINK_STATE_ZONE = """
     MATCH (s:State {id: $state_id}), (z:Zone {id: $zone_id})
+    MERGE (s)-[:HAS_ZONE]->(z)
+    """
+
+    UPSERT_ZONES_FOR_APP = """
+    UNWIND $zones as zone
+    MERGE (z:Zone {id: zone.id})
+    SET z.type = zone.type,
+        z.selector = zone.selector,
+        z.element_count = zone.element_count,
+        z.bounds = zone.bounds,
+        z.text_sample = zone.text_sample,
+        z.ingest_version_id = zone.ingest_version_id,
+        z.name = coalesce(zone.summary, zone.type, zone.id),
+        z.updated_at = datetime()
+    WITH z, zone,
+         coalesce(z.exploration_status, 'undiscovered') AS prev_status,
+         coalesce(zone.exploration_status, 'discovered') AS new_status
+    WITH z, zone, prev_status, new_status,
+         CASE prev_status
+             WHEN 'validated' THEN 4
+             WHEN 'explored' THEN 3
+             WHEN 'partial' THEN 2
+             WHEN 'discovered' THEN 1
+             ELSE 0
+         END AS prev_p,
+         CASE new_status
+             WHEN 'validated' THEN 4
+             WHEN 'explored' THEN 3
+             WHEN 'partial' THEN 2
+             WHEN 'discovered' THEN 1
+             ELSE 0
+         END AS new_p
+    SET z.exploration_status = CASE WHEN new_p >= prev_p THEN new_status ELSE prev_status END,
+        z.last_explored = CASE
+            WHEN zone.last_explored IS NOT NULL
+              THEN datetime(zone.last_explored)
+            ELSE z.last_explored
+        END
+    WITH z
+    MATCH (a:App {id: $app_id})
+    MERGE (a)-[:HAS_ZONE]->(z)
+    """
+
+    LINK_STATE_ZONES_DIRECT = """
+    UNWIND $zones as zone
+    MATCH (s:State {id: $state_id}), (z:Zone {id: zone.id})
+    MERGE (s)-[:HAS_ZONE]->(z)
+    """
+
+    LINK_STATE_ZONES_BY_IDS = """
+    UNWIND $zones as zone
+    UNWIND coalesce(zone.state_ids, []) as sid
+    MATCH (s:State {id: sid}), (z:Zone {id: zone.id})
     MERGE (s)-[:HAS_ZONE]->(z)
     """
 
@@ -466,6 +557,13 @@ class CypherQueries:
     RETURN r
     """
 
+    DEACTIVATE_OTHER_ACTIVE_RELEASES = """
+    MATCH (r:GraphRelease {app_id: $app_id, status: 'active'})
+    WHERE r.id <> $keep_release_id
+    SET r.status = 'inactive',
+        r.deactivated_at = datetime($now)
+    """
+
     LINK_RELEASE_INCLUDES_REVISION = """
     MATCH (r:GraphRelease {id: $release_id}),
           (rev:TransitionRevision {revision_id: $revision_id})
@@ -620,6 +718,13 @@ class CypherQueries:
     RETURN s
     """
 
+    MARK_PAGE_MENUS_INACTIVE = """
+    MATCH (a:App {id: $app_id})-[:HAS_MENU]->(m:Menu {page_url: $page_url})
+    SET m.is_active = false,
+        m.inactive_at = datetime($inactive_at),
+        m.updated_at = datetime($inactive_at)
+    """
+
     # ===== Legacy Menu Navigation (Deprecated: State-based menu links) =====
 
     LINK_MENU_PARENT_LEGACY = """
@@ -685,4 +790,317 @@ class CypherQueries:
     OPTIONAL MATCH (t)-[:REALIZES]->(i:Intent)
     OPTIONAL MATCH (t)-[:IN_ZONE]->(z:Zone)
     RETURN s1, t, s2, i, z
+    """
+
+    SKIP_ADVISOR_BASE_BY_APP_ID = """
+    MATCH (a:App {id: $app_id})
+    OPTIONAL MATCH (rel:GraphRelease {app_id: a.id, status: 'active'})
+    WITH a, rel
+    ORDER BY rel.created_at DESC
+    WITH a, head(collect(rel)) AS active_release
+    OPTIONAL MATCH (a)-[:HAS_STATE]->(s:State)
+    WHERE split(split(coalesce(s.url, ''), '?')[0], '#')[0] = $url_clean
+    OPTIONAL MATCH (s)-[:HAS_ZONE]->(z:Zone)
+    OPTIONAL MATCH (z)-[ci:COVERS_INTENT]->(:Intent)
+    WITH active_release, s, z, sum(coalesce(ci.observed_count, 0)) AS zone_intent_total
+    RETURN
+        count(DISTINCT s) AS state_count,
+        max(s.last_visited) AS last_visited,
+        coalesce(active_release.coverage_overall, 0.0) AS release_coverage,
+        collect({
+            selector: coalesce(z.selector, ''),
+            status: coalesce(z.exploration_status, 'undiscovered'),
+            last_explored: z.last_explored,
+            intent_confirm: zone_intent_total
+        }) AS zones
+    """
+
+    SKIP_ADVISOR_BASE_BY_APP_NAME = """
+    MATCH (a:App {name: $app_name})
+    WITH a
+    ORDER BY coalesce(a.last_session_at, a.created_at) DESC
+    LIMIT 1
+    OPTIONAL MATCH (rel:GraphRelease {app_id: a.id, status: 'active'})
+    WITH a, rel
+    ORDER BY rel.created_at DESC
+    WITH a, head(collect(rel)) AS active_release
+    OPTIONAL MATCH (a)-[:HAS_STATE]->(s:State)
+    WHERE split(split(coalesce(s.url, ''), '?')[0], '#')[0] = $url_clean
+    OPTIONAL MATCH (s)-[:HAS_ZONE]->(z:Zone)
+    OPTIONAL MATCH (z)-[ci:COVERS_INTENT]->(:Intent)
+    WITH active_release, s, z, sum(coalesce(ci.observed_count, 0)) AS zone_intent_total
+    RETURN
+        count(DISTINCT s) AS state_count,
+        max(s.last_visited) AS last_visited,
+        coalesce(active_release.coverage_overall, 0.0) AS release_coverage,
+        collect({
+            selector: coalesce(z.selector, ''),
+            status: coalesce(z.exploration_status, 'undiscovered'),
+            last_explored: z.last_explored,
+            intent_confirm: zone_intent_total
+        }) AS zones
+    """
+
+    SKIP_ADVISOR_ENTITY_BY_APP_ID = """
+    MATCH (a:App {id: $app_id})
+    OPTIONAL MATCH (a)-[:HAS_STATE]->(s:State)
+    WHERE split(split(coalesce(s.url, ''), '?')[0], '#')[0] = $url_clean
+    OPTIONAL MATCH (ent:TransitionEntity)
+    WHERE s IS NOT NULL AND ent.from_state_id = s.id
+    WITH coalesce(ent.confirmed_session_count, 0) AS n
+    RETURN sum(CASE WHEN n > 1 THEN n - 1 ELSE 0 END) AS entity_confirm_total
+    """
+
+    SKIP_ADVISOR_ENTITY_BY_APP_NAME = """
+    MATCH (a:App {name: $app_name})
+    WITH a
+    ORDER BY coalesce(a.last_session_at, a.created_at) DESC
+    LIMIT 1
+    OPTIONAL MATCH (a)-[:HAS_STATE]->(s:State)
+    WHERE split(split(coalesce(s.url, ''), '?')[0], '#')[0] = $url_clean
+    OPTIONAL MATCH (ent:TransitionEntity)
+    WHERE s IS NOT NULL AND ent.from_state_id = s.id
+    WITH coalesce(ent.confirmed_session_count, 0) AS n
+    RETURN sum(CASE WHEN n > 1 THEN n - 1 ELSE 0 END) AS entity_confirm_total
+    """
+
+    KNOWLEDGE_RELEASE_ROWS_BY_APP_ID = """
+    MATCH (a:App {id: $app_id})
+    MATCH (r:GraphRelease {id: $release_id, app_id: a.id, status: 'active'})
+          <-[:IN_RELEASE]-(rev:TransitionRevision {is_active: true})
+    MATCH (t:Transition {id: rev.transition_id})
+    OPTIONAL MATCH (s:State {id: rev.from_state_id})
+    OPTIONAL MATCH (target:State {id: rev.to_state_id})
+    OPTIONAL MATCH (t)-[:REALIZES]->(i:Intent)
+    RETURN t.id AS id,
+           rev.confidence AS confidence,
+           t.selector AS selector,
+           t.action AS action,
+           s.url AS source_url,
+           target.url AS target_url,
+           i{.*} AS intent
+    ORDER BY rev.confidence DESC
+    LIMIT $limit
+    """
+
+    KNOWLEDGE_RELEASE_ROWS_BY_APP_NAME = """
+    MATCH (a:App {name: $app_name})
+    WITH a ORDER BY coalesce(a.last_session_at, a.created_at) DESC LIMIT 1
+    MATCH (r:GraphRelease {id: $release_id, app_id: a.id, status: 'active'})
+          <-[:IN_RELEASE]-(rev:TransitionRevision {is_active: true})
+    MATCH (t:Transition {id: rev.transition_id})
+    OPTIONAL MATCH (s:State {id: rev.from_state_id})
+    OPTIONAL MATCH (target:State {id: rev.to_state_id})
+    OPTIONAL MATCH (t)-[:REALIZES]->(i:Intent)
+    RETURN t.id AS id,
+           rev.confidence AS confidence,
+           t.selector AS selector,
+           t.action AS action,
+           s.url AS source_url,
+           target.url AS target_url,
+           i{.*} AS intent
+    ORDER BY rev.confidence DESC
+    LIMIT $limit
+    """
+
+    KNOWLEDGE_LEGACY_ROWS_BY_APP_ID = """
+    MATCH (a:App {id: $app_id})
+    MATCH (a)-[:HAS_STATE]->(s:State)<-[:FROM]-(t:Transition)-[:TO]->(target:State)
+    OPTIONAL MATCH (t)-[:REALIZES]->(i:Intent)
+    RETURN t.id AS id,
+           coalesce(t.confidence, 0.0) AS confidence,
+           t.selector AS selector,
+           t.action AS action,
+           s.url AS source_url,
+           target.url AS target_url,
+           i{.*} AS intent
+    ORDER BY confidence DESC
+    LIMIT $limit
+    """
+
+    KNOWLEDGE_LEGACY_ROWS_BY_APP_NAME = """
+    MATCH (a:App {name: $app_name})
+    WITH a ORDER BY coalesce(a.last_session_at, a.created_at) DESC LIMIT 1
+    MATCH (a)-[:HAS_STATE]->(s:State)<-[:FROM]-(t:Transition)-[:TO]->(target:State)
+    OPTIONAL MATCH (t)-[:REALIZES]->(i:Intent)
+    RETURN t.id AS id,
+           coalesce(t.confidence, 0.0) AS confidence,
+           t.selector AS selector,
+           t.action AS action,
+           s.url AS source_url,
+           target.url AS target_url,
+           i{.*} AS intent
+    ORDER BY confidence DESC
+    LIMIT $limit
+    """
+
+    RUNNER_WARM_START_CANDIDATES_BY_APP_NAME = """
+    MATCH (a:App {name: $app_name})
+    WITH a ORDER BY coalesce(a.last_session_at, a.created_at) DESC LIMIT 1
+    MATCH (a)-[:HAS_STATE]->(s:State)<-[:FROM]-(t:Transition)-[:TO]->(target:State)
+    OPTIONAL MATCH (target)-[:HAS_ZONE]->(z:Zone)
+    RETURN t.id AS transition_id,
+           coalesce(t.confidence, 0.0) AS confidence,
+           target.url AS target_url,
+           count(z) = 0 AS zone_unexplored
+    ORDER BY confidence DESC
+    LIMIT $limit
+    """
+
+    RUNNER_WARM_START_CANDIDATES_BY_APP_ID = """
+    MATCH (a:App {id: $app_id})
+    MATCH (a)-[:HAS_STATE]->(s:State)<-[:FROM]-(t:Transition)-[:TO]->(target:State)
+    OPTIONAL MATCH (target)-[:HAS_ZONE]->(z:Zone)
+    RETURN t.id AS transition_id,
+           coalesce(t.confidence, 0.0) AS confidence,
+           target.url AS target_url,
+           count(z) = 0 AS zone_unexplored
+    ORDER BY confidence DESC
+    LIMIT $limit
+    """
+
+    RUNNER_STATE_URL_BY_ID = """
+    MATCH (s:State {id: $sid})
+    RETURN s.url AS url
+    """
+
+    RUNNER_ACTIVE_RELEASE_BY_APP_NAME = """
+    MATCH (a:App {name: $app_name})
+    WITH a ORDER BY coalesce(a.last_session_at, a.created_at) DESC LIMIT 1
+    MATCH (rel:GraphRelease {app_id: a.id, status: 'active'})
+    RETURN rel.id AS id, rel.created_at AS created_at
+    ORDER BY rel.created_at DESC
+    LIMIT 1
+    """
+
+    RUNNER_ACTIVE_RELEASE_BY_APP_ID = """
+    MATCH (rel:GraphRelease {app_id: $app_id, status: 'active'})
+    RETURN rel.id AS id, rel.created_at AS created_at
+    ORDER BY rel.created_at DESC
+    LIMIT 1
+    """
+
+    SESSION_LATEST_SEMANTIC_BASELINE_BY_APP_ID = """
+    MATCH (a:App {id: $app_id})-[:HAS_SESSION]->(s:Session)
+    WHERE s.id <> $exclude_session_id
+      AND s.semantic_state_keys_json IS NOT NULL
+      AND s.semantic_transition_keys_json IS NOT NULL
+      AND s.semantic_intent_keys_json IS NOT NULL
+    RETURN s.id AS session_id,
+           s.semantic_state_keys_json AS semantic_state_keys_json,
+           s.semantic_transition_keys_json AS semantic_transition_keys_json,
+           s.semantic_intent_keys_json AS semantic_intent_keys_json
+    ORDER BY s.timestamp DESC
+    LIMIT 1
+    """
+
+    SESSION_SEMANTIC_STABILITY_TREND_BY_APP_ID = """
+    MATCH (a:App {id: $app_id})-[:HAS_SESSION]->(s:Session)
+    WHERE s.semantic_stability_score IS NOT NULL
+    WITH s
+    ORDER BY s.timestamp DESC
+    LIMIT $limit
+    RETURN s.id AS session_id,
+           s.timestamp AS timestamp,
+           s.semantic_stability_mode AS mode,
+           s.semantic_baseline_session_id AS baseline_session_id,
+           coalesce(s.semantic_stability_score, 0.0) AS score,
+           coalesce(s.semantic_stability_threshold, $default_threshold) AS threshold,
+           coalesce(s.semantic_stability_passed, false) AS passed
+    ORDER BY timestamp ASC
+    """
+
+    RETENTION_KEEP_RELEASE_IDS_BY_APP = """
+    MATCH (r:GraphRelease {app_id: $app_id})
+    WITH r
+    ORDER BY coalesce(r.created_at, r.deactivated_at) DESC
+    LIMIT $keep_releases
+    RETURN collect(r.id) AS keep_release_ids
+    """
+
+    RETENTION_CANDIDATE_RELEASE_IDS_BY_APP = """
+    MATCH (r:GraphRelease {app_id: $app_id, status: 'inactive'})
+    WHERE coalesce(r.deactivated_at, r.created_at) < datetime($before_ts)
+      AND NOT r.id IN $keep_release_ids
+    RETURN collect(r.id) AS candidate_release_ids
+    """
+
+    RETENTION_COUNT_REVISIONS_FOR_RELEASES = """
+    MATCH (rev:TransitionRevision)-[:IN_RELEASE]->(r:GraphRelease)
+    WHERE r.id IN $release_ids
+      AND coalesce(rev.is_active, false) = false
+    RETURN count(DISTINCT rev) AS count
+    """
+
+    RETENTION_COUNT_SESSIONS_FOR_RELEASES = """
+    MATCH (a:App {id: $app_id})-[:HAS_SESSION]->(s:Session)
+    WHERE s.current_release_id IN $release_ids
+      AND coalesce(s.timestamp, datetime($before_ts)) < datetime($before_ts)
+    RETURN count(DISTINCT s) AS count
+    """
+
+    RETENTION_COUNT_INGEST_RUNS_FOR_RELEASE_SESSIONS = """
+    MATCH (a:App {id: $app_id})-[:HAS_SESSION]->(s:Session)-[:GENERATES]->(run:IngestionRun)
+    WHERE s.current_release_id IN $release_ids
+      AND coalesce(s.timestamp, datetime($before_ts)) < datetime($before_ts)
+    RETURN count(DISTINCT run) AS count
+    """
+
+    RETENTION_DELETE_RELEASES_BY_IDS = """
+    MATCH (r:GraphRelease)
+    WHERE r.id IN $release_ids
+    WITH r LIMIT $batch_size
+    DETACH DELETE r
+    RETURN count(r) AS deleted_count
+    """
+
+    RETENTION_DELETE_SESSIONS_BY_RELEASE_IDS = """
+    MATCH (a:App {id: $app_id})-[:HAS_SESSION]->(s:Session)
+    WHERE s.current_release_id IN $release_ids
+      AND coalesce(s.timestamp, datetime($before_ts)) < datetime($before_ts)
+    WITH s LIMIT $batch_size
+    DETACH DELETE s
+    RETURN count(s) AS deleted_count
+    """
+
+    RETENTION_DELETE_ORPHAN_INACTIVE_REVISIONS = """
+    MATCH (rev:TransitionRevision)
+    WHERE coalesce(rev.is_active, false) = false
+      AND NOT (rev)-[:IN_RELEASE]->(:GraphRelease)
+    WITH rev LIMIT $batch_size
+    DETACH DELETE rev
+    RETURN count(rev) AS deleted_count
+    """
+
+    RETENTION_DELETE_ORPHAN_COVERAGE_SNAPSHOTS = """
+    MATCH (cov:CoverageSnapshot)
+    WHERE NOT ()-[:HAS_COVERAGE]->(cov)
+      AND coalesce(cov.captured_at, datetime($before_ts)) < datetime($before_ts)
+    WITH cov LIMIT $batch_size
+    DETACH DELETE cov
+    RETURN count(cov) AS deleted_count
+    """
+
+    RETENTION_DELETE_ORPHAN_INGEST_RUNS = """
+    MATCH (run:IngestionRun)
+    WHERE NOT (:Session)-[:GENERATES]->(run)
+      AND coalesce(run.created_at, datetime($before_ts)) < datetime($before_ts)
+    WITH run LIMIT $batch_size
+    DETACH DELETE run
+    RETURN count(run) AS deleted_count
+    """
+
+    RETENTION_DELETE_ORPHAN_EVIDENCE = """
+    MATCH (e:Evidence)
+    WHERE NOT (:Session)-[:PROVIDED]->(e)
+      AND NOT (:Transition)-[:SUPPORTED_BY]->(e)
+      AND coalesce(e.created_at, datetime($before_ts)) < datetime($before_ts)
+    WITH e LIMIT $batch_size
+    DETACH DELETE e
+    RETURN count(e) AS deleted_count
+    """
+
+    RETENTION_COUNT_ACTIVE_RELEASES_BY_APP = """
+    MATCH (r:GraphRelease {app_id: $app_id, status: 'active'})
+    RETURN count(r) AS active_count
     """

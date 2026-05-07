@@ -98,6 +98,17 @@ def _rank_selector_chain(
     return chain
 
 
+def _transition_dedupe_key(transition: Transition) -> str:
+    return "|".join(
+        [
+            str(transition.from_state_id or "").strip(),
+            str(transition.to_state_id or "").strip(),
+            str(transition.action.value if hasattr(transition.action, "value") else transition.action).strip().lower(),
+            str(transition.semantic_action_key or transition.selector or "").strip(),
+        ]
+    )
+
+
 class ReActExplorer(BaseAgent):
     """Lightweight page/zone explorer using BaseAgent's ReAct loop.
 
@@ -645,6 +656,14 @@ class ReActExplorer(BaseAgent):
         )
 
         self._result.states.extend([from_state, to_state])
+        dedupe_key = _transition_dedupe_key(transition)
+        existing_keys = {
+            _transition_dedupe_key(item)
+            for item in self._result.transitions[-30:]
+        }
+        if dedupe_key in existing_keys:
+            logger.info("    → Transition deduped: %s", dedupe_key)
+            return
         self._result.transitions.append(transition)
         self._result.checkpoints.append(cp)
         self._result.checkpoints.extend(extra_checkpoints)
@@ -797,7 +816,7 @@ class ReActExplorer(BaseAgent):
 
             async with GraphManager() as manager:
                 if target_type == "state":
-                    rows = await manager._run_read(
+                    rows = await manager.run_read(
                         """
                         MATCH (s:State)
                         WHERE toLower(coalesce(s.title, '') + ' ' + coalesce(s.url, ''))
@@ -815,7 +834,7 @@ class ReActExplorer(BaseAgent):
                     )
                     return f"Historical state hints: {preview}"
 
-                rows = await manager._run_read(
+                rows = await manager.run_read(
                     """
                     MATCH (t:Transition)
                     WHERE toLower(coalesce(t.selector, '') + ' ' + coalesce(t.thought, ''))

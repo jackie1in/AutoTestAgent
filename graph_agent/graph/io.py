@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -18,6 +19,8 @@ from graph_agent.models import (
     GraphEdge,
     GraphNode,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def save_graph(G: nx.Graph, path: str | Path) -> None:
@@ -133,8 +136,8 @@ def load_graph(path: str | Path) -> nx.MultiDiGraph:
         graph_data = GraphData.model_validate_json(text)
     except ValidationError:
         # Fallback for old format? Or just fail as per instructions "backward compatibility is NOT required"
-        print(
-            f"Warning: Failed to validate graph data from {path}. Returning empty graph."
+        logger.warning(
+            "Failed to validate graph data from %s. Returning empty graph.", path
         )
         return nx.MultiDiGraph()
 

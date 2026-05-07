@@ -86,6 +86,7 @@ class _FakeManager:
     release_rows: list[dict[str, object]] = []
     legacy_rows: list[dict[str, object]] = []
     calls: list[str] = []
+    kwargs_calls: list[dict[str, object]] = []
 
     async def __aenter__(self):
         return self
@@ -93,16 +94,21 @@ class _FakeManager:
     async def __aexit__(self, *args):
         return None
 
-    async def _run_read(self, query: str, **kwargs):
-        _FakeManager.calls.append(query)
-        if "GraphRelease" in query:
-            return list(_FakeManager.release_rows)
+    async def get_knowledge_release_rows(self, **kwargs):
+        _FakeManager.calls.append("release")
+        _FakeManager.kwargs_calls.append(kwargs)
+        return list(_FakeManager.release_rows)
+
+    async def get_knowledge_legacy_rows(self, **kwargs):
+        _FakeManager.calls.append("legacy")
+        _FakeManager.kwargs_calls.append(kwargs)
         return list(_FakeManager.legacy_rows)
 
 
 @pytest.mark.asyncio
 async def test_broker_release_first_and_cache(monkeypatch: pytest.MonkeyPatch):
     _FakeManager.calls = []
+    _FakeManager.kwargs_calls = []
     _FakeManager.release_rows = [
         {
             "id": "t:1",
@@ -135,6 +141,7 @@ async def test_broker_release_first_and_cache(monkeypatch: pytest.MonkeyPatch):
 @pytest.mark.asyncio
 async def test_broker_fallback_to_legacy(monkeypatch: pytest.MonkeyPatch):
     _FakeManager.calls = []
+    _FakeManager.kwargs_calls = []
     _FakeManager.release_rows = []
     _FakeManager.legacy_rows = [
         {
@@ -161,6 +168,9 @@ async def test_broker_fallback_to_legacy(monkeypatch: pytest.MonkeyPatch):
     )
     assert result.meta.source == "legacy"
     assert result.transition_hints
+    assert _FakeManager.kwargs_calls, "expected broker query calls"
+    first_kwargs = _FakeManager.kwargs_calls[0]
+    assert first_kwargs.get("app_id") == "app:demo:2"
 
 
 @pytest.mark.asyncio

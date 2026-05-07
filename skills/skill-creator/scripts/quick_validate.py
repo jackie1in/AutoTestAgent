@@ -5,8 +5,11 @@ Quick validation script for skills - minimal version
 
 import sys
 import re
+import logging
 import yaml
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 def validate_skill(skill_path):
     """Basic validation of a skill"""
@@ -93,10 +96,14 @@ def validate_skill(skill_path):
     return True, "Skill is valid!"
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     if len(sys.argv) != 2:
-        print("Usage: python quick_validate.py <skill_directory>")
+        logger.error("Usage: python quick_validate.py <skill_directory>")
         sys.exit(1)
     
     valid, message = validate_skill(sys.argv[1])
-    print(message)
+    if valid:
+        logger.info("%s", message)
+    else:
+        logger.error("%s", message)
     sys.exit(0 if valid else 1)

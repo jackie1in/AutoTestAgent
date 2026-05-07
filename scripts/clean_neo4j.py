@@ -14,10 +14,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from pathlib import Path
 
 from neo4j import AsyncGraphDatabase
+
+logger = logging.getLogger(__name__)
 
 
 def _load_env_file() -> None:
@@ -41,7 +44,7 @@ async def clean_neo4j():
     user = os.getenv("NEO4J_USER", "neo4j")
     password = os.getenv("NEO4J_PASSWORD", "autotestagent")
     
-    print(f"Connecting to Neo4j at {uri}...")
+    logger.info("Connecting to Neo4j at %s...", uri)
     driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
     
     try:
@@ -61,23 +64,23 @@ async def clean_neo4j():
             record = await result.single()
             rel_count = record["rel_count"] if record else 0
             
-            print(f"Found {node_count} nodes and {rel_count} relationships")
+            logger.info("Found %d nodes and %d relationships", node_count, rel_count)
             
             if node_count == 0 and rel_count == 0:
-                print("Database is already empty.")
+                logger.info("Database is already empty.")
                 return
             
             # 确认删除
             confirm = input("\nAre you sure you want to delete ALL data? (yes/no): ")
             if confirm.lower() != "yes":
-                print("Aborted.")
+                logger.info("Aborted.")
                 return
             
             # 删除所有数据
-            print("Deleting all relationships...")
+            logger.info("Deleting all relationships...")
             await session.run("MATCH ()-[r]->() DELETE r")
             
-            print("Deleting all nodes...")
+            logger.info("Deleting all nodes...")
             await session.run("MATCH (n) DELETE n")
             
             # 验证
@@ -86,13 +89,14 @@ async def clean_neo4j():
             remaining = record["count"] if record else 0
             
             if remaining == 0:
-                print("✅ Neo4j database cleaned successfully!")
+                logger.info("Neo4j database cleaned successfully!")
             else:
-                print(f"⚠️  Warning: {remaining} nodes still remain")
+                logger.warning("%d nodes still remain", remaining)
                 
     finally:
         await driver.close()
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     asyncio.run(clean_neo4j())

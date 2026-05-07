@@ -12,7 +12,10 @@ Examples:
 """
 
 import sys
+import logging
 from pathlib import Path
+logger = logging.getLogger(__name__)
+
 
 
 SKILL_TEMPLATE = """---
@@ -114,8 +117,13 @@ Example real scripts from other skills:
 - pdf/scripts/convert_pdf_to_images.py - Converts PDF pages to images
 """
 
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
+
 def main():
-    print("This is an example script for {skill_name}")
+    logger.info("This is an example script for {skill_name}")
     # TODO: Add actual script logic here
     # This could be data processing, file conversion, API calls, etc.
 
@@ -207,15 +215,15 @@ def init_skill(skill_name, path):
 
     # Check if directory already exists
     if skill_dir.exists():
-        print(f"❌ Error: Skill directory already exists: {skill_dir}")
+        logger.error("Error: Skill directory already exists: %s", skill_dir)
         return None
 
     # Create skill directory
     try:
         skill_dir.mkdir(parents=True, exist_ok=False)
-        print(f"✅ Created skill directory: {skill_dir}")
+        logger.info("Created skill directory: %s", skill_dir)
     except Exception as e:
-        print(f"❌ Error creating directory: {e}")
+        logger.error("Error creating directory: %s", e)
         return None
 
     # Create SKILL.md from template
@@ -228,9 +236,9 @@ def init_skill(skill_name, path):
     skill_md_path = skill_dir / 'SKILL.md'
     try:
         skill_md_path.write_text(skill_content)
-        print("✅ Created SKILL.md")
+        logger.info("Created SKILL.md")
     except Exception as e:
-        print(f"❌ Error creating SKILL.md: {e}")
+        logger.error("Error creating SKILL.md: %s", e)
         return None
 
     # Create resource directories with example files
@@ -241,55 +249,57 @@ def init_skill(skill_name, path):
         example_script = scripts_dir / 'example.py'
         example_script.write_text(EXAMPLE_SCRIPT.format(skill_name=skill_name))
         example_script.chmod(0o755)
-        print("✅ Created scripts/example.py")
+        logger.info("Created scripts/example.py")
 
         # Create references/ directory with example reference doc
         references_dir = skill_dir / 'references'
         references_dir.mkdir(exist_ok=True)
         example_reference = references_dir / 'api_reference.md'
         example_reference.write_text(EXAMPLE_REFERENCE.format(skill_title=skill_title))
-        print("✅ Created references/api_reference.md")
+        logger.info("Created references/api_reference.md")
 
         # Create assets/ directory with example asset placeholder
         assets_dir = skill_dir / 'assets'
         assets_dir.mkdir(exist_ok=True)
         example_asset = assets_dir / 'example_asset.txt'
         example_asset.write_text(EXAMPLE_ASSET)
-        print("✅ Created assets/example_asset.txt")
+        logger.info("Created assets/example_asset.txt")
     except Exception as e:
-        print(f"❌ Error creating resource directories: {e}")
+        logger.error("Error creating resource directories: %s", e)
         return None
 
     # Print next steps
-    print(f"\n✅ Skill '{skill_name}' initialized successfully at {skill_dir}")
-    print("\nNext steps:")
-    print("1. Edit SKILL.md to complete the TODO items and update the description")
-    print("2. Customize or delete the example files in scripts/, references/, and assets/")
-    print("3. Run the validator when ready to check the skill structure")
+    logger.info("Skill '%s' initialized successfully at %s", skill_name, skill_dir)
+    logger.info("Next steps:")
+    logger.info("1. Edit SKILL.md to complete the TODO items and update the description")
+    logger.info(
+        "2. Customize or delete the example files in scripts/, references/, and assets/"
+    )
+    logger.info("3. Run the validator when ready to check the skill structure")
 
     return skill_dir
 
 
 def main():
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     if len(sys.argv) < 4 or sys.argv[2] != '--path':
-        print("Usage: init_skill.py <skill-name> --path <path>")
-        print("\nSkill name requirements:")
-        print("  - Kebab-case identifier (e.g., 'my-data-analyzer')")
-        print("  - Lowercase letters, digits, and hyphens only")
-        print("  - Max 64 characters")
-        print("  - Must match directory name exactly")
-        print("\nExamples:")
-        print("  init_skill.py my-new-skill --path skills/public")
-        print("  init_skill.py my-api-helper --path skills/private")
-        print("  init_skill.py custom-skill --path /custom/location")
+        logger.error("Usage: init_skill.py <skill-name> --path <path>")
+        logger.error("Skill name requirements:")
+        logger.error("  - Kebab-case identifier (e.g., 'my-data-analyzer')")
+        logger.error("  - Lowercase letters, digits, and hyphens only")
+        logger.error("  - Max 64 characters")
+        logger.error("  - Must match directory name exactly")
+        logger.error("Examples:")
+        logger.error("  init_skill.py my-new-skill --path skills/public")
+        logger.error("  init_skill.py my-api-helper --path skills/private")
+        logger.error("  init_skill.py custom-skill --path /custom/location")
         sys.exit(1)
 
     skill_name = sys.argv[1]
     path = sys.argv[3]
 
-    print(f"🚀 Initializing skill: {skill_name}")
-    print(f"   Location: {path}")
-    print()
+    logger.info("Initializing skill: %s", skill_name)
+    logger.info("Location: %s", path)
 
     result = init_skill(skill_name, path)
 

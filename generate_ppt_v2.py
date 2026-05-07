@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Generate Graph Agent design document PPT (v2 with menu section)."""
 
+import logging
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
@@ -15,6 +16,9 @@ GRAY      = RGBColor(0x6B, 0x72, 0x80)
 GREEN     = RGBColor(0x10, 0xB9, 0x81)
 ORANGE    = RGBColor(0xF5, 0x9E, 0x0B)
 PURPLE    = RGBColor(0x8B, 0x5C, 0xF6)
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 prs = Presentation()
 prs.slide_width  = Inches(13.333)
@@ -321,4 +325,4 @@ for i, (title, desc, color) in enumerate(shapes):
 # ── Save ───────────────────────────────────────────────────────────
 output_path = "/Users/linhai/AutoTestAgent/GraphAgent_设计汇报_v2_20260422.pptx"
 prs.save(output_path)
-print(f"PPT saved to: {output_path}")
+logger.info("PPT saved to: %s", output_path)
