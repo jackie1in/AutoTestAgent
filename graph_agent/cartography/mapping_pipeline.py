@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -75,6 +76,50 @@ if TYPE_CHECKING:
     from graph_agent.models import ZoneType
 
 logger = logging.getLogger(__name__)
+
+_CAPTCHA_RESULT_CODE_PATTERN = re.compile(r"(CAPTCHA_[A-Z_]+)")
+
+
+def _empty_captcha_metrics() -> dict[str, int]:
+    return {
+        "captcha_action_count": 0,
+        "captcha_ok_count": 0,
+        "captcha_empty_count": 0,
+        "captcha_manual_empty_count": 0,
+        "captcha_fill_failed_count": 0,
+        "captcha_manual_wait_ms_total": 0,
+    }
+
+
+def summarize_captcha_metrics_from_history(
+    history: list[dict[str, object]] | None,
+) -> dict[str, int]:
+    metrics = _empty_captcha_metrics()
+    if not history:
+        return metrics
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        action_name = str(item.get("action_name") or item.get("action") or "").strip().lower()
+        if action_name != "solve_captcha":
+            continue
+        metrics["captcha_action_count"] += 1
+        result_text = str(item.get("action_result") or item.get("result") or "")
+        upper = result_text.upper()
+        match = _CAPTCHA_RESULT_CODE_PATTERN.search(upper)
+        code = match.group(1) if match else "CAPTCHA_UNKNOWN"
+        if code.startswith("CAPTCHA_OK"):
+            metrics["captcha_ok_count"] += 1
+        elif code == "CAPTCHA_EMPTY_CODE":
+            metrics["captcha_empty_count"] += 1
+        elif code == "CAPTCHA_MANUAL_EMPTY":
+            metrics["captcha_manual_empty_count"] += 1
+        elif code.startswith("CAPTCHA_FILL_FAILED"):
+            metrics["captcha_fill_failed_count"] += 1
+        wait_match = re.search(r"wait_ms=(\d+)", result_text, flags=re.IGNORECASE)
+        if wait_match:
+            metrics["captcha_manual_wait_ms_total"] += int(wait_match.group(1))
+    return metrics
 
 
 def _now_utc():
@@ -566,6 +611,7 @@ def _build_pipeline_result(
     cross_origin_seen: bool,
     iframe_seen: bool,
     captcha_seen: bool,
+    captcha_metrics: dict[str, int],
 ) -> "CartographyResult":
     from graph_agent.graph.merger import CartographyResult
 
@@ -613,6 +659,7 @@ def _build_pipeline_result(
             "pipeline_error_unknown_count": skip_metrics["error_unknown_count"],
         }
     )
+    result.layout_metrics.update(captcha_metrics)
     if skip_advisor is not None:
         result.layout_metrics.update(skip_advisor.metrics)
     intervention_tasks = evaluate_intervention_need(
@@ -625,6 +672,10 @@ def _build_pipeline_result(
         has_cross_origin=cross_origin_seen,
         has_iframe=iframe_seen,
         has_captcha=captcha_seen,
+        captcha_action_count=int(captcha_metrics.get("captcha_action_count", 0)),
+        captcha_empty_code_count=int(captcha_metrics.get("captcha_empty_count", 0)),
+        captcha_manual_empty_count=int(captcha_metrics.get("captcha_manual_empty_count", 0)),
+        captcha_fill_failed_count=int(captcha_metrics.get("captcha_fill_failed_count", 0)),
     )
     result.intervention_tasks = [
         {
@@ -769,6 +820,7 @@ async def run_orchestrated_mapping(
     cross_origin_seen = False
     iframe_seen = False
     captcha_seen = False
+    captcha_metrics = _empty_captcha_metrics()
     stuck_steps = 0
     knowledge_enabled = (
         resolve_knowledge_on_demand_enabled()
@@ -1385,6 +1437,11 @@ async def run_orchestrated_mapping(
             all_zones.extend(explore_result.zones)
             if explore_result.history:
                 all_history.extend(explore_result.history)
+                page_captcha_metrics = summarize_captcha_metrics_from_history(
+                    explore_result.history
+                )
+                for key, value in page_captcha_metrics.items():
+                    captcha_metrics[key] = int(captcha_metrics.get(key, 0)) + int(value)
             semantic_conflict_count += int(
                 getattr(explore_result, "semantic_conflict_count", 0) or 0
             )
@@ -1533,4 +1590,5 @@ async def run_orchestrated_mapping(
         cross_origin_seen=cross_origin_seen,
         iframe_seen=iframe_seen,
         captcha_seen=captcha_seen,
+        captcha_metrics=captcha_metrics,
     )

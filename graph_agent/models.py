@@ -140,6 +140,20 @@ class State(BaseModel):
     ingest_version_id: str | None = None
 
 
+class TransitionStep(BaseModel):
+    """A single atomic action within a Transition (e.g., one fill or click)."""
+
+    action: ActionType = ActionType.CLICK
+    selector: str = ""
+    selector_chain: list[str] = Field(default_factory=list)
+    param_name: str | None = None
+    action_value: str | None = None
+    element_snapshot: str | None = None  # JSON
+    thought: str | None = None
+    step_index: int | None = None
+    semantic_action_key: str | None = None
+
+
 class Transition(BaseModel):
     id: str
     selector: str = ""
@@ -169,6 +183,9 @@ class Transition(BaseModel):
     source_type: TransitionSourceType = TransitionSourceType.AUTO
     operator_id: str = "agent"
     ingest_version_id: str | None = None
+
+    # Sub-actions accumulated before commit (intent-level aggregation)
+    steps: list[TransitionStep] = Field(default_factory=list)
 
     # Relationship endpoints (not stored as properties, used for graph construction)
     from_state_id: str | None = None

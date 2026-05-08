@@ -94,6 +94,13 @@ zone 时，使用 fallback `0.5`。
 | `CARTOGRAPHY_SKIP_TTL_HOURS` | profile 默认 | 覆盖 `ttl_hours` |
 | `CARTOGRAPHY_SKIP_QUERY_TIMEOUT_MS` | `300` | 单次 Neo4j 查询超时 |
 | `CARTOGRAPHY_SKIP_CACHE_TTL_SEC` | `60` | 决策结果 LRU TTL |
+| `CAPTCHA_SOLVE_MODE` | `auto` | 验证码策略：`auto` 走 `captcha.py` 自动识别；`manual` 在 ReAct 执行 `solve_captcha` 时暂停并等待控制台输入，输入后继续同一次流程 |
+
+Captcha 可观测指标（写入 `layout_metrics`）：
+- `captcha_action_count` / `captcha_ok_count`
+- `captcha_empty_count` / `captcha_manual_empty_count`
+- `captcha_fill_failed_count`
+- `captcha_manual_wait_ms_total`
 
 ### 失败兜底
 

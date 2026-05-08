@@ -381,13 +381,33 @@ class GraphMerger:
                 except Exception:
                     pass
 
+            # Serialize steps to JSON for storage
+            steps_json = None
+            if transition.steps:
+                try:
+                    steps_json = json.dumps(
+                        [s.model_dump(mode="json") for s in transition.steps],
+                        ensure_ascii=False,
+                    )
+                except Exception:
+                    pass
+
+            logger.info(
+                "[Neo4j] CREATE Transition id=%s action=%s %s→%s steps=%d",
+                transition.id, action_val,
+                str(transition.from_state_id or "")[:24],
+                str(transition.to_state_id or "")[:24],
+                len(transition.steps) if transition.steps else 0,
+            )
+
             await tx.run(
                 "CREATE (t:Transition {id: $id, selector: $selector, action: $action, "
                 "action_value: $action_value, param_name: $param_name, thought: $thought, "
                 "confidence: $conf, first_discovered: $now, session_id: $sid, "
                 "step_index: $step_index, element_snapshot: $elem, frame_path: $fp, "
                 "tab_id: $tab_id, target_tab_id: $target_tab_id, tab_action: $tab_action, "
-                "name: $name, failed_requests: $failed_requests, validation_count: 0})",
+                "name: $name, failed_requests: $failed_requests, validation_count: 0, "
+                "semantic_action_key: $sak, steps: $steps})",
                 id=transition.id,
                 selector=transition.selector,
                 action=action_val,
@@ -405,6 +425,8 @@ class GraphMerger:
                 tab_action=str(transition.tab_action) if transition.tab_action else None,
                 name=transition.selector or str(transition.action) or transition.id,
                 failed_requests=failed_reqs_json,
+                sak=getattr(transition, "semantic_action_key", None),
+                steps=steps_json,
             )
             if transition.from_state_id:
                 await tx.run(
@@ -431,6 +453,10 @@ class GraphMerger:
             if transition.intent:
                 intent = transition.intent
                 intent_id = intent.id or intent.key or f"intent:{intent.summary or session_id}"
+                logger.info(
+                    "[Neo4j] MERGE Intent id=%s key=%s transition=%s",
+                    intent_id, getattr(intent, "key", ""), transition.id,
+                )
                 await tx.run(
                     "MERGE (i:Intent {id: $intent_id}) "
                     "SET i.name = coalesce(i.name, $name, $summary, $key, $raw), "

@@ -148,8 +148,28 @@ class RuntimeWatchdog:
         self.blank_dom_count = 0
         self.captcha_attempts = 0
         self.captcha_failures = 0
+        self.captcha_failure_breakdown: dict[str, int] = {
+            "manual_empty": 0,
+            "extract_failed": 0,
+            "recognize_failed": 0,
+            "fill_failed": 0,
+            "other": 0,
+        }
         self.action_failures: dict[str, int] = {}
         self._network_events: deque[dict[str, object]] = deque(maxlen=100)
+
+    @staticmethod
+    def _classify_captcha_failure(result_text: str) -> str:
+        upper = str(result_text or "").upper()
+        if "CAPTCHA_MANUAL_EMPTY" in upper:
+            return "manual_empty"
+        if "CAPTCHA_FILL_FAILED" in upper:
+            return "fill_failed"
+        if "CAPTCHA_EMPTY_CODE" in upper:
+            return "recognize_failed"
+        if "CAPTCHA_FAILED" in upper:
+            return "extract_failed"
+        return "other"
 
     def inspect_observation(
         self, *, dom_text: str, url: str, dom_len: int
@@ -194,19 +214,31 @@ class RuntimeWatchdog:
             self.captcha_attempts += 1
             if "CAPTCHA_OK" not in normalized:
                 self.captcha_failures += 1
+                failure_type = self._classify_captcha_failure(text)
+                self.captcha_failure_breakdown[failure_type] = (
+                    self.captcha_failure_breakdown.get(failure_type, 0) + 1
+                )
             if self.captcha_failures >= self.config.max_captcha_failures:
                 return GuardDecision(
                     GuardSeverity.STOP,
                     "captcha_failure_limit",
                     f"Captcha solve failed {self.captcha_failures} times.",
-                    {"attempts": self.captcha_attempts, "result": text[:300]},
+                    {
+                        "attempts": self.captcha_attempts,
+                        "result": text[:300],
+                        "failure_breakdown": dict(self.captcha_failure_breakdown),
+                    },
                 )
             if self.captcha_attempts >= self.config.max_captcha_attempts:
                 return GuardDecision(
                     GuardSeverity.STOP,
                     "captcha_attempt_limit",
                     f"Captcha solve attempted {self.captcha_attempts} times.",
-                    {"attempts": self.captcha_attempts, "result": text[:300]},
+                    {
+                        "attempts": self.captcha_attempts,
+                        "result": text[:300],
+                        "failure_breakdown": dict(self.captcha_failure_breakdown),
+                    },
                 )
 
         is_failure = bool(self._failure_result_pattern.search(text))

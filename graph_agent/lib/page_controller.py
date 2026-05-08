@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -282,6 +283,25 @@ _PATCH_REACT_JS = """() => {
     roots.forEach(el => el.setAttribute('data-page-agent-not-interactive', 'true'));
 }"""
 
+_PATCH_ANTD_JS = """() => {
+    const selectors = [
+        '.ant-select-selector',
+        '.ant-select-dropdown',
+        '.ant-select-item-option',
+        '.ant-picker-panel',
+        '.ant-picker-dropdown',
+        '.ant-cascader-menus',
+        '.ant-tree-select-dropdown'
+    ];
+    selectors.forEach(sel => {
+        document.querySelectorAll(sel).forEach(el => {
+            if (el instanceof HTMLElement) {
+                el.setAttribute('data-page-agent-not-interactive', 'true');
+            }
+        });
+    });
+}"""
+
 _CLICK_BY_XPATH_JS = """(xpath) => {
     const byXpath = (xp) => {
         if (!xp) return null;
@@ -310,6 +330,74 @@ _CLICK_BY_XPATH_JS = """(xpath) => {
     } catch (e) {
         return JSON.stringify({success: false, reason: String(e)});
     }
+}"""
+
+_TOP_LAYER_INFO_JS = """(el) => {
+    if (!(el instanceof HTMLElement)) {
+        return JSON.stringify({is_visible: false, is_top: false, reason: 'not-html'});
+    }
+    const rect = el.getBoundingClientRect();
+    const isVisible = !!(
+        rect &&
+        rect.width > 0 &&
+        rect.height > 0 &&
+        rect.bottom >= 0 &&
+        rect.top <= window.innerHeight &&
+        rect.right >= 0 &&
+        rect.left <= window.innerWidth
+    );
+    if (!isVisible) {
+        return JSON.stringify({
+            is_visible: false,
+            is_top: false,
+            reason: 'out-of-viewport',
+            bbox: {left: rect.left, top: rect.top, width: rect.width, height: rect.height}
+        });
+    }
+    const margin = 5;
+    const checkPoints = [
+        {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2},
+        {x: rect.left + margin, y: rect.top + margin},
+        {x: rect.right - margin, y: rect.bottom - margin},
+    ];
+    let hitSource = 'document';
+    const rootNode = el.getRootNode && el.getRootNode();
+
+    const isInAncestorChain = (topEl, targetEl, stopAt) => {
+        let cur = topEl;
+        while (cur && cur !== stopAt) {
+            if (cur === targetEl) return true;
+            cur = cur.parentElement;
+        }
+        return false;
+    };
+
+    const checkPoint = ({x, y}) => {
+        try {
+            if (rootNode instanceof ShadowRoot && typeof rootNode.elementFromPoint === 'function') {
+                const shadowTop = rootNode.elementFromPoint(x, y);
+                if (shadowTop && isInAncestorChain(shadowTop, el, rootNode)) {
+                    hitSource = 'shadow';
+                    return true;
+                }
+            }
+        } catch (e) {}
+        try {
+            const topEl = document.elementFromPoint(x, y);
+            if (!topEl) return false;
+            return isInAncestorChain(topEl, el, document.documentElement);
+        } catch (e) {
+            return true;
+        }
+    };
+
+    const isTop = checkPoints.some(checkPoint);
+    return JSON.stringify({
+        is_visible: true,
+        is_top: isTop,
+        hit_source: hitSource,
+        bbox: {left: rect.left, top: rect.top, width: rect.width, height: rect.height}
+    });
 }"""
 
 
@@ -367,11 +455,7 @@ class PageController:
 
         page = await self._get_page()
 
-        # Apply React/AntD patches before DOM extraction
-        try:
-            await page.evaluate(_PATCH_REACT_JS)
-        except Exception:
-            pass
+        await self._apply_dom_patches(page)
 
         dom_service = DomService(self._session)
         dom_state, _tree, _timing = await dom_service.get_serialized_dom_tree()
@@ -384,6 +468,92 @@ class PageController:
 
     async def get_last_update_time(self) -> float:
         return self._last_update_time
+
+    async def _apply_dom_patches(self, page) -> None:
+        """Apply lightweight DOM patches before serialized tree extraction."""
+        for script in (_PATCH_REACT_JS, _PATCH_ANTD_JS):
+            try:
+                await page.evaluate(script)
+            except Exception:
+                continue
+
+    async def extract_interactive_elements_with_top(self) -> list[dict[str, object]]:
+        """Extract top-layer metadata for currently indexed interactive elements."""
+        self._assert_indexed()
+        out: list[dict[str, object]] = []
+        for idx in sorted(k for k in self._selector_map.keys() if isinstance(k, int)):
+            node = self._selector_map.get(idx)
+            if node is None:
+                continue
+            attrs = getattr(node, "attributes", {}) or {}
+            tag = str(getattr(node, "tag_name", "") or "").lower()
+            text = str(getattr(node, "node_value", "") or "")
+            role = str(attrs.get("role") or "").lower()
+            is_menu_container = role in {"menu", "menubar", "listbox"}
+
+            is_visible = True
+            is_top = False
+            hit_source = "document"
+            bbox: dict[str, object] = {}
+            try:
+                element = await self._get_element(idx)
+                if element is not None:
+                    raw = await element.evaluate(_TOP_LAYER_INFO_JS)
+                    parsed = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                    is_visible = bool(parsed.get("is_visible", True))
+                    is_top = bool(parsed.get("is_top", False))
+                    hit_source = str(parsed.get("hit_source") or "document")
+                    bbox_raw = parsed.get("bbox", {})
+                    if isinstance(bbox_raw, dict):
+                        bbox = bbox_raw
+            except Exception:
+                # Keep conservative default: visible but not top.
+                is_visible = True
+                is_top = False
+
+            out.append(
+                {
+                    "index": idx,
+                    "tag": tag,
+                    "text": text,
+                    "attributes": attrs,
+                    "is_visible": is_visible,
+                    "is_top": is_top,
+                    "hit_source": hit_source,
+                    "is_menu_container": is_menu_container,
+                    "bbox": bbox,
+                }
+            )
+        return out
+
+    async def render_llm_dom_with_top(self, only_top: bool = True) -> str:
+        """Render simplified DOM and annotate each interactive line with is_top."""
+        self._assert_indexed()
+        simplified = self._simplified_html or ""
+        if not simplified:
+            return simplified
+
+        top_info = await self.extract_interactive_elements_with_top()
+        top_map = {int(item["index"]): bool(item.get("is_top")) for item in top_info}
+        menu_map = {
+            int(item["index"]): bool(item.get("is_menu_container")) for item in top_info
+        }
+
+        lines = simplified.splitlines()
+        rendered: list[str] = []
+        for line in lines:
+            m = re.match(r"^(\*?)\[(\d+)\](.*)$", line)
+            if not m:
+                rendered.append(line)
+                continue
+            idx = int(m.group(2))
+            is_top = top_map.get(idx, False)
+            is_menu = menu_map.get(idx, False)
+            if only_top and not is_top and not is_menu:
+                continue
+            suffix = " is_top=true" if is_top else " is_top=false"
+            rendered.append(f"{line}{suffix}")
+        return "\n".join(rendered)
 
     # ── Element actions ──────────────────────────────────────────
 
@@ -447,6 +617,38 @@ class PageController:
 
             elem_text = self._element_text_map.get(index, str(index))
 
+            # Top-layer preflight: if occluded, try one scroll/recheck before clicking.
+            top_probe_raw = await element.evaluate(_TOP_LAYER_INFO_JS)
+            top_probe = (
+                json.loads(top_probe_raw)
+                if isinstance(top_probe_raw, str)
+                else (top_probe_raw or {})
+            )
+            is_top = bool(top_probe.get("is_top", False))
+            top_hit_source = str(top_probe.get("hit_source") or "document")
+            if not is_top:
+                try:
+                    await element.evaluate(
+                        """(el) => { try { el.scrollIntoView({block:'center', inline:'nearest'}); } catch (e) {} }"""
+                    )
+                    await asyncio.sleep(0.1)
+                    top_probe_retry_raw = await element.evaluate(_TOP_LAYER_INFO_JS)
+                    top_probe_retry = (
+                        json.loads(top_probe_retry_raw)
+                        if isinstance(top_probe_retry_raw, str)
+                        else (top_probe_retry_raw or {})
+                    )
+                    is_top = bool(top_probe_retry.get("is_top", False))
+                    top_hit_source = str(top_probe_retry.get("hit_source") or top_hit_source)
+                except Exception:
+                    pass
+            logger.info(
+                "[TOP_LAYER] click index=%s is_top=%s hit_source=%s",
+                index,
+                is_top,
+                top_hit_source,
+            )
+
             # W3C event simulation via JS injection
             raw = await element.evaluate(_CLICK_ELEMENT_JS)
             result = json.loads(raw) if isinstance(raw, str) else (raw or {})
@@ -458,7 +660,11 @@ class PageController:
                 )
             return ActionResult(
                 success=True,
-                message=f"Clicked [{index}] ({elem_text}).",
+                message=(
+                    f"Clicked [{index}] ({elem_text})."
+                    if is_top
+                    else f"Clicked [{index}] ({elem_text}) with top-layer fallback."
+                ),
             )
         except Exception as e:
             # Fallback to browser-use's native click

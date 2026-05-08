@@ -20,7 +20,11 @@ from urllib.parse import parse_qsl, urlparse
 from browser_use.browser.session import BrowserSession as Browser
 
 from graph_agent.cartography.base_agent import BaseAgent
-from graph_agent.cartography.captcha import solve_captcha_from_page
+from graph_agent.cartography.captcha import (
+    normalize_manual_captcha_code,
+    resolve_captcha_solve_mode,
+    solve_captcha_from_page,
+)
 from graph_agent.cartography.inference_core import (
     SemanticInferenceInput,
     infer_transition_semantics,
@@ -42,6 +46,7 @@ from graph_agent.models import (
     Severity,
     State,
     Transition,
+    TransitionStep,
 )
 
 logger = logging.getLogger(__name__)
@@ -109,6 +114,65 @@ def _transition_dedupe_key(transition: Transition) -> str:
     )
 
 
+def _should_commit_transition(
+    url_before: str,
+    url_after: str,
+    action_type: str,
+) -> bool:
+    """Determine whether pending steps should be committed as a Transition.
+
+    Commit happens when:
+    - URL or SPA route changes (real page navigation)
+    - A click triggers a structural state change (e.g. modal close, tab switch)
+
+    fill/select on the same page are accumulated, not committed.
+    """
+    if url_before != url_after:
+        return True
+    route_before = _extract_spa_route(url_before)
+    route_after = _extract_spa_route(url_after)
+    if route_before != route_after:
+        return True
+    if action_type == "click":
+        return True
+    return False
+
+
+def _infer_param_name_from_snapshot(snapshot_json: str | None) -> str | None:
+    """Infer param_name from element snapshot JSON (name/id/placeholder/type)."""
+    if not snapshot_json:
+        return None
+    try:
+        snap = json.loads(snapshot_json)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    attrs = snap if isinstance(snap, dict) else {}
+    # Direct attribute fields first
+    for key in ("name", "id", "placeholder"):
+        val = attrs.get(key)
+        if val and isinstance(val, str) and val.strip():
+            return val.strip()
+    # Nested attributes dict
+    nested = attrs.get("attributes")
+    if isinstance(nested, dict):
+        for key in ("name", "id", "placeholder"):
+            val = nested.get(key)
+            if val and isinstance(val, str) and val.strip():
+                return val.strip()
+        # Fallback: use input type as param hint (e.g. "password")
+        input_type = nested.get("type")
+        if input_type and isinstance(input_type, str) and input_type.strip() in (
+            "password",
+            "email",
+            "tel",
+            "search",
+            "url",
+            "number",
+        ):
+            return input_type.strip()
+    return None
+
+
 class ReActExplorer(BaseAgent):
     """Lightweight page/zone explorer using BaseAgent's ReAct loop.
 
@@ -158,6 +222,13 @@ class ReActExplorer(BaseAgent):
         self._target_zone_selectors: list[str] | None = (
             list(target_zone_selectors) if target_zone_selectors else None
         )
+
+        # Intent-level transition accumulation
+        self._pending_steps: list[TransitionStep] = []
+        self._pending_from_state_id: str = ""
+        self._pending_from_url: str = ""
+        self._pending_from_fp: str = ""
+        self._explore_start_url: str = ""
 
         # Extra actions supported by PageController but not in BaseAgent defaults
         self._supported_actions.update(
@@ -216,6 +287,17 @@ class ReActExplorer(BaseAgent):
                 "You must finish the task or call done immediately."
             )
 
+        # Invalidate zone_filter when page has navigated away from the start URL.
+        # zone_filter selectors are bound to the original page layout; once the
+        # explorer navigates to a different page they become stale and cause the
+        # LLM to call done prematurely.
+        effective_zone_selectors = self._target_zone_selectors
+        if effective_zone_selectors and self._explore_start_url:
+            _current_clean = _extract_spa_route(current_url) or current_url.split("?")[0].split("#")[0]
+            _start_clean = _extract_spa_route(self._explore_start_url) or self._explore_start_url.split("?")[0].split("#")[0]
+            if _current_clean != _start_clean:
+                effective_zone_selectors = None
+
         return build_user_prompt(
             browser_state_text=dom_text,
             history=history,
@@ -224,7 +306,7 @@ class ReActExplorer(BaseAgent):
             max_steps=self.total_max_steps,
             page_title=page_title,
             observations=observations,
-            target_zone_selectors=self._target_zone_selectors,
+            target_zone_selectors=effective_zone_selectors,
         )
 
     # ------------------------------------------------------------------
@@ -261,6 +343,8 @@ class ReActExplorer(BaseAgent):
         if controller is None:
             return await super()._get_browser_snapshot()
         try:
+            # Keep observation path lightweight by default (aligned with page-agent):
+            # refresh once and reuse the simplified DOM directly.
             dom_text = await controller.update_tree()
         except Exception as e:
             logger.warning(
@@ -386,59 +470,129 @@ class ReActExplorer(BaseAgent):
                         else None
                     )
                     input_hint = str(params.get("input_hint") or "")
-                    # Pass None as login_info — solve_captcha_from_page will infer
-                    # image scope from the DOM directly, anchored by input_index/input_hint
-                    # rather than assuming a password-form login context.
-                    captcha_code = await solve_captcha_from_page(
-                        page, None, self.llm, input_hint=input_hint
+                    solve_mode = resolve_captcha_solve_mode()
+                    input_hint_present = bool(input_hint.strip())
+                    manual_wait_ms = 0
+                    logger.info(
+                        "[CAPTCHA_FLOW] mode=%s input_hint_present=%s input_index=%s",
+                        solve_mode,
+                        input_hint_present,
+                        input_index if input_index is not None else "none",
                     )
-                    if captcha_code and input_index is not None:
-                        input_result = await controller.input_text(
-                            input_index, captcha_code
-                        )
-                        return (
-                            f"CAPTCHA_OK filled_index={input_index} "
-                            f"code_len={len(captcha_code)} result={input_result.message}"
-                        )
-                    if captcha_code:
-                        # Fallback: locate the target input by hint or general captcha keywords
-                        hint_pattern = (
-                            re.escape(input_hint)
-                            if input_hint
-                            else r"captcha|验证码|verify.*code|auth.*code"
-                        )
-                        fill_script = """
-                        (...args) => {{
-                            const [captchaCode, hintPattern] = args;
-                            const re = new RegExp(hintPattern, 'i');
-                            const inputs = document.querySelectorAll('input');
-                            for (const inp of inputs) {{
-                                const t = inp.type || 'text';
-                                if (t === 'password') continue;
-                                const sig = ((inp.name || '') + (inp.id || '') + (inp.placeholder || '') + (inp.className || '') + (inp.getAttribute('aria-label') || '')).toLowerCase();
-                                if (re.test(sig)) {{
-                                    inp.focus();
-                                    const proto = Object.getPrototypeOf(inp);
-                                    const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
-                                    if (desc && desc.set) desc.set.call(inp, captchaCode); else inp.value = captchaCode;
-                                    inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                    inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                                    return true;
-                                }}
-                            }}
-                            return false;
-                        }}
-                        """
-                        filled = bool(
-                            await page.evaluate(fill_script, captcha_code, hint_pattern)
-                        )
-                        if filled:
-                            return (
-                                "CAPTCHA_OK filled_by_semantic_match "
-                                f"code_len={len(captcha_code)}"
+                    if solve_mode == "manual":
+                        # Manual mode: loop until user provides a valid code or gives up.
+                        # This keeps all retry logic inside solve_captcha — the ReAct
+                        # loop is never involved, so LLM cannot bypass manual entry by
+                        # using input_text directly after a failed attempt.
+                        _MAX_MANUAL_RETRIES = 5
+                        for _attempt in range(1, _MAX_MANUAL_RETRIES + 1):
+                            pause_started = time.monotonic()
+                            logger.info(
+                                "[CAPTCHA_FLOW] manual_pause_started attempt=%d/%d",
+                                _attempt,
+                                _MAX_MANUAL_RETRIES,
                             )
-                        return "CAPTCHA_FILL_FAILED target_input_not_found"
-                    return "CAPTCHA_EMPTY_CODE"
+                            captcha_code = await self._prompt_manual_captcha_code(
+                                page, input_hint
+                            )
+                            manual_wait_ms = int(
+                                (time.monotonic() - pause_started) * 1000
+                            )
+                            logger.info(
+                                "[CAPTCHA_FLOW] manual_pause_ended wait_ms=%d code_len=%d attempt=%d",
+                                manual_wait_ms,
+                                len(captcha_code),
+                                _attempt,
+                            )
+                            if not captcha_code:
+                                if _attempt < _MAX_MANUAL_RETRIES:
+                                    logger.info(
+                                        "[CAPTCHA_FLOW] manual_empty, asking again"
+                                    )
+                                    continue
+                                result_text = (
+                                    f"CAPTCHA_MANUAL_EMPTY mode={solve_mode} "
+                                    f"wait_ms={manual_wait_ms} input_hint_present={input_hint_present} "
+                                    f"attempts={_attempt}"
+                                )
+                                logger.warning(
+                                    "[CAPTCHA_FLOW] result_code=%s wait_ms=%d",
+                                    self._extract_captcha_result_code(result_text),
+                                    manual_wait_ms,
+                                )
+                                return result_text
+                            fill_result = await self._fill_captcha_code(
+                                page=page,
+                                controller=controller,
+                                captcha_code=captcha_code,
+                                input_index=input_index,
+                                input_hint=input_hint,
+                            )
+                            # Check if the captcha was accepted — if not, ask again.
+                            _ok = "CAPTCHA_OK" in fill_result.upper()
+                            if _ok or _attempt >= _MAX_MANUAL_RETRIES:
+                                result_text = (
+                                    f"{fill_result} mode={solve_mode} "
+                                    f"wait_ms={manual_wait_ms} "
+                                    f"input_hint_present={input_hint_present} "
+                                    f"attempts={_attempt}"
+                                )
+                                logger.info(
+                                    "[CAPTCHA_FLOW] result_code=%s fill_path=%s "
+                                    "wait_ms=%d mode=%s attempts=%d",
+                                    self._extract_captcha_result_code(result_text),
+                                    self._extract_captcha_fill_path(result_text),
+                                    manual_wait_ms,
+                                    solve_mode,
+                                    _attempt,
+                                )
+                                return result_text
+                            logger.info(
+                                "[CAPTCHA_FLOW] manual_fill_failed attempt=%d, "
+                                "pausing for re-entry",
+                                _attempt,
+                            )
+                            # Brief pause so the user can see the failed result
+                            await asyncio.sleep(0.3)
+                        # Should not reach here, but safety fallback
+                        return (
+                            f"CAPTCHA_MANUAL_EXHAUSTED mode={solve_mode} "
+                            f"wait_ms={manual_wait_ms}"
+                        )
+                    else:
+                        captcha_code = await solve_captcha_from_page(
+                            page, None, self.llm, input_hint=input_hint
+                        )
+                        if not captcha_code:
+                            result_text = (
+                                f"CAPTCHA_EMPTY_CODE mode={solve_mode} "
+                                f"wait_ms={manual_wait_ms} input_hint_present={input_hint_present}"
+                            )
+                            logger.warning(
+                                "[CAPTCHA_FLOW] result_code=%s wait_ms=%d",
+                                self._extract_captcha_result_code(result_text),
+                                manual_wait_ms,
+                            )
+                            return result_text
+                    fill_result = await self._fill_captcha_code(
+                        page=page,
+                        controller=controller,
+                        captcha_code=captcha_code,
+                        input_index=input_index,
+                        input_hint=input_hint,
+                    )
+                    result_text = (
+                        f"{fill_result} mode={solve_mode} wait_ms={manual_wait_ms} "
+                        f"input_hint_present={input_hint_present}"
+                    )
+                    logger.info(
+                        "[CAPTCHA_FLOW] result_code=%s fill_path=%s wait_ms=%d mode=%s",
+                        self._extract_captcha_result_code(result_text),
+                        self._extract_captcha_fill_path(result_text),
+                        manual_wait_ms,
+                        solve_mode,
+                    )
+                    return result_text
                 case _:
                     return f"Unknown action: {action_type}"
         except Exception as e:
@@ -473,62 +627,13 @@ class ReActExplorer(BaseAgent):
         if action_type != "wait":
             self._total_wait_time = 0
 
-    async def _on_state_changed(
+    def _build_transition_step(
         self,
         step: int,
-        url_before: str,
-        url_after: str,
         action_type: str,
         output: AgentOutput,
-        fp_before: str = "",
-        fp_after: str = "",
-    ) -> None:
-        """Record transition for CartographyResult when state changes."""
-        if action_type not in ("click", "input", "select_dropdown"):
-            return
-
-        try:
-            (
-                dom_text_after,
-                title_after,
-                selector_map_after,
-            ) = await self._get_browser_snapshot()
-            fp_after = self._compute_page_fingerprint(
-                dom_text_after, title_after, selector_map_after
-            )
-        except Exception:
-            return
-
-        from_state_id = _build_state_identity(
-            url_before,
-            _extract_spa_route(url_before),
-            fp_before or self._compute_dom_fingerprint(url_before),
-        )
-        to_state_id = _build_state_identity(
-            url_after,
-            _extract_spa_route(url_after),
-            fp_after or self._compute_dom_fingerprint(url_after),
-        )
-
-        from_state = State(
-            id=from_state_id,
-            url=url_before,
-            title=self._page_title or title_after,
-            spa_route=_extract_spa_route(url_before),
-            fingerprint=fp_before,
-            view_fingerprint=fp_before,
-            data_signature=_build_data_signature(url_before),
-        )
-        to_state = State(
-            id=to_state_id,
-            url=url_after,
-            fingerprint=fp_after,
-            title=f"{self._page_title or title_after} after {action_type}",
-            spa_route=_extract_spa_route(url_after),
-            view_fingerprint=fp_after,
-            data_signature=_build_data_signature(url_after),
-        )
-
+    ) -> TransitionStep:
+        """Build a TransitionStep from the current action output."""
         act_type = {
             "click": ActionType.CLICK,
             "input": ActionType.FILL,
@@ -539,6 +644,7 @@ class ReActExplorer(BaseAgent):
         selector = f"[{idx}]" if idx is not None else "[?]"
         selector_chain = [selector]
         element_snapshot_json: str | None = None
+
         if idx is not None and self._controller is not None:
             node = self._controller.selector_map.get(idx)
             if node is not None:
@@ -567,25 +673,115 @@ class ReActExplorer(BaseAgent):
                     },
                     ensure_ascii=False,
                 )
+
+        param_name = _infer_param_name_from_snapshot(element_snapshot_json)
         thought_text = output.next_goal or ""
 
-        transition = Transition(
-            id=f"t:{self._state_id or 'root'}:react-{action_type}-{step}",
+        return TransitionStep(
+            action=act_type,
             selector=selector,
             selector_chain=selector_chain,
-            semantic_action_key=f"{act_type.value}:{selector}",
-            action=act_type,
+            param_name=param_name,
+            action_value=None,
+            element_snapshot=element_snapshot_json,
             thought=thought_text,
+            step_index=step,
+            semantic_action_key=f"{act_type.value}:{selector}",
+        )
+
+    async def _flush_pending_transition(self) -> None:
+        """Commit accumulated pending steps as an intent-level Transition."""
+        if not self._pending_steps:
+            return
+
+        steps = list(self._pending_steps)
+        self._pending_steps = []
+
+        # Derive the overall action from the last step (typically click)
+        last_step = steps[-1]
+        first_step = steps[0]
+        overall_action = last_step.action
+        overall_selector = last_step.selector
+        overall_selector_chain = last_step.selector_chain
+        overall_thought = last_step.thought or first_step.thought or ""
+        overall_element_snapshot = last_step.element_snapshot
+        overall_param_name = last_step.param_name or first_step.param_name
+
+        # Compute from/to state IDs using the pending origin and current page
+        try:
+            (
+                dom_text_after,
+                title_after,
+                selector_map_after,
+            ) = await self._get_browser_snapshot()
+            fp_after = self._compute_page_fingerprint(
+                dom_text_after, title_after, selector_map_after
+            )
+        except Exception:
+            fp_after = ""
+
+        current_url = ""
+        _browser = self.browser
+        if _browser is not None:
+            try:
+                page = await _browser.get_current_page()
+                if page is not None:
+                    current_url = page.url
+            except Exception:
+                pass
+
+        from_state_id = self._pending_from_state_id
+        to_state_id = _build_state_identity(
+            current_url or self._pending_from_url,
+            _extract_spa_route(current_url or self._pending_from_url),
+            fp_after or "no-view-fp",
+        )
+
+        from_state = State(
+            id=from_state_id,
+            url=self._pending_from_url,
+            title=self._page_title or "",
+            spa_route=_extract_spa_route(self._pending_from_url),
+            fingerprint=self._pending_from_fp,
+            view_fingerprint=self._pending_from_fp,
+            data_signature=_build_data_signature(self._pending_from_url),
+        )
+        to_state = State(
+            id=to_state_id,
+            url=current_url or self._pending_from_url,
+            title=self._page_title or "",
+            spa_route=_extract_spa_route(current_url or self._pending_from_url),
+            fingerprint=fp_after,
+            view_fingerprint=fp_after,
+            data_signature=_build_data_signature(current_url or self._pending_from_url),
+        )
+
+        # Build semantic transition id: state_digest + intent_key
+        state_digest = from_state_id.replace("state:", "", 1) if from_state_id else "root"
+        semantic_suffix = f"react-{overall_action.value}-{first_step.step_index}"
+        transition_id = f"t:{state_digest}:{semantic_suffix}"
+
+        transition = Transition(
+            id=transition_id,
+            selector=overall_selector,
+            selector_chain=overall_selector_chain,
+            semantic_action_key=f"{overall_action.value}:{overall_selector}",
+            action=overall_action,
+            thought=overall_thought,
             intent=None,
             from_state_id=from_state_id,
             to_state_id=to_state_id,
-            step_index=step,
-            element_snapshot=element_snapshot_json,
+            step_index=first_step.step_index,
+            element_snapshot=overall_element_snapshot,
+            param_name=overall_param_name,
+            steps=steps,
             evidence_ids=[
-                f"evidence:{self._state_id or 'root'}:{step}:url_change",
-                f"evidence:{self._state_id or 'root'}:{step}:dom_after",
+                f"evidence:{state_digest}:{first_step.step_index}:url_change",
+                f"evidence:{state_digest}:{first_step.step_index}:dom_after",
             ],
         )
+
+        # Run semantic inference with param_name
         try:
             neighbor_steps: list[dict[str, str]] | None = None
             if self._result.history:
@@ -600,23 +796,23 @@ class ReActExplorer(BaseAgent):
                     for h in self._result.history[-3:]
                     if isinstance(h, dict)
                 ]
-            page_signals = {"title": self._page_title or title_after, "url": url_before}
+            page_signals = {"title": self._page_title or "", "url": self._pending_from_url}
             semantic = await infer_transition_semantics(
                 SemanticInferenceInput(
                     source_type="auto",
                     operator_id="agent",
-                    action=act_type,
-                    selector=selector,
-                    selector_chain_hint=selector_chain,
-                    source_url=url_before,
-                    target_url=url_after,
-                    param_name=None,
-                    thought_text=thought_text,
+                    action=overall_action,
+                    selector=overall_selector,
+                    selector_chain_hint=overall_selector_chain,
+                    source_url=self._pending_from_url,
+                    target_url=current_url or self._pending_from_url,
+                    param_name=overall_param_name,
+                    thought_text=overall_thought,
                     neighbor_steps=neighbor_steps,
                     page_signals=page_signals,
                     from_state_id=from_state_id,
                     to_state_id=to_state_id,
-                    step_index=step,
+                    step_index=first_step.step_index,
                     transition_id=transition.id,
                     existing_semantic_keys=cast(
                         "set[str]",
@@ -645,14 +841,23 @@ class ReActExplorer(BaseAgent):
             logger.debug("    → Semantic inference skipped: %s", e)
             extra_checkpoints = []
 
+        # Rewrite transition.id with intent key if available
+        if transition.intent and transition.intent.key:
+            intent_suffix = transition.intent.key
+            transition.id = f"t:{state_digest}:{intent_suffix}"
+
         cp = Checkpoint(
             id=f"cp:{transition.id}:after",
             layer=CheckpointLayer.STRUCTURAL,
             timing=CheckpointTiming.AFTER,
             expect=CheckpointExpect.SHOULD_PASS,
             severity=Severity.MAJOR,
-            rule_type="url_changed" if url_after != url_before else "dom_changed",
-            description=thought_text or f"After {action_type}, page should change",
+            rule_type=(
+                "url_changed"
+                if current_url != self._pending_from_url
+                else "dom_changed"
+            ),
+            description=overall_thought or "After intent-level transition, page should change",
         )
 
         self._result.states.extend([from_state, to_state])
@@ -671,18 +876,58 @@ class ReActExplorer(BaseAgent):
         for extra in extra_checkpoints:
             self._result.checkpoint_transition_map[extra.id] = transition.id
         self._result.semantic_conflict_count = self._semantic_conflict_count
-        logger.info("    → Transition recorded: %s", transition.id)
+        step_summary = ", ".join(f"{s.action.value}:{s.selector}" for s in steps)
 
-        if url_after != url_before:
-            try:
-                _browser = self.browser
-                if _browser is not None:
-                    page = await _browser.get_current_page()
-                    if page is not None:
-                        await page.go_back()
-            except Exception:
-                pass
-            await asyncio.sleep(0.5)
+    async def _on_state_changed(
+        self,
+        step: int,
+        url_before: str,
+        url_after: str,
+        action_type: str,
+        output: AgentOutput,
+        fp_before: str = "",
+        fp_after: str = "",
+    ) -> None:
+        """Accumulate steps and commit Transition at intent boundaries.
+
+        fill/select on the same page are accumulated into _pending_steps.
+        A click or URL/route change triggers _flush_pending_transition.
+        """
+        if action_type not in ("click", "input", "select_dropdown"):
+            return
+
+        # Compute state identity for the "from" side
+        from_state_id = _build_state_identity(
+            url_before,
+            _extract_spa_route(url_before),
+            fp_before or self._compute_dom_fingerprint(url_before),
+        )
+
+        # Initialize pending origin if this is the first step in a batch
+        if not self._pending_steps:
+            self._pending_from_state_id = from_state_id
+            self._pending_from_url = url_before
+            self._pending_from_fp = fp_before or ""
+
+        # Build the step
+        ts = self._build_transition_step(step, action_type, output)
+        self._pending_steps.append(ts)
+
+        # Decide whether to commit
+        should_commit = _should_commit_transition(url_before, url_after, action_type)
+        if should_commit:
+            await self._flush_pending_transition()
+            # Navigate back if URL changed (same as before)
+            if url_after != url_before:
+                try:
+                    _browser = self.browser
+                    if _browser is not None:
+                        page = await _browser.get_current_page()
+                        if page is not None:
+                            await page.go_back()
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
 
     # ------------------------------------------------------------------
     # Run override — return CartographyResult
@@ -715,7 +960,9 @@ class ReActExplorer(BaseAgent):
                 await bs.navigate_to(start_url)
             except Exception as e:
                 logger.warning("Failed to navigate to start_url %s: %s", start_url, e)
-            self._state_id = f"state:{start_url}"
+            self._state_id = _build_state_identity(
+                start_url, _extract_spa_route(start_url), ""
+            )
         else:
             if session is None and self._browser_session is None:
                 raise RuntimeError("ReActExplorer requires a BrowserSession")
@@ -730,6 +977,17 @@ class ReActExplorer(BaseAgent):
         self._total_wait_time = 0.0
         self._last_url = ""
         self._semantic_conflict_count = 0
+        self._pending_steps = []
+        self._pending_from_state_id = ""
+        self._pending_from_url = ""
+        self._pending_from_fp = ""
+        self._explore_start_url = ""
+        try:
+            _start_page = await bs.get_current_page()
+            if _start_page is not None:
+                self._explore_start_url = await _start_page.get_url() or ""
+        except Exception:
+            pass
 
         # Temporarily override max_steps if requested
         original_max_steps = self.max_steps
@@ -749,6 +1007,9 @@ class ReActExplorer(BaseAgent):
             # Attach history to result
             self._result.history = agent_result.history
         finally:
+            # Flush any remaining pending steps as a Transition
+            if self._pending_steps:
+                await self._flush_pending_transition()
             # Restore max_steps
             if max_steps is not None:
                 self.max_steps = original_max_steps
@@ -806,6 +1067,89 @@ class ReActExplorer(BaseAgent):
             return int(result) if result else 0
         except Exception:
             return 0
+
+    async def _prompt_manual_captcha_code(self, page, input_hint: str) -> str:
+        """Block for operator input when manual captcha mode is enabled."""
+        current_url = ""
+        try:
+            current_url = await page.get_url() or ""
+        except Exception:
+            current_url = ""
+        hint = input_hint.strip() or "<none>"
+        prompt = (
+            "\n[CAPTCHA][MANUAL] ReAct paused for manual captcha input.\n"
+            f"URL: {current_url or '<unknown>'}\n"
+            f"input_hint: {hint}\n"
+            "Please type captcha code and press Enter: "
+        )
+        try:
+            raw = await asyncio.to_thread(input, prompt)
+        except EOFError:
+            return ""
+        return normalize_manual_captcha_code(raw)
+
+    async def _fill_captcha_code(
+        self,
+        *,
+        page,
+        controller: PageController,
+        captcha_code: str,
+        input_index: int | None,
+        input_hint: str,
+    ) -> str:
+        if input_index is not None:
+            input_result = await controller.input_text(input_index, captcha_code)
+            return (
+                f"CAPTCHA_OK filled_index={input_index} "
+                f"code_len={len(captcha_code)} result={input_result.message}"
+            )
+
+        # Fallback: locate the target input by hint or general captcha keywords
+        hint_pattern = (
+            re.escape(input_hint) if input_hint else r"captcha|验证码|verify.*code|auth.*code"
+        )
+        fill_script = """
+        (...args) => {{
+            const [captchaCode, hintPattern] = args;
+            const re = new RegExp(hintPattern, 'i');
+            const inputs = document.querySelectorAll('input');
+            for (const inp of inputs) {{
+                const t = inp.type || 'text';
+                if (t === 'password') continue;
+                const sig = ((inp.name || '') + (inp.id || '') + (inp.placeholder || '') + (inp.className || '') + (inp.getAttribute('aria-label') || '')).toLowerCase();
+                if (re.test(sig)) {{
+                    inp.focus();
+                    const proto = Object.getPrototypeOf(inp);
+                    const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+                    if (desc && desc.set) desc.set.call(inp, captchaCode); else inp.value = captchaCode;
+                    inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    return true;
+                }}
+            }}
+            return false;
+        }}
+        """
+        filled = bool(await page.evaluate(fill_script, captcha_code, hint_pattern))
+        if filled:
+            return "CAPTCHA_OK filled_by_semantic_match " f"code_len={len(captcha_code)}"
+        return "CAPTCHA_FILL_FAILED target_input_not_found"
+
+    @staticmethod
+    def _extract_captcha_result_code(result_text: str) -> str:
+        match = re.search(r"(CAPTCHA_[A-Z_]+)", str(result_text or "").upper())
+        return match.group(1) if match else "CAPTCHA_UNKNOWN"
+
+    @staticmethod
+    def _extract_captcha_fill_path(result_text: str) -> str:
+        text = str(result_text or "").lower()
+        if "filled_index=" in text:
+            return "input_index"
+        if "filled_by_semantic_match" in text:
+            return "semantic_match"
+        if "fill_failed" in text:
+            return "fill_failed"
+        return "none"
 
     async def _query_knowledge(self, query_text: str, target_type: str) -> str:
         """Query historical graph knowledge to guide next exploration step."""

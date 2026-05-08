@@ -18,6 +18,7 @@ from browser_use.browser.session import BrowserSession as Browser
 
 from graph_agent.cartography import browser_lifecycle
 from graph_agent.cartography import config as cartography_config
+from graph_agent.cartography.captcha import resolve_captcha_solve_mode
 from graph_agent.cartography.manual_capture import ManualCaptureSession
 from graph_agent.cartography.mapping_pipeline import (
     rank_warm_start_candidates as orch_rank_warm_start_candidates,
@@ -30,6 +31,7 @@ from graph_agent.cartography.skip_advisor import SkipAdvisor, SkipPolicy
 from graph_agent.cartography.types import (
     EvidenceBundleItem,
 )
+from graph_agent.cartography.runtime_watchdog import RuntimeWatchdogConfig
 from graph_agent.lib.observability import initialize_laminar, observe
 from graph_agent.llm import get_llm
 from graph_agent.neo4j_client.manager import GraphManager
@@ -330,6 +332,14 @@ async def run_mapping(
         knowledge_query_timeout_ms = _resolve_knowledge_query_timeout_ms()
         knowledge_topk = _resolve_knowledge_topk()
         knowledge_release_id = _resolve_knowledge_release_id()
+        captcha_mode = resolve_captcha_solve_mode()
+        guard_cfg = RuntimeWatchdogConfig.from_env()
+        logger.info(
+            "[RUNNER] config_snapshot captcha_mode=%s guard_captcha_attempts=%d guard_captcha_failures=%d",
+            captcha_mode,
+            guard_cfg.max_captcha_attempts,
+            guard_cfg.max_captcha_failures,
+        )
         # 若没有显式设置 MAPPING_RELEASE_ID，则尝试拉取该 app 当前最新的 active release，
         # 让 KnowledgeBroker 优先走 release-first 路径（学习沉淀的最权威基线）。
         if not knowledge_release_id and app_id:

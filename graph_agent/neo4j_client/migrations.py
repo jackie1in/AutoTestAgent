@@ -69,6 +69,13 @@ class MigrationManager:
             apply=self._migration_005_add_versioning_layers,
         ))
 
+        # Migration 006: Add steps and semantic_action_key indexes for intent-level Transition
+        self.register(Migration(
+            version="006",
+            description="Add steps and semantic_action_key indexes to Transition for intent-level aggregation",
+            apply=self._migration_006_add_transition_steps_index,
+        ))
+
     def register(self, migration: Migration) -> None:
         """Register a new migration."""
         self._migrations.append(migration)
@@ -314,6 +321,16 @@ class MigrationManager:
                 "CREATE INDEX IF NOT EXISTS FOR (z:Zone) ON (z.ingest_version_id)",
             ]
             for stmt in constraints + indexes:
+                await session.run(stmt)
+
+    async def _migration_006_add_transition_steps_index(self, driver: Any) -> None:
+        """Add steps and semantic_action_key indexes to Transition for intent-level aggregation."""
+        async with driver.session() as session:
+            indexes = [
+                "CREATE INDEX IF NOT EXISTS FOR (t:Transition) ON (t.semantic_action_key)",
+                "CREATE INDEX IF NOT EXISTS FOR (t:Transition) ON (t.steps)",
+            ]
+            for stmt in indexes:
                 await session.run(stmt)
 
 

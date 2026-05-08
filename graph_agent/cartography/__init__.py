@@ -6,9 +6,15 @@ exploration using :class:`ReActExplorer` for in-page deep dives.
 to resolve natural-language intents against the discovered graph.
 """
 
-from graph_agent.cartography.runner import run_mapping
 from graph_agent.cartography.react_explorer import ReActExplorer
 from graph_agent.cartography.nl_resolver import NLResolver
+
+
+def run_mapping(*args, **kwargs):  # type: ignore[no-untyped-def]
+    """Lazy wrapper to avoid eager import of runner at package init."""
+    from graph_agent.cartography.runner import run_mapping as _run_mapping
+    return _run_mapping(*args, **kwargs)
+
 
 __all__ = [
     "run_mapping",

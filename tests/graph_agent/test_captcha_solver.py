@@ -16,6 +16,8 @@ from graph_agent.cartography.captcha import _normalize_captcha_code
 from graph_agent.cartography.captcha import _needs_arithmetic_retry
 from graph_agent.cartography.captcha import _should_keep_img_candidate
 from graph_agent.cartography.captcha import _score_captcha_img_node
+from graph_agent.cartography.captcha import normalize_manual_captcha_code
+from graph_agent.cartography.captcha import resolve_captcha_solve_mode
 
 
 def test_login_policy_mentions_captcha_handling():
@@ -187,3 +189,17 @@ def test_should_keep_img_candidate_uses_xpath_proximity_without_form():
         )
         is False
     )
+
+
+def test_resolve_captcha_solve_mode_defaults_to_auto(monkeypatch):
+    monkeypatch.delenv("CAPTCHA_SOLVE_MODE", raising=False)
+    assert resolve_captcha_solve_mode() == "auto"
+    monkeypatch.setenv("CAPTCHA_SOLVE_MODE", "MANUAL")
+    assert resolve_captcha_solve_mode() == "manual"
+    monkeypatch.setenv("CAPTCHA_SOLVE_MODE", "invalid")
+    assert resolve_captcha_solve_mode() == "auto"
+
+
+def test_normalize_manual_captcha_code_strips_noise():
+    assert normalize_manual_captcha_code("  A1 b-2  ") == "A1b2"
+    assert normalize_manual_captcha_code("`unknown`") == ""

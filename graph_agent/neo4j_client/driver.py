@@ -1,7 +1,9 @@
 from __future__ import annotations
-import os
+
 import logging
-from neo4j import AsyncGraphDatabase, AsyncDriver
+import os
+
+from neo4j import AsyncDriver, AsyncGraphDatabase
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +17,7 @@ class Neo4jDriver:
         user: str | None = None,
         password: str | None = None,
     ):
-        logging.getLogger("neo4j.notifications").setLevel(logging.Debug)
+        logging.getLogger("neo4j.notifications").setLevel(logging.DEBUG)
         self._uri: str = uri or os.getenv("NEO4J_URI", "bolt://localhost:7687")
         self._user: str = user or os.getenv("NEO4J_USER", "neo4j")
         self._password: str = password or os.getenv("NEO4J_PASSWORD", "autotestagent")

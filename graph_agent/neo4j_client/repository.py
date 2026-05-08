@@ -52,6 +52,7 @@ class GraphRepository:
     # ===== App =====
 
     async def upsert_app(self, app: App) -> None:
+        logger.info("[Neo4j] upsert App id=%s name=%s", app.id, getattr(app, "name", ""))
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_APP,
@@ -106,6 +107,7 @@ class GraphRepository:
     # ===== State =====
 
     async def upsert_state(self, state: State) -> None:
+        logger.info("[Neo4j] upsert State id=%s url=%s", state.id, getattr(state, "url", ""))
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_STATE,
@@ -137,6 +139,10 @@ class GraphRepository:
     async def upsert_transition(
         self, transition: Transition, from_state_id: str, to_state_id: str
     ) -> None:
+        logger.info(
+            "[Neo4j] upsert Transition id=%s action=%s %s→%s",
+            transition.id, getattr(transition, "action", ""), from_state_id[:24], to_state_id[:24],
+        )
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_TRANSITION,
@@ -187,6 +193,7 @@ class GraphRepository:
     # ===== Zone =====
 
     async def upsert_zone(self, zone: Zone, state_id: str | None = None) -> None:
+        logger.info("[Neo4j] upsert Zone id=%s type=%s", zone.id, getattr(zone, "zone_type", ""))
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_ZONE,
@@ -211,6 +218,7 @@ class GraphRepository:
         zones: list[dict[str, Any]],
         state_id: str | None = None,
     ) -> None:
+        logger.info("[Neo4j] upsert Zones for app=%s count=%d", app_id, len(zones))
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_ZONES_FOR_APP,
@@ -563,6 +571,7 @@ class GraphRepository:
     async def upsert_frame(
         self, frame: FrameNode, state_id: str | None = None
     ) -> None:
+        logger.info("[Neo4j] upsert Frame id=%s", frame.id)
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_FRAME,
@@ -589,6 +598,7 @@ class GraphRepository:
     # ===== Intent =====
 
     async def upsert_intent(self, intent: Intent) -> None:
+        logger.info("[Neo4j] upsert Intent id=%s key=%s", intent.id, getattr(intent, "key", ""))
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_INTENT,
@@ -664,6 +674,7 @@ class GraphRepository:
     # ===== Entity =====
 
     async def upsert_entity(self, entity: Entity) -> None:
+        logger.info("[Neo4j] upsert Entity id=%s name=%s", entity.id, getattr(entity, "name", ""))
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_ENTITY,
@@ -671,6 +682,7 @@ class GraphRepository:
             )
 
     async def upsert_entity_instance(self, instance: EntityInstance, entity_id: str) -> None:
+        logger.info("[Neo4j] upsert EntityInstance id=%s entity=%s", instance.id, entity_id)
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_ENTITY_INSTANCE,
@@ -688,6 +700,7 @@ class GraphRepository:
     # ===== Checkpoint =====
 
     async def upsert_checkpoint(self, checkpoint: Checkpoint) -> None:
+        logger.info("[Neo4j] upsert Checkpoint id=%s rule_type=%s", checkpoint.id, getattr(checkpoint, "rule_type", ""))
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_CHECKPOINT,
@@ -725,6 +738,7 @@ class GraphRepository:
     # ===== Session =====
 
     async def upsert_session(self, sess: Session) -> None:
+        logger.info("[Neo4j] upsert Session id=%s", sess.id)
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_SESSION,
@@ -746,6 +760,7 @@ class GraphRepository:
             )
 
     async def upsert_ingestion_run(self, run: IngestionRun) -> None:
+        logger.info("[Neo4j] upsert IngestionRun id=%s", run.id)
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_INGESTION_RUN,
@@ -804,6 +819,7 @@ class GraphRepository:
             )
 
     async def upsert_transition_entity(self, entity: TransitionEntity) -> None:
+        logger.info("[Neo4j] upsert TransitionEntity stable_key=%s", entity.stable_key)
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_TRANSITION_ENTITY,
@@ -821,6 +837,7 @@ class GraphRepository:
         与普通 upsert 的区别：本方法对 ``confirmed_session_count`` 做去重累加
         （同一 session 重复提交不再 +1），用于 SkipAdvisor 跨 session 学习沉淀。
         """
+        logger.info("[Neo4j] upsert TransitionEntity+session stable_key=%s session=%s", entity.stable_key, session_id)
         props = _model_to_props(entity)
         # 这些字段由 Cypher 自己负责递增/初始化，不从 props 覆盖。
         for k in (
@@ -846,6 +863,7 @@ class GraphRepository:
             )
 
     async def upsert_coverage_snapshot(self, snapshot: CoverageSnapshot) -> None:
+        logger.info("[Neo4j] upsert CoverageSnapshot id=%s", snapshot.id)
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_COVERAGE_SNAPSHOT,
@@ -896,6 +914,7 @@ class GraphRepository:
             )
 
     async def upsert_transition_revision(self, revision: TransitionRevision) -> None:
+        logger.info("[Neo4j] upsert TransitionRevision id=%s stable_key=%s", revision.revision_id, revision.stable_key)
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_TRANSITION_REVISION,
@@ -959,6 +978,7 @@ class GraphRepository:
             )
 
     async def upsert_graph_release(self, release: GraphRelease) -> None:
+        logger.info("[Neo4j] upsert GraphRelease id=%s", release.id)
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_GRAPH_RELEASE,
@@ -1018,6 +1038,7 @@ class GraphRepository:
     # ===== TestCase =====
 
     async def upsert_test_case(self, tc: TestCase) -> None:
+        logger.info("[Neo4j] upsert TestCase id=%s name=%s", tc.id, getattr(tc, "name", ""))
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_TEST_CASE,
@@ -1047,6 +1068,7 @@ class GraphRepository:
 
     # ===== Evidence =====
     async def upsert_evidence(self, evidence: Evidence) -> None:
+        logger.info("[Neo4j] upsert Evidence id=%s type=%s", evidence.id, getattr(evidence, "evidence_type", ""))
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_EVIDENCE,
@@ -1088,6 +1110,7 @@ class GraphRepository:
     # ===== FieldConstraint =====
 
     async def upsert_field_constraint(self, fc: FieldConstraint, zone_id: str | None = None) -> None:
+        logger.info("[Neo4j] upsert FieldConstraint id=%s field=%s", fc.id, getattr(fc, "field_name", ""))
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_FIELD_CONSTRAINT,
@@ -1109,6 +1132,7 @@ class GraphRepository:
     # ===== Menu Navigation (New Schema: Menu as separate node) =====
 
     async def upsert_menu(self, menu: Menu) -> None:
+        logger.info("[Neo4j] upsert Menu id=%s", menu.id)
         async with self._driver.session() as session:
             await session.run(
                 CypherQueries.UPSERT_MENU,

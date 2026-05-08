@@ -49,6 +49,10 @@ def evaluate_intervention_need(
     has_cross_origin: bool,
     has_iframe: bool,
     has_captcha: bool,
+    captcha_action_count: int = 0,
+    captcha_empty_code_count: int = 0,
+    captcha_manual_empty_count: int = 0,
+    captcha_fill_failed_count: int = 0,
     config: InterventionTriggerConfig | None = None,
 ) -> list[InterventionTask]:
     cfg = config or InterventionTriggerConfig()
@@ -61,6 +65,13 @@ def evaluate_intervention_need(
         reasons.append("semantic_conflict")
     if cfg.force_on_complex_context and has_cross_origin and has_iframe and has_captcha:
         reasons.append("complex_cross_origin_iframe_captcha")
+    if has_captcha and captcha_manual_empty_count > 0:
+        reasons.append("captcha_manual_required")
+    if has_captcha and (
+        captcha_fill_failed_count >= 2
+        or (captcha_action_count >= 3 and captcha_empty_code_count >= 2)
+    ):
+        reasons.append("captcha_looping")
     tasks: list[InterventionTask] = []
     for idx, reason in enumerate(reasons):
         task_id = f"manual-task:{session_id}:{idx}"
@@ -77,6 +88,10 @@ def evaluate_intervention_need(
                     "has_cross_origin": has_cross_origin,
                     "has_iframe": has_iframe,
                     "has_captcha": has_captcha,
+                    "captcha_action_count": captcha_action_count,
+                    "captcha_empty_code_count": captcha_empty_code_count,
+                    "captcha_manual_empty_count": captcha_manual_empty_count,
+                    "captcha_fill_failed_count": captcha_fill_failed_count,
                 },
             )
         )

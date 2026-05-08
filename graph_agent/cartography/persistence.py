@@ -50,7 +50,16 @@ def _transition_stable_key(transition: object) -> str:
     semantic = _as_str(getattr(transition, "semantic_action_key", "")).strip()
     if not semantic:
         semantic = _as_str(getattr(transition, "selector", "")).strip()
-    return f"{from_id}|{to_id}|{action}|{semantic}"
+    # Include steps digest for intent-level transitions
+    steps = getattr(transition, "steps", None)
+    steps_digest = ""
+    if steps:
+        steps_summary = "|".join(
+            f"{getattr(s, 'action', '')}:{getattr(s, 'selector', '')}"
+            for s in steps
+        )
+        steps_digest = hashlib.md5(steps_summary.encode("utf-8")).hexdigest()[:8]
+    return f"{from_id}|{to_id}|{action}|{semantic}|{steps_digest}"
 
 
 def _state_semantic_key(state: object) -> str:
@@ -837,6 +846,20 @@ async def persist_mapping_result(
                 baseline_row=baseline_row,
                 threshold=SEMANTIC_STABILITY_THRESHOLD,
             )
+            layout_metrics_payload = (
+                dict(result.layout_metrics)
+                if isinstance(result.layout_metrics, dict)
+                else {}
+            )
+            for key, default in {
+                "captcha_action_count": 0,
+                "captcha_ok_count": 0,
+                "captcha_empty_count": 0,
+                "captcha_manual_empty_count": 0,
+                "captcha_fill_failed_count": 0,
+                "captcha_manual_wait_ms_total": 0,
+            }.items():
+                layout_metrics_payload.setdefault(key, default)
 
             await manager.update_session_stats(
                 session_id=session_id,
@@ -855,11 +878,7 @@ async def persist_mapping_result(
                         getattr(result, "intervention_tasks", []) or []
                     ),
                     **_stats(),
-                    **(
-                        result.layout_metrics
-                        if isinstance(result.layout_metrics, dict)
-                        else {}
-                    ),
+                    **layout_metrics_payload,
                     **semantic_metrics,
                     **semantic_stability_metrics,
                 },

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import TYPE_CHECKING, cast
 
@@ -22,6 +23,31 @@ if TYPE_CHECKING:
     from browser_use.llm.base import BaseChatModel
 
 logger = logging.getLogger(__name__)
+
+_CAPTCHA_SOLVE_MODE_ENV = "CAPTCHA_SOLVE_MODE"
+_CAPTCHA_SOLVE_MODES = {"auto", "manual"}
+
+
+def resolve_captcha_solve_mode(raw_mode: str | None = None) -> str:
+    """Resolve captcha solve mode from env or explicit override."""
+    candidate = (
+        raw_mode
+        if raw_mode is not None
+        else os.getenv(_CAPTCHA_SOLVE_MODE_ENV, "auto")
+    )
+    normalized = str(candidate or "").strip().lower()
+    if normalized in _CAPTCHA_SOLVE_MODES:
+        return normalized
+    return "auto"
+
+
+def normalize_manual_captcha_code(raw_code: str) -> str:
+    """Normalize manual captcha input to a safe token."""
+    cleaned = str(raw_code or "").replace("`", "").strip()
+    cleaned = re.sub(r"\s+", "", cleaned)
+    if cleaned.lower() in {"", "unknown", "n/a"}:
+        return ""
+    return "".join(ch for ch in cleaned if ch.isalnum())
 
 
 class CaptchaRecognitionResult(BaseModel):
@@ -279,6 +305,7 @@ async def recognize_captcha_with_candidates(
 
         # Use structured output when supported; fall back to plain text.
         is_arithmetic = False
+        recognition_path = "structured"
         try:
             result = await llm.ainvoke(messages, output_format=CaptchaRecognitionResult)
             recognition: CaptchaRecognitionResult = result.completion  # type: ignore[assignment]
@@ -292,6 +319,7 @@ async def recognize_captcha_with_candidates(
             logger.warning(
                 f"[CAPTCHA] Structured output failed ({structured_err}), falling back to plain text."
             )
+            recognition_path = "plain_fallback"
             result_plain = await llm.ainvoke(messages)
             raw_code = str(result_plain.completion or "")
             logger.info("[CAPTCHA] Plain-text result: %r", raw_code)
@@ -300,6 +328,11 @@ async def recognize_captcha_with_candidates(
         # If the model returned an expression with '=?' but no operator yet
         # (e.g. plain-text fallback returned "9?"), retry with an arithmetic prompt.
         if _needs_arithmetic_retry(raw_code):
+            recognition_path = (
+                "structured+arith_retry"
+                if recognition_path == "structured"
+                else "plain_fallback+arith_retry"
+            )
             arith_text = (
                 "You are reading an arithmetic CAPTCHA. "
                 "Return the mathematical expression exactly as shown, "
@@ -327,6 +360,12 @@ async def recognize_captcha_with_candidates(
             if retry_normalized:
                 normalized_code = retry_normalized
 
+        logger.info(
+            "[CAPTCHA] recognition_path=%s candidate_count=%d normalized_code_len=%d",
+            recognition_path,
+            len(normalized_urls),
+            len(normalized_code),
+        )
         return normalized_code
     except Exception as e:
         logger.warning("[CAPTCHA] LLM recognition failed: %s", e)
@@ -373,8 +412,10 @@ async def solve_captcha_from_page(
 
     image_data_urls: list[str] = []
     has_scope_hints = False  # True once we have form/input anchor xpaths
+    strategy_hit = "none"
 
-    def _add_candidate(data_url: str | None) -> None:
+    def _add_candidate(data_url: str | None, *, source: str = "") -> None:
+        nonlocal strategy_hit
         if not isinstance(data_url, str):
             return
         candidate = data_url.strip()
@@ -382,6 +423,8 @@ async def solve_captcha_from_page(
             return
         if candidate not in image_data_urls:
             image_data_urls.append(candidate)
+            if strategy_hit == "none" and source:
+                strategy_hit = source
 
     # Strategy 0: use browser-use indexed DOM (selector_map) to locate captcha image first.
     try:
@@ -494,9 +537,12 @@ async def solve_captcha_from_page(
                 if extracted.success and extracted.message:
                     message = extracted.message
                     if isinstance(message, str) and message.startswith("data:image"):
-                        _add_candidate(message)
+                        _add_candidate(message, source="strategy0_selector_map")
                     else:
-                        _add_candidate(f"data:image/png;base64,{message}")
+                        _add_candidate(
+                            f"data:image/png;base64,{message}",
+                            source="strategy0_selector_map",
+                        )
     except Exception as e:
         logger.warning("[CAPTCHA] Strategy 0 (browser-use selector_map) failed: %s", e)
 
@@ -505,7 +551,7 @@ async def solve_captcha_from_page(
             f"[CAPTCHA] Strategy 1: captcha is <img>. src={captcha_src if captcha_src else 'empty'}"
         )
         if captcha_src.startswith("data:image"):
-            _add_candidate(captcha_src)
+            _add_candidate(captcha_src, source="strategy1_img_src")
         elif captcha_src:
             try:
                 fetch_script = f"""
@@ -518,7 +564,9 @@ async def solve_captcha_from_page(
                     }}))
                     .catch(() => null)
                 """
-                _add_candidate(await page.evaluate(fetch_script))
+                _add_candidate(
+                    await page.evaluate(fetch_script), source="strategy1_img_fetch"
+                )
             except Exception as e:
                 logger.warning("[CAPTCHA] Strategy 1 failed: %s", e)
 
@@ -531,7 +579,9 @@ async def solve_captcha_from_page(
                 return null;
             }}
             """
-            _add_candidate(await page.evaluate(canvas_script))
+            _add_candidate(
+                await page.evaluate(canvas_script), source="strategy2_canvas"
+            )
         except Exception as e:
             logger.warning("[CAPTCHA] Strategy 2 failed: %s", e)
 
@@ -575,7 +625,10 @@ async def solve_captcha_from_page(
             urls_raw = await page.evaluate(candidates_script)
             if isinstance(urls_raw, list):
                 for item in urls_raw:
-                    _add_candidate(item if isinstance(item, str) else None)
+                    _add_candidate(
+                        item if isinstance(item, str) else None,
+                        source="candidate_collection",
+                    )
         except Exception as e:
             logger.warning("[CAPTCHA] Candidate collection failed: %s", e)
 
@@ -680,7 +733,10 @@ async def solve_captcha_from_page(
                     )
                     data = result.get("data", "")
                     if data:
-                        _add_candidate(f"data:image/png;base64,{data}")
+                        _add_candidate(
+                            f"data:image/png;base64,{data}",
+                            source="strategy3_clip_screenshot",
+                        )
         except Exception as e:
             logger.warning("[CAPTCHA] Strategy 3 failed: %s", e)
 
@@ -695,7 +751,10 @@ async def solve_captcha_from_page(
                 )
                 data = result.get("data", "")
                 if data:
-                    _add_candidate(f"data:image/png;base64,{data}")
+                    _add_candidate(
+                        f"data:image/png;base64,{data}",
+                        source="strategy4_full_screenshot",
+                    )
         except Exception as e:
             logger.warning("[CAPTCHA] Strategy 4 failed: %s", e)
 
@@ -706,7 +765,9 @@ async def solve_captcha_from_page(
         return ""
 
     logger.info(
-        "[CAPTCHA] Sending %d candidate image(s) to recognizer.", len(image_data_urls)
+        "[CAPTCHA] Sending %d candidate image(s) to recognizer. strategy_hit=%s",
+        len(image_data_urls),
+        strategy_hit,
     )
     for idx, data_url in enumerate(image_data_urls, start=1):
         logger.debug("[CAPTCHA] Candidate #%d data_url=%s", idx, data_url)
