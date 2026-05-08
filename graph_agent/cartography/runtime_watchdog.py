@@ -27,7 +27,7 @@ class GuardDecision:
 
 
 @dataclass
-class RuntimeGuardConfig:
+class RuntimeWatchdogConfig:
     enabled: bool = True
     max_captcha_attempts: int = 3
     max_captcha_failures: int = 2
@@ -39,7 +39,7 @@ class RuntimeGuardConfig:
     network_window_seconds: float = 15.0
 
     @classmethod
-    def from_env(cls) -> "RuntimeGuardConfig":
+    def from_env(cls) -> "RuntimeWatchdogConfig":
         def _int(name: str, default: int) -> int:
             raw = (os.getenv(name) or "").strip()
             if not raw:
@@ -78,12 +78,12 @@ class RuntimeGuardConfig:
         )
 
 
-class RuntimeGuard:
+class RuntimeWatchdog:
     """Detect terminal or unhealthy runtime states during cartography exploration.
 
-    The guard is intentionally generic: it is not a login guard. It watches page
-    text, action results, blank DOM observations, and network events to decide
-    whether the agent should stop before polluting the graph with failure states.
+    The watchdog is intentionally generic: it is not a login watchdog. It watches
+    page text, action results, blank DOM observations, and network events to
+    decide whether the agent should stop before polluting the graph.
     """
 
     _terminal_text_patterns: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -143,8 +143,8 @@ class RuntimeGuard:
         re.I,
     )
 
-    def __init__(self, config: RuntimeGuardConfig | None = None) -> None:
-        self.config = config or RuntimeGuardConfig.from_env()
+    def __init__(self, config: RuntimeWatchdogConfig | None = None) -> None:
+        self.config = config or RuntimeWatchdogConfig.from_env()
         self.blank_dom_count = 0
         self.captcha_attempts = 0
         self.captcha_failures = 0
@@ -294,10 +294,16 @@ class RuntimeGuard:
         return GuardDecision()
 
 
-def guard_history_entry(step: object, decision: GuardDecision) -> dict[str, object]:
+def watchdog_history_entry(step: object, decision: GuardDecision) -> dict[str, object]:
     return {
         "step": step,
-        "action": "runtime_guard",
+        "action": "runtime_watchdog",
         "result": f"{decision.code}: {decision.reason}",
         "evidence": decision.evidence,
     }
+
+
+# Backward-compatible aliases (old guard naming).
+RuntimeGuardConfig = RuntimeWatchdogConfig
+RuntimeGuard = RuntimeWatchdog
+guard_history_entry = watchdog_history_entry

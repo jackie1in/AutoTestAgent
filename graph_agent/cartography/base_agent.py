@@ -27,7 +27,10 @@ from browser_use.tools.service import Tools
 from pydantic import create_model
 
 from graph_agent.cartography.react_schema import AgentOutput
-from graph_agent.cartography.runtime_guard import RuntimeGuard, guard_history_entry
+from graph_agent.cartography.runtime_watchdog import (
+    RuntimeWatchdog,
+    watchdog_history_entry,
+)
 from graph_agent.llm.utils import ainvoke_structured
 
 logger = logging.getLogger(__name__)
@@ -108,7 +111,7 @@ class BaseAgent:
         # Page load tracking
         self._page_load_issue_note: str | None = None
         self._request_failure_log: list[dict[str, object]] = []
-        self.runtime_guard = RuntimeGuard()
+        self.runtime_watchdog = RuntimeWatchdog()
         self._use_vision = self._resolve_use_vision_mode(use_vision)
         self._vision_detail_level = self._resolve_vision_detail_level(
             vision_detail_level
@@ -389,7 +392,7 @@ Remaining steps: {remaining}
 
             # Detect page load failure / terminal runtime states.
             dom_len = len(dom_text or "")
-            observation_decision = self.runtime_guard.inspect_observation(
+            observation_decision = self.runtime_watchdog.inspect_observation(
                 dom_text=dom_text,
                 url=current_url,
                 dom_len=dom_len,
@@ -400,7 +403,7 @@ Remaining steps: {remaining}
                     observation_decision.code,
                     observation_decision.reason,
                 )
-                history.append(guard_history_entry(step, observation_decision))
+                history.append(watchdog_history_entry(step, observation_decision))
                 break
 
             if dom_len < 50:
@@ -496,7 +499,7 @@ Remaining steps: {remaining}
                 self._make_history_entry(step, action_type, result_text, output)
             )
 
-            action_decision = self.runtime_guard.record_action_result(
+            action_decision = self.runtime_watchdog.record_action_result(
                 action_type=action_type,
                 result_text=result_text,
             )
@@ -506,7 +509,7 @@ Remaining steps: {remaining}
                     action_decision.code,
                     action_decision.reason,
                 )
-                history.append(guard_history_entry(step, action_decision))
+                history.append(watchdog_history_entry(step, action_decision))
                 break
 
             if self.step_callback:
@@ -537,14 +540,14 @@ Remaining steps: {remaining}
 
             if page:
                 stable_result = await self._wait_for_page_stable(page)  # type: ignore[arg-type]
-                network_decision = self.runtime_guard.inspect_network()
+                network_decision = self.runtime_watchdog.inspect_network()
                 if network_decision.should_stop:
                     logger.warning(
                         "[RUNTIME_GUARD] stop code=%s reason=%s",
                         network_decision.code,
                         network_decision.reason,
                     )
-                    history.append(guard_history_entry(step, network_decision))
+                    history.append(watchdog_history_entry(step, network_decision))
                     break
                 if stable_result.get("has_cors_failures"):
                     failed_requests = stable_result.get("failed_requests", [])
@@ -652,7 +655,7 @@ Remaining steps: {remaining}
                     "is_cors": is_cors,
                 }
                 self._request_failure_log.append(event)
-                self.runtime_guard.record_network_event(event)
+                self.runtime_watchdog.record_network_event(event)
 
             def _on_response(response: "Response") -> None:
                 try:
@@ -668,7 +671,7 @@ Remaining steps: {remaining}
                         if request
                         else "GET",
                     }
-                    self.runtime_guard.record_network_event(event)
+                    self.runtime_watchdog.record_network_event(event)
                 except Exception:
                     return
 

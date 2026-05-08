@@ -173,11 +173,16 @@ async def recognize_captcha_with_fallback(
 def _normalize_captcha_code(raw_code: str, is_arithmetic: bool = False) -> str:
     cleaned = raw_code.replace("```", "").replace("`", "").strip()
     if cleaned.lower() in ("unknown", "", "n/a"):
+        logger.warning(f"[CAPTCHA] Normalize captcha code failed: {raw_code}")
         return ""
-    # Only attempt arithmetic evaluation when the LLM explicitly flagged the
-    # captcha as arithmetic.  Without this guard a plain 4-digit code like
-    # "8374" could be misread as "8+374" or similar and produce a wrong answer.
-    if is_arithmetic:
+    has_explicit_arithmetic_shape = bool(
+        re.search(r"[+\-*/×xX÷]", cleaned)
+        and ("=" in cleaned or "?" in cleaned or "？" in cleaned)
+    )
+    # Prefer LLM flag, but still evaluate when expression shape is explicit.
+    # This keeps plain 4-digit codes safe while handling direct helper calls
+    # like `_normalize_captcha_code("9+8=?")` in tests.
+    if is_arithmetic or has_explicit_arithmetic_shape:
         expr = (
             cleaned.replace(" ", "")
             .replace("×", "*")

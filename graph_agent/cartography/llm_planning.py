@@ -11,6 +11,64 @@ from graph_agent.llm.utils import ainvoke_structured
 
 logger = logging.getLogger(__name__)
 
+STANDARD_PAGE_TYPES: tuple[str, ...] = (
+    "login",
+    "dashboard",
+    "list",
+    "detail",
+    "form",
+    "settings",
+    "welcome",
+    "unknown",
+)
+
+PAGE_TYPE_ALIASES: dict[str, str] = {
+    "signin": "login",
+    "sign-in": "login",
+    "sign in": "login",
+    "auth": "login",
+    "authentication": "login",
+    "home": "welcome",
+    "landing": "welcome",
+}
+
+LLM_ZONE_TYPE_ALIASES: dict[str, str] = {
+    "form": "form",
+    "table": "table",
+    "nav": "nav",
+    "action_bar": "action_bar",
+    "action-bar": "action_bar",
+    "filter": "filter",
+    "filter_panel": "filter",
+    "filter-panel": "filter",
+    "modal": "modal",
+    "card": "card",
+    "tabs": "tabs",
+    "tab_panel": "tabs",
+    "tab-panel": "tabs",
+    "pagination": "pagination",
+    "chart": "chart",
+    "list": "list",
+    "steps": "steps",
+    "content": "content",
+}
+
+
+def normalize_page_type(raw: str) -> str:
+    normalized = (raw or "").strip().lower()
+    if not normalized:
+        return "unknown"
+    if normalized in STANDARD_PAGE_TYPES:
+        return normalized
+    return PAGE_TYPE_ALIASES.get(normalized, "unknown")
+
+
+def normalize_llm_zone_type(raw: str) -> str:
+    normalized = (raw or "").strip().lower()
+    if not normalized:
+        return ""
+    return LLM_ZONE_TYPE_ALIASES.get(normalized, normalized)
+
 
 class LLMMenuItem(BaseModel):
     text: str = Field(description="Menu item display text")
@@ -28,7 +86,10 @@ class LLMFunctionalZone(BaseModel):
 
 class LLMPageAnalysis(BaseModel):
     page_type: str = Field(
-        description="Page type: login, dashboard, list, detail, form, settings, welcome, unknown"
+        description=(
+            "Page type: login, dashboard, list, detail, form, settings, welcome, unknown. "
+            "Use these canonical labels; synonyms will be normalized."
+        )
     )
     menu_items: list[LLMMenuItem] = Field(default_factory=list)
     functional_zones: list[LLMFunctionalZone] = Field(default_factory=list)

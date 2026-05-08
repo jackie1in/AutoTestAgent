@@ -59,6 +59,8 @@ from graph_agent.cartography.llm_planning import (
     analyze_page_with_llm,
     build_exploration_guidance,
     build_login_hint_from_env,
+    normalize_llm_zone_type,
+    normalize_page_type,
     plan_next_exploration_with_llm,
 )
 from graph_agent.cartography.types import (
@@ -259,17 +261,15 @@ def rank_warm_start_candidates(
 def map_llm_zone_type(zone_type: str) -> "ZoneType | None":
     from graph_agent.models import ZoneType
 
+    normalized = normalize_llm_zone_type(zone_type)
     mapping: dict[str, "ZoneType"] = {
         "form": ZoneType.DETAIL_FORM,
         "table": ZoneType.DATA_TABLE,
         "nav": ZoneType.TREE_PANEL,
-        "action-bar": ZoneType.ACTION_BAR,
         "action_bar": ZoneType.ACTION_BAR,
-        "filter-panel": ZoneType.SEARCH_FORM,
-        "filter_panel": ZoneType.SEARCH_FORM,
+        "filter": ZoneType.SEARCH_FORM,
         "modal": ZoneType.MODAL,
         "tabs": ZoneType.TAB_PANEL,
-        "tab_panel": ZoneType.TAB_PANEL,
         "pagination": ZoneType.DATA_TABLE,
         "card": ZoneType.DETAIL_FORM,
         "list": ZoneType.DATA_TABLE,
@@ -277,7 +277,7 @@ def map_llm_zone_type(zone_type: str) -> "ZoneType | None":
         "steps": ZoneType.TAB_PANEL,
         "content": ZoneType.DETAIL_FORM,
     }
-    return mapping.get(zone_type.lower().strip())
+    return mapping.get(normalized)
 
 
 def _build_runtime_zone_id(
@@ -1144,6 +1144,7 @@ async def run_orchestrated_mapping(
             page_title,
             layout_summary=layout_summary,
         )
+        page_analysis.page_type = normalize_page_type(page_analysis.page_type)
         logger.info(
             f"[PIPELINE] LLM analysis: page_type={page_analysis.page_type}, "
             f"menus={len(page_analysis.menu_items)}, zones={len(page_analysis.functional_zones)}"

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from graph_agent.cartography.llm_planning import (
+    LLM_ZONE_TYPE_ALIASES,
     PAGE_TYPE_ACTION_POLICY,
+    PAGE_TYPE_ALIASES,
     LLMFunctionalZone,
     LLMPageAnalysis,
     build_exploration_guidance,
     build_login_hint_from_env,
+    normalize_llm_zone_type,
+    normalize_page_type,
 )
+from graph_agent.cartography.mapping_pipeline import map_llm_zone_type
 from graph_agent.cartography.captcha import _normalize_captcha_code
 from graph_agent.cartography.captcha import _needs_arithmetic_retry
 from graph_agent.cartography.captcha import _should_keep_img_candidate
@@ -44,6 +49,27 @@ def test_login_guidance_skips_zone_order_when_disabled():
     )
     assert "ACTION POLICY: Login page" in guidance
     assert "ZONE ORDER" not in guidance
+
+
+def test_normalize_page_type_handles_alias_and_unknown():
+    assert normalize_page_type("Sign-In") == "login"
+    assert normalize_page_type("HOME") == "welcome"
+    assert normalize_page_type("mystery_page") == "unknown"
+    assert PAGE_TYPE_ALIASES["signin"] == "login"
+
+
+def test_zone_type_filter_aliases_are_consistent():
+    assert normalize_llm_zone_type("filter") == "filter"
+    assert normalize_llm_zone_type("filter-panel") == "filter"
+    assert normalize_llm_zone_type("filter_panel") == "filter"
+    assert map_llm_zone_type("filter") is not None
+    assert map_llm_zone_type("filter-panel") == map_llm_zone_type("filter")
+    assert map_llm_zone_type("filter_panel") == map_llm_zone_type("filter")
+    assert "filter" in LLM_ZONE_TYPE_ALIASES
+
+
+def test_map_llm_zone_type_unknown_returns_none():
+    assert map_llm_zone_type("totally_new_zone") is None
 
 
 def test_normalize_captcha_code_solves_arithmetic_expression():
