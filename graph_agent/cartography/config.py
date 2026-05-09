@@ -279,3 +279,12 @@ def resolve_pipeline_checkpoint_path() -> str:
 
 def resolve_pipeline_resume_from_checkpoint() -> bool:
     return env_bool("CARTOGRAPHY_PIPELINE_RESUME_CHECKPOINT", False)
+
+
+def resolve_incremental_persist_enabled() -> bool:
+    return env_bool("INCREMENTAL_PERSIST_ENABLED", False)
+
+
+def resolve_extra_system_prompt() -> str:
+    """User-provided extra system prompt injected into ReAct explorer."""
+    return (os.getenv("CARTOGRAPHY_EXTRA_SYSTEM_PROMPT") or "").strip()

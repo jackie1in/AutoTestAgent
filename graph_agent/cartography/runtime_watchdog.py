@@ -111,21 +111,28 @@ class RuntimeWatchdog:
         (
             "unauthorized",
             re.compile(
-                r"无权限|未授权|没有权限|登录已过期|会话已过期|unauthorized|forbidden|access denied|permission denied|\b401\b|\b403\b",
+                r"无权限|未授权|没有权限|登录已过期|会话已过期|unauthorized|forbidden|access denied|permission denied|"
+                r"(?:http|status|response|error|code)[:\s]*401\b|"
+                r"(?:http|status|response|error|code)[:\s]*403\b",
                 re.I,
             ),
         ),
         (
             "service_unavailable",
             re.compile(
-                r"服务不可用|系统繁忙|服务器错误|内部服务器错误|网关错误|维护中|请求超时|service unavailable|bad gateway|gateway timeout|internal server error|temporarily unavailable|maintenance|\b500\b|\b502\b|\b503\b|\b504\b",
+                r"服务不可用|系统繁忙|服务器错误|内部服务器错误|网关错误|维护中|请求超时|service unavailable|bad gateway|gateway timeout|internal server error|temporarily unavailable|maintenance|"
+                r"(?:http|status|response|error|code)[:\s]*500\b|"
+                r"(?:http|status|response|error|code)[:\s]*502\b|"
+                r"(?:http|status|response|error|code)[:\s]*503\b|"
+                r"(?:http|status|response|error|code)[:\s]*504\b",
                 re.I,
             ),
         ),
         (
             "rate_limited",
             re.compile(
-                r"操作频繁|请求过于频繁|请稍后再试|访问受限|too many requests|rate limit|\b429\b",
+                r"操作频繁|请求过于频繁|请稍后再试|访问受限|too many requests|rate limit|"
+                r"(?:http|status|response|error|code)[:\s]*429\b",
                 re.I,
             ),
         ),

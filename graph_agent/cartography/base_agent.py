@@ -179,14 +179,21 @@ class BaseAgent:
 
         Subclasses override this to add domain-specific instructions.
         """
-        action_descriptions = []
+        # Generate action descriptions from browser-use registry, filtered
+        # by _supported_actions.
+        registry = self.tools.registry
+        action_lines: list[str] = []
         for name in sorted(self._supported_actions):
-            if name not in self.tools.registry.registry.actions:
+            if name not in registry.registry.actions:
                 continue
-            action = self.tools.registry.registry.actions[name]
-            action_descriptions.append(f"- {name}: {action.description}")
+            action = registry.registry.actions[name]
+            action_lines.append(f"- {name}: {action.description}")
 
-        actions_text = "\n".join(action_descriptions)
+        actions_text = (
+            "\n".join(action_lines)
+            if action_lines
+            else registry.get_prompt_description(page_url=None)
+        )
 
         from graph_agent.llm.utils import get_format_instructions
 

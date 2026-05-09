@@ -5,34 +5,124 @@ Aligned with page-agent's prompt architecture:
 - User prompt with <agent_state>, <agent_history>, <browser_state>, observations
 """
 
+from __future__ import annotations
 
-def build_system_prompt(max_steps: int, registry=None) -> str:
+from browser_use.tools.registry.service import Registry
+
+
+def build_system_prompt(
+    max_steps: int,
+    registry: "Registry | None" = None,
+    supported_actions: set[str] | frozenset[str] | None = None,
+) -> str:
     """Build system prompt with dynamically generated tool descriptions.
-    
+
     Args:
         max_steps: Maximum exploration steps
-        registry: Optional ToolRegistry. Uses global registry if not provided.
-        
+        registry: Browser-use Registry instance. Uses default Tools registry if None.
+        supported_actions: Optional whitelist of action names to include in the prompt.
+            If None, all registered actions are shown.
+
     Returns:
         Formatted system prompt string
     """
-    from graph_agent.lib.tool_registry import get_registry
-    
-    # Ensure tools are imported
-    try:
-        from graph_agent import tools  # noqa: F401
-    except ImportError:
-        pass
-    
-    if registry is None:
-        registry = get_registry()
-    
-    available_actions = registry.format_for_prompt()
-    
+    # Build available actions text from browser-use registry
+    description_lines = _build_action_descriptions(registry, supported_actions)
+
     return CARTOGRAPHY_SYSTEM_PROMPT_TEMPLATE.format(
         max_steps=max_steps,
-        available_actions=available_actions,
+        available_actions=description_lines,
     )
+
+
+def _build_action_descriptions(
+    registry: "Registry | None" = None,
+    supported_actions: set[str] | frozenset[str] | None = None,
+) -> str:
+    """Build action descriptions from browser-use registry."""
+    if registry is not None:
+        # Use browser-use Registry.get_prompt_description()
+        base_description = registry.get_prompt_description(page_url=None)
+        if supported_actions is not None:
+            # Filter to only supported actions
+            filtered = []
+            for line in base_description.split("\n"):
+                if not line.strip():
+                    continue
+                action_name = line.split(":")[0].strip()
+                if action_name in supported_actions:
+                    filtered.append(line)
+            # Add project-specific actions not in browser-use
+            for name in sorted(supported_actions):
+                if _is_custom_action(name):
+                    filtered.append(_custom_action_description(name))
+            return "\n".join(filtered) if filtered else _fallback_descriptions()
+        return base_description if base_description.strip() else _fallback_descriptions()
+    return _fallback_descriptions()
+
+
+def _is_custom_action(name: str) -> bool:
+    """Check if an action name is project-specific (not in browser-use)."""
+    return name in {
+        "scroll_horizontally",
+        "close_overlay",
+        "query_knowledge",
+        "discover_zones",
+        "extract_menu",
+        "solve_captcha",
+    }
+
+
+def _custom_action_description(name: str) -> str:
+    """Generate prompt description for project-specific actions."""
+    descriptions = {
+        "scroll_horizontally": (
+            "scroll_horizontally: Scroll horizontally (e.g. wide tables, carousels). "
+            "(direction: string = right, amount: integer = 300, index: integer?)"
+        ),
+        "close_overlay": (
+            "close_overlay: Close any visible overlay (modal, drawer, dialog) "
+            "by clicking its close button or pressing Escape. (none)"
+        ),
+        "query_knowledge": (
+            "query_knowledge: Query previously explored knowledge via vector search. "
+            "(query_text: string, target_type: string = all)"
+        ),
+        "discover_zones": (
+            "discover_zones: Discover functional zones on the current page. (none)"
+        ),
+        "extract_menu": (
+            "extract_menu: Extract navigation menu from the current page. (none)"
+        ),
+        "solve_captcha": (
+            "solve_captcha: Detect and solve image-based captcha on the current page "
+            "using LLM vision. (input_index: integer?, input_hint: string?)"
+        ),
+    }
+    return descriptions.get(name, f"{name}: Custom action")
+
+
+def _fallback_descriptions() -> str:
+    """Fallback when no registry is available."""
+    return """Available actions (set action_type to the name):
+- click: Click element by index (index: integer)
+- input: Click and type text into an input element (index: integer, text: string)
+- select_dropdown: Select dropdown option by index and text (index: integer, text: string)
+- scroll: Scroll vertically (down: boolean = true, pages: float = 1.0, index: integer?)
+- scroll_horizontally: Scroll horizontally (direction: string = right, amount: integer = 300, index: integer?)
+- send_keys: Send keyboard keys/shortcuts like Alt+Z, Escape (keys: string)
+- evaluate: Execute JavaScript on the page (code: string)
+- dropdown_options: Get all options from a dropdown (index: integer)
+- find_elements: Query DOM elements by CSS selector (selector: string, attributes: string[]?, max_results: integer = 50)
+- search_page: Search page text for a pattern (pattern: string, regex: boolean = false)
+- wait: Wait for x seconds (seconds: integer = 1)
+- go_back: Navigate back to previous page (none)
+- close_overlay: Close overlays/modal/drawer (none)
+- query_knowledge: Query historical knowledge (query_text: string, target_type: string = all)
+- discover_zones: Discover page functional zones (none)
+- extract_menu: Extract navigation menu (none)
+- solve_captcha: Detect and solve image captcha (input_index: integer?, input_hint: string?)
+- done: Complete exploration task (text: string, success: boolean = true)"""
 
 
 # Template with placeholders
@@ -68,7 +158,7 @@ Each step you receive:
 <rules>
 - Only interact with elements that have a numeric [index].
 - After clicking something, observe the result. If a drawer/modal/overlay \
-  appeared, close it (click its close button or press Escape) before moving on.
+  appeared, close it (click its close button, press Escape, or use send_keys) before moving on.
 - If a click opens a new page (URL changed), go back to the original page.
 - Skip elements that only reload data (e.g. "刷新", "导出", "重置").
 - If you see a loading spinner, wait 2-3 seconds; if it persists, skip.
@@ -77,6 +167,10 @@ Each step you receive:
 - Try filling at least one text field per form to observe validation behavior.
 - If the page has horizontally scrollable containers (tables, carousels), \
   use scroll_horizontally to reveal hidden columns/items.
+- Use send_keys to trigger keyboard shortcuts (e.g. Alt+Z, Ctrl+S) if menus \
+  or features are hidden behind icons or hotkeys.
+- Use evaluate to run JavaScript for hover, drag, zoom, or analyzing page structure.
+- Use dropdown_options before select_dropdown to inspect available options.
 - If you've explored all visible elements and no new ones appear after \
   scrolling, call `done`.
 - Maximum exploration per page: {max_steps} steps.
@@ -176,33 +270,3 @@ def build_user_prompt(
 def _current_time() -> str:
     from datetime import datetime
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-# Backward compatibility: static prompt with default tool descriptions
-# Use build_system_prompt() for dynamic tool registration
-default_registry = None
-try:
-    from graph_agent.lib.tool_registry import get_registry
-    default_registry = get_registry()
-    try:
-        from graph_agent import tools  # noqa: F401
-    except ImportError:
-        pass
-    _default_actions = default_registry.format_for_prompt()
-except Exception:
-    _default_actions = """Available actions (set action_type to the name):
-- click_element_by_index: click an element (index: integer)
-- input_text: type text into an element (index: integer, text: string)
-- select_dropdown_option: select a dropdown option (index: integer, option_text: string)
-- scroll: scroll vertically (direction: string = down, amount: integer = 500, index: any)
-- scroll_horizontally: scroll horizontally (direction: string = right, amount: integer = 300, index: any)
-- execute_javascript: run JS on the page (script: string)
-- wait: wait for page load (seconds: integer = 1)
-- go_back: navigate back
-- close_overlay: close modal/drawer/dialog
-- done: finish exploration (text: string, success: boolean = True)"""
-
-CARTOGRAPHY_SYSTEM_PROMPT = CARTOGRAPHY_SYSTEM_PROMPT_TEMPLATE.format(
-    max_steps="{max_steps}",
-    available_actions=_default_actions,
-)

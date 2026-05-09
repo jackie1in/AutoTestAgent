@@ -5,4 +5,4 @@
 # the module, not a FastAPI instance attribute on the parent package.
 from graph_agent.web.app import app as _fastapi_app
 
-__all__ = []
+__all__ = ["_fastapi_app"]

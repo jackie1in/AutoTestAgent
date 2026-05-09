@@ -16,8 +16,6 @@ load_dotenv()
 if TYPE_CHECKING:
     from browser_use.llm.base import BaseChatModel
 
-    from graph_agent.llm.zhipu.chat import ChatZhiPu
-
 
 def _track_llm(llm: "BaseChatModel") -> "BaseChatModel":
     """Monkey-patch llm.ainvoke to record token usage globally.

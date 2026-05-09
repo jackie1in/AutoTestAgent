@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from graph_agent.cartography.react_explorer import (
     _build_state_identity,

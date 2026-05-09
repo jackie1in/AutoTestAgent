@@ -10,7 +10,6 @@ supports synchronous neo4j.Driver while this codebase uses AsyncDriver.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Protocol, TypedDict
 
@@ -127,7 +126,7 @@ class NLResolver:
         try:
             async with self._driver.session() as session:
                 result = await session.run(
-                    f"""
+                    """
                     CALL db.index.vector.queryNodes($index_name, $top_k, $vector)
                     YIELD node, score
                     RETURN node.id AS intent_id,
