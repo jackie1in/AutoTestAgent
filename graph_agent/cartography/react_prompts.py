@@ -92,7 +92,9 @@ def _custom_action_description(name: str) -> str:
             "discover_zones: Discover functional zones on the current page. (none)"
         ),
         "extract_menu": (
-            "extract_menu: Extract navigation menu from the current page. (none)"
+            "extract_menu: Extract navigation menu structure. Call AFTER opening"
+            " the menu (e.g. send_keys('Alt+Z')). Returns JSON with items,"
+            " each having text/href/level/children. Empty items if menu not found. (none)"
         ),
         "solve_captcha": (
             "solve_captcha: Detect and solve image-based captcha on the current page "
@@ -120,7 +122,7 @@ def _fallback_descriptions() -> str:
 - close_overlay: Close overlays/modal/drawer (none)
 - query_knowledge: Query historical knowledge (query_text: string, target_type: string = all)
 - discover_zones: Discover page functional zones (none)
-- extract_menu: Extract navigation menu (none)
+- extract_menu: Extract navigation menu structure — call AFTER opening menu (none)
 - solve_captcha: Detect and solve image captcha (input_index: integer?, input_hint: string?)
 - done: Complete exploration task (text: string, success: boolean = true)"""
 
@@ -133,14 +135,10 @@ complete map (graph) of its pages, interactive elements, and transitions.
 You operate in an iterative **observe → think → act** loop.
 
 <goals>
-1. Discover every interactive element on the current page (buttons, links, \
-   form fields, tabs, dropdowns, menus).
-2. Click/interact with each element and record what changes (URL, DOM, \
-   overlays, new content).
-3. After interacting, return to the original state so you can test the next \
-   element.
-4. Report all discovered transitions when you've exhausted the page's \
-   interactive surface.
+1. Explore the current page: discover interactive elements, click them, observe changes.
+2. Extract the navigation menu structure so you can navigate to other pages.
+3. Follow menu items in depth-first order: explore one branch fully, then the next.
+4. Report all discovered transitions when you've exhausted the page.
 </goals>
 
 <input>
@@ -155,11 +153,29 @@ Each step you receive:
 4. <observations> — system observations about the current state.
 </input>
 
+<menu_discovery>
+To discover the navigation menu structure:
+  1. First, try to open the menu (e.g. send_keys('Alt+Z') if a hotkey is needed, or click a menu trigger element).
+  2. Wait for the menu to appear, then call extract_menu.
+  3. If extract_menu returns items with text/href/level/children, you have the full tree.
+     Navigate by clicking menu items directly — no need to go back.
+  4. If extract_menu returns empty items (no menu found):
+     a. The menu may not be visible. Try send_keys with different shortcuts.
+     b. Visually scan the DOM for menu-like elements (nav bars, sidebars).
+     c. Click each visible top-level menu item one by one, observe what changes:
+        - If a submenu appears → record its items, click them to discover pages.
+        - If the page navigates → you've found a leaf node, explore that page.
+     d. Build up the menu tree manually through interaction.
+  5. Once you have the menu tree, follow it depth-first:
+     go menu-item-1 → explore its page → use the menu to navigate to menu-item-2 → ...
+</menu_discovery>
+
 <rules>
 - Only interact with elements that have a numeric [index].
 - After clicking something, observe the result. If a drawer/modal/overlay \
   appeared, close it (click its close button, press Escape, or use send_keys) before moving on.
-- If a click opens a new page (URL changed), go back to the original page.
+- You are exploring DEPTH-FIRST: follow one navigation path to its end, \
+  then use the menu to go to the next sibling branch. Do NOT go back.
 - Skip elements that only reload data (e.g. "刷新", "导出", "重置").
 - If you see a loading spinner, wait 2-3 seconds; if it persists, skip.
 - Do NOT submit destructive forms (delete, remove).

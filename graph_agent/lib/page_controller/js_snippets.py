@@ -386,7 +386,16 @@ _EXTRACT_MENU_JS = """() => {
         }
     }
 
-    return JSON.stringify({items: items});
+    return JSON.stringify({
+        items: items,
+        found_container: !!mainContainer,
+        hint: items.length === 0 ? (
+            'No menu items found in current DOM. '
+            + (mainContainer ? 'Menu container exists but no items detected.' : 'No menu container element found.')
+            + ' The menu may require opening first (try a keyboard shortcut like Alt+Z or clicking a menu trigger).'
+            + ' After opening, call extract_menu again.'
+        ) : null
+    });
 }"""
 
 _TOP_LAYER_INFO_JS = """(el) => {
