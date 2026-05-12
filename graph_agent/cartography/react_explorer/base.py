@@ -54,7 +54,7 @@ from graph_agent.models import (
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MAX_STEPS = 500
+_DEFAULT_MAX_STEPS = 1000
 
 
 class ReActExplorerBase(BaseAgent):
@@ -130,7 +130,7 @@ class ReActExplorerBase(BaseAgent):
     # ------------------------------------------------------------------
 
     def _build_system_prompt(self) -> str:
-        prompt = build_system_prompt(max_steps=self.max_steps)
+        prompt = build_system_prompt()
         if self._extra_system_prompt:
             prompt += f"\n\n{self._extra_system_prompt}"
         return prompt
@@ -155,13 +155,6 @@ class ReActExplorerBase(BaseAgent):
             if self._last_url:
                 observations.append(f"Page navigated to → {current_url}")
             self._last_url = current_url
-
-        remaining_pct = (self.total_max_steps - step) / max(self.total_max_steps, 1)
-        remaining = self.total_max_steps - step
-        if remaining_pct < 0.1:
-            observations.append(
-                f"Only {remaining} steps remaining. You MUST finish NOW."
-            )
 
         # Invalidate zone_filter when page has navigated away from the start URL.
         effective_zone_selectors = self._target_zone_selectors

@@ -11,26 +11,13 @@ from browser_use.tools.registry.service import Registry
 
 
 def build_system_prompt(
-    max_steps: int,
     registry: "Registry | None" = None,
     supported_actions: set[str] | frozenset[str] | None = None,
 ) -> str:
-    """Build system prompt with dynamically generated tool descriptions.
-
-    Args:
-        max_steps: Maximum exploration steps
-        registry: Browser-use Registry instance. Uses default Tools registry if None.
-        supported_actions: Optional whitelist of action names to include in the prompt.
-            If None, all registered actions are shown.
-
-    Returns:
-        Formatted system prompt string
-    """
-    # Build available actions text from browser-use registry
+    """Build system prompt with dynamically generated tool descriptions."""
     description_lines = _build_action_descriptions(registry, supported_actions)
 
     return CARTOGRAPHY_SYSTEM_PROMPT_TEMPLATE.format(
-        max_steps=max_steps,
         available_actions=description_lines,
     )
 
@@ -153,20 +140,24 @@ Each step you receive:
 </input>
 
 <menu_discovery>
-To discover the navigation menu structure:
-  1. First, try to open the menu (e.g. send_keys('Alt+Z') if a hotkey is needed, or click a menu trigger element).
-  2. Wait for the menu to appear, then call extract_menu.
-  3. If extract_menu returns items with text/href/level/children, you have the full tree.
-     Navigate by clicking menu items directly — no need to go back.
-  4. If extract_menu returns empty items (no menu found):
-     a. The menu may not be visible. Try send_keys with different shortcuts.
-     b. Visually scan the DOM for menu-like elements (nav bars, sidebars).
-     c. Click each visible top-level menu item one by one, observe what changes:
-        - If a submenu appears → record its items, click them to discover pages.
-        - If the page navigates → you've found a leaf node, explore that page.
-     d. Build up the menu tree manually through interaction.
-  5. Once you have the menu tree, follow it depth-first:
-     go menu-item-1 → explore its page → use the menu to navigate to menu-item-2 → ...
+Navigation menus in SPAs often use internal routing — clicking a menu item
+changes content without changing the full URL.  Explore ALL menu branches
+in one session using this depth-first pattern:
+
+  1. Open the menu (send_keys shortcut or click menu trigger).
+  2. Call extract_menu to get the full tree (text/href/level/children).
+  3. If extract_menu returns empty: manually discover by clicking each visible
+     top-level menu item and observing what appears.
+  4. For each menu item in order:
+     a. Click the menu item to navigate to its page.
+     b. Explore that page fully (elements, tabs, forms, transitions).
+     c. When done with that page, return to the HOME PAGE:
+        - Click the logo/home link, OR
+        - Re-open the menu and click the first "首页/Home" item
+     d. Re-open the menu (shortcut or click trigger).
+     e. Click the NEXT sibling menu item, repeat step 4.
+  5. Only call done when ALL menu branches have been explored.
+     Do NOT stop early — you have enough steps to complete the full tree.
 </menu_discovery>
 
 <rules>
@@ -186,9 +177,8 @@ To discover the navigation menu structure:
   or features are hidden behind icons or hotkeys.
 - Use evaluate to run JavaScript for hover, drag, zoom, or analyzing page structure.
 - Use dropdown_options before select_dropdown to inspect available options.
-- If you've explored all visible elements and no new ones appear after \
-  scrolling, call `done`.
-- Maximum exploration per page: {max_steps} steps.
+- If you've explored ALL menu branches and all visible elements on every page, \
+  and no new items appear, call `done`.
 </rules>
 
 <output_format>
