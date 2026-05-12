@@ -135,14 +135,6 @@ class PageActions:
         registry.action(description="Wait for specified seconds")(wait)
         supported_actions.add("wait")
 
-        # -- go_back --
-        async def go_back() -> str:
-            return await _self.go_back()
-
-        go_back.__name__ = "go_back"
-        registry.action(description="Navigate back in browser history")(go_back)
-        supported_actions.add("go_back")
-
         # -- close_overlay --
         async def close_overlay() -> str:
             return await _self.close_overlay()
@@ -192,16 +184,6 @@ class PageActions:
             extract_menu
         )
         supported_actions.add("extract_menu")
-
-        # -- send_keys --
-        async def send_keys(keys: str) -> str:
-            return await _self.send_keys(keys)
-
-        send_keys.__name__ = "send_keys"
-        registry.action(description="Send keyboard shortcut keys to the page")(
-            send_keys
-        )
-        supported_actions.add("send_keys")
 
         # -- solve_captcha --
         async def solve_captcha(

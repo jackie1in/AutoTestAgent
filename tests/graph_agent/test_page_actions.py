@@ -100,12 +100,12 @@ def test_register_populates_registry():
     pa.register(registry, supported)
 
     # All 14 actions should be registered
-    assert len(supported) == 14
+    assert len(supported) == 12
     for name in (
         "click", "input", "select_dropdown", "scroll", "scroll_horizontally",
-        "wait", "go_back", "close_overlay", "execute_javascript",
+        "wait", "close_overlay", "execute_javascript",
         "query_knowledge", "discover_zones", "extract_menu",
-        "send_keys", "solve_captcha",
+        "solve_captcha",
     ):
         assert name in supported
         assert name in registry.registry.actions
@@ -121,13 +121,6 @@ async def test_click_without_controller_raises():
     pa = PageActions(None, None, None, [0.0])
     with pytest.raises(RuntimeError, match="PageController not set"):
         await pa.click(1)
-
-
-@pytest.mark.asyncio
-async def test_go_back_without_browser():
-    pa = PageActions(None, None, None, [0.0])
-    result = await pa.go_back()
-    assert "no browser" in result
 
 
 @pytest.mark.asyncio
