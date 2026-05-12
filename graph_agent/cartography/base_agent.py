@@ -125,7 +125,7 @@ class BaseAgent:
             "select_dropdown",
             "scroll",
             "wait",
-            "go_back",
+            "send_keys",
             "done",
         }
         # Keep screenshot action available in auto/true mode.

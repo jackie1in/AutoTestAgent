@@ -74,12 +74,6 @@ class WaitAction(BaseModel):
     seconds: int = Field(default=1, ge=1, le=10)
 
 
-class GoBackAction(BaseModel):
-    """Navigate back to the previous page."""
-
-    action_type: Literal["go_back"] = "go_back"
-
-
 class DoneAction(BaseModel):
     """Complete the exploration task."""
 
@@ -232,7 +226,6 @@ AgentAction = Annotated[
         ScrollAction,
         ScrollHorizontallyAction,
         WaitAction,
-        GoBackAction,
         DoneAction,
         SendKeysAction,
         EvaluateAction,

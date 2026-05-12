@@ -6,32 +6,13 @@ import json
 import logging
 import re
 from collections import Counter
-from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import urljoin
 
 from browser_use.browser.session import BrowserSession as Browser
-from browser_use.llm.base import BaseChatModel
 
-from graph_agent.cartography.browser_lifecycle import is_shutdown_requested
 from graph_agent.cartography.config import (
     clean_url,
-    is_http_url,
-    is_login_url,
-    resolve_knowledge_min_interval_sec,
-    resolve_knowledge_on_demand_enabled,
-    resolve_knowledge_query_timeout_ms,
-    resolve_knowledge_topk,
-    resolve_knowledge_trigger_profile,
-    resolve_knowledge_trigger_score_threshold,
-    resolve_layout_aware_enabled,
-    resolve_layout_confidence_retry_enabled,
-    resolve_layout_confidence_threshold,
-    resolve_layout_snapshot_limit,
-    resolve_orchestration_max_runtime_sec,
     resolve_extra_system_prompt,
-    resolve_pipeline_checkpoint_path,
-    resolve_pipeline_resume_from_checkpoint,
     same_origin,
 )
 from graph_agent.cartography.intervention_queue import evaluate_intervention_need
@@ -52,19 +33,12 @@ from graph_agent.cartography.layout_snapshot import (
 )
 from graph_agent.cartography.llm_planning import (
     LLMPageAnalysis,
-    analyze_page_with_llm,
-    build_exploration_guidance,
     build_login_hint_from_env,
     normalize_llm_zone_type,
-    normalize_page_type,
-    plan_next_exploration_with_llm,
 )
 from graph_agent.cartography.types import (
-    LayoutEvidenceItem,
     LayoutMetrics,
-    LLMTransitionHint,
 )
-from graph_agent.lib.observability import observe
 
 if TYPE_CHECKING:
     from graph_agent.graph.merger import CartographyResult
@@ -124,7 +98,6 @@ def _now_utc():
 
 
 def _parse_evaluate_result(raw: object) -> dict[str, object]:
-    import json
 
     if raw is None or raw == "":
         return {}
@@ -210,58 +183,6 @@ def _looks_rate_limited(dom_text: str, url: str) -> bool:
     )
 
 
-async def click_menu_by_text(browser: Browser, text: str) -> bool:
-    """Click a menu item by its visible text label."""
-    target = (text or "").strip()
-    if not target:
-        return False
-    script = (
-        "(target) => {\n"
-        "  const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();\n"
-        "  const candidates = [\n"
-        "    'a[role=\"menuitem\"]', '[role=\"menuitem\"]',\n"
-        "    '.ant-menu-item', '.el-menu-item', '.el-submenu__title',\n"
-        "    '.ant-menu-submenu-title', '.menu-item', '[class*=\"menu-item\"]',\n"
-        "    'aside a', 'aside button', 'nav a', 'nav button',\n"
-        "    'a', 'button', '[role=\"button\"]'\n"
-        "  ];\n"
-        "  const seen = new Set();\n"
-        "  for (const sel of candidates) {\n"
-        "    const els = Array.from(document.querySelectorAll(sel));\n"
-        "    for (const el of els) {\n"
-        "      if (seen.has(el)) continue;\n"
-        "      seen.add(el);\n"
-        "      const t = norm(el.innerText || el.textContent);\n"
-        "      if (!t) continue;\n"
-        "      if (t === target || (t.length <= 40 && t.includes(target))) {\n"
-        "        const rect = el.getBoundingClientRect();\n"
-        "        if (rect.width === 0 || rect.height === 0) continue;\n"
-        "        el.scrollIntoView({block: 'center'});\n"
-        "        el.click();\n"
-        "        return JSON.stringify({ok: true, tag: el.tagName, selector: sel});\n"
-        "      }\n"
-        "    }\n"
-        "  }\n"
-        "  return JSON.stringify({ok: false});\n"
-        "}"
-    )
-    try:
-        page = await browser.get_current_page()
-        if page is None:
-            return False
-        raw = await page.evaluate(script, target)
-        parsed = _parse_evaluate_result(raw)
-        if parsed.get("ok"):
-            logger.info(
-                f"[PIPELINE] Menu '{target}' clicked "
-                f"(via {parsed.get('selector', '?')}, tag={parsed.get('tag', '?')})"
-            )
-            return True
-        logger.info(f"[PIPELINE] Menu '{target}' not found on current page")
-        return False
-    except Exception as e:
-        logger.warning("[PIPELINE] click_menu_by_text error: %s", e)
-        return False
 
 
 def rank_warm_start_candidates(
@@ -771,3 +692,20 @@ def _update_page_zone_progress(
         hint["last_explored"] = now_iso
 
 
+
+def _force_zones_only(decision, scheduler_hint: str):
+    from graph_agent.cartography.skip_advisor import SkipDecision, SkipKind
+    return SkipDecision(
+        kind=SkipKind.EXPLORE_ZONES_ONLY,
+        reason=f"scheduler_override:{scheduler_hint}",
+        confidence=decision.confidence,
+        target_zone_selectors=list(decision.target_zone_selectors),
+        coverage=decision.coverage,
+        state_count=decision.state_count,
+        last_visited_age_h=decision.last_visited_age_h,
+        last_explored_age_h=decision.last_explored_age_h,
+        release_coverage=decision.release_coverage,
+        intent_confirm_total=decision.intent_confirm_total,
+        entity_confirm_total=decision.entity_confirm_total,
+        intent_confirmed_zone_count=decision.intent_confirmed_zone_count,
+    )

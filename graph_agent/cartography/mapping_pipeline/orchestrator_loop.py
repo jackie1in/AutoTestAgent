@@ -15,13 +15,16 @@ from graph_agent.cartography.config import (
 from graph_agent.cartography.mapping_pipeline.helpers import (
     _build_extra_system_prompt,
     _build_pipeline_result,
+    _build_runtime_zone_id,
     _classify_pipeline_exception,
     _looks_rate_limited,
     _maybe_inject_knowledge_hint,
     _update_page_zone_progress,
     collect_layout_context,
+    compute_knowledge_trigger_score,
     ensure_browser_ready,
     is_low_layout_confidence,
+    map_llm_zone_type,
     summarize_captcha_metrics_from_history,
 )
 from graph_agent.cartography.llm_planning import (
@@ -32,11 +35,6 @@ from graph_agent.cartography.llm_planning import (
     build_login_hint_from_env,
     normalize_page_type,
     plan_next_exploration_with_llm,
-)
-from graph_agent.cartography.mapping_pipeline.helpers import (
-    _build_runtime_zone_id,
-    compute_knowledge_trigger_score,
-    map_llm_zone_type,
 )
 
 from graph_agent.cartography.mapping_pipeline.orchestrator_state import (
@@ -101,7 +99,6 @@ async def _run_main_loop(
     loop = asyncio.get_event_loop()
     start_time = loop.time()
     first_page = True
-    orchestration_step = _state.orchestration_step
     failed_action_count = _state.failed_action_count
     semantic_conflict_count = _state.semantic_conflict_count
     cross_origin_seen = _state.cross_origin_seen
@@ -167,7 +164,7 @@ async def _run_main_loop(
             )
             break
         logger.info(
-            f"\n[PIPELINE] Step {orchestration_step}/{max_orchestration_steps}: {url[:80]} (reason: {reason}) [queue={len(pages_to_explore)}]"
+            f"\n[PIPELINE] Step {_state.orchestration_step}/{max_orchestration_steps}: {url[:80]} (reason: {reason}) [queue={len(pages_to_explore)}]"
         )
 
         if not await ensure_browser_ready(browser, url):
@@ -227,7 +224,7 @@ async def _run_main_loop(
             layout_evidence.append(
                 {
                     "url": current_page_url,
-                    "step": orchestration_step,
+                    "step": _state.orchestration_step,
                     "layout_fingerprint": layout_fingerprint,
                     "layout_summary": layout_summary[:500],
                     "layout_confidence": layout_confidence,

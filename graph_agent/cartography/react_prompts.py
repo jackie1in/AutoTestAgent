@@ -118,7 +118,6 @@ def _fallback_descriptions() -> str:
 - find_elements: Query DOM elements by CSS selector (selector: string, attributes: string[]?, max_results: integer = 50)
 - search_page: Search page text for a pattern (pattern: string, regex: boolean = false)
 - wait: Wait for x seconds (seconds: integer = 1)
-- go_back: Navigate back to previous page (none)
 - close_overlay: Close overlays/modal/drawer (none)
 - query_knowledge: Query historical knowledge (query_text: string, target_type: string = all)
 - discover_zones: Discover page functional zones (none)

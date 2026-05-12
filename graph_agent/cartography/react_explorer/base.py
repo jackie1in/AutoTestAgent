@@ -10,12 +10,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
-import time
 from typing import Any, cast
 
 from browser_use.browser.session import BrowserSession as Browser
-from pydantic import create_model
 
 from graph_agent.cartography.base_agent import BaseAgent
 from graph_agent.cartography.captcha import normalize_manual_captcha_code
@@ -232,6 +229,10 @@ class ReActExplorerBase(BaseAgent):
                     title = await page.get_title() or ""
         except Exception:
             pass
+
+        # Keep _page_title in sync for state recording
+        if title:
+            self._page_title = title
 
         selector_map = getattr(controller, "selector_map", {}) or {}
         return dom_text, title, dict(selector_map)
@@ -580,7 +581,6 @@ class ReActExplorerBase(BaseAgent):
         for extra in extra_checkpoints:
             self._result.checkpoint_transition_map[extra.id] = transition.id
         self._result.semantic_conflict_count = self._semantic_conflict_count
-        ", ".join(f"{s.action.value}:{s.selector}" for s in steps)
 
     async def _on_state_changed(
         self,
