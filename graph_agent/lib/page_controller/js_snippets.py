@@ -280,6 +280,115 @@ _CLICK_BY_XPATH_JS = """(xpath) => {
     }
 }"""
 
+_EXTRACT_MENU_JS = """() => {
+    // Walk all menu containers on the page and extract hierarchical structure.
+    // Supports Ant Design, Element UI, role-based menus, and native nav elements.
+    const normalizeText = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+
+    const containerSelectors = [
+        '[role="menubar"]', '[role="menu"]',
+        '.ant-menu-root', '.ant-menu',
+        '.el-menu', '.el-menu--horizontal', '.el-menu--vertical',
+        'nav[aria-label]', 'nav.navbar', 'nav.sidebar',
+        '.sidebar-menu', '.main-menu', '.nav-menu',
+    ];
+
+    const itemSelectors = [
+        '[role="menuitem"]',
+        '.ant-menu-item', '.ant-menu-submenu', '.ant-menu-submenu-title',
+        '.el-menu-item', '.el-submenu', '.el-submenu__title',
+        'a', 'button', '[role="link"]', '[role="button"]',
+    ];
+
+    const buildNode = (el, level) => {
+        const tag = (el.tagName || '').toLowerCase();
+        const text = normalizeText(el.textContent || '');
+        if (!text) return null;
+
+        // Extract href from anchor or descendant anchor
+        let href = '';
+        if (tag === 'a') {
+            href = (el).href || (el).getAttribute('href') || '';
+        } else {
+            const anchor = el.querySelector('a');
+            if (anchor) href = anchor.href || anchor.getAttribute('href') || '';
+        }
+
+        // Clean href: keep only path (+ hash, - origin)
+        if (href && href.startsWith('http')) {
+            try { href = new URL(href).pathname + new URL(href).search + new URL(href).hash; } catch(e) {}
+        } else if (href && !href.startsWith('/') && !href.startsWith('#')) {
+            href = '/' + href;
+        }
+
+        return {
+            text: text.length > 80 ? text.slice(0, 80) + '...' : text,
+            href: href,
+            level: level,
+            tag: tag,
+            children: [],
+        };
+    };
+
+    const extractChildren = (container, level) => {
+        const results = [];
+        // Direct children of the container that are menu items
+        const candidates = Array.from(container.children);
+        for (const child of candidates) {
+            // Skip separator elements
+            if (child.getAttribute('role') === 'separator') continue;
+            if (child.classList.contains('ant-menu-item-divider')) continue;
+            if (child.classList.contains('el-menu-item-group__title')) continue;
+
+            const node = buildNode(child, level);
+            if (!node) continue;
+
+            // Check for submenu — container has nested items
+            let subContainer = null;
+            if (child.classList.contains('ant-menu-submenu')) {
+                subContainer = child.querySelector(':scope > .ant-menu');
+            } else if (child.classList.contains('el-submenu')) {
+                subContainer = child.querySelector(':scope > .el-menu');
+            } else if (child.getAttribute('aria-haspopup') === 'true' || child.getAttribute('aria-expanded') !== null) {
+                subContainer = child.querySelector('[role="menu"]');
+            }
+
+            if (subContainer) {
+                node.children = extractChildren(subContainer, level + 1);
+            }
+
+            results.push(node);
+        }
+        return results;
+    };
+
+    // Find best container
+    let mainContainer = null;
+    for (const sel of containerSelectors) {
+        const el = document.querySelector(sel);
+        if (el) { mainContainer = el; break; }
+    }
+    // Fallback: first <nav> element
+    if (!mainContainer) {
+        const nav = document.querySelector('nav');
+        if (nav) mainContainer = nav;
+    }
+
+    const items = mainContainer ? extractChildren(mainContainer, 1) : [];
+    // If main container is deep in DOM (e.g. Ant Design's .ant-menu-root inside a wrapper),
+    // and we got few items, try finding sub-containers
+    if (items.length === 0 && mainContainer) {
+        const innerMenus = mainContainer.querySelectorAll('.ant-menu, .el-menu, [role="menu"]');
+        for (const m of innerMenus) {
+            if (m === mainContainer) continue;
+            const sub = extractChildren(m, 1);
+            if (sub.length > items.length) { items.length = 0; items.push(...sub); }
+        }
+    }
+
+    return JSON.stringify({items: items});
+}"""
+
 _TOP_LAYER_INFO_JS = """(el) => {
     if (!(el instanceof HTMLElement)) {
         return JSON.stringify({is_visible: false, is_top: false, reason: 'not-html'});

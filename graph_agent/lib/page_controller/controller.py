@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from browser_use.browser.session import BrowserSession
-    from browser_use.dom.views import EnhancedDOMTreeNode
 
 from graph_agent.lib.types import ActionResult, BrowserState, PageInfo
 from graph_agent.lib.page_controller.dom_utils import (
@@ -19,6 +18,7 @@ from graph_agent.lib.page_controller.image_utils import extract_image_base64_fro
 from graph_agent.lib.page_controller.js_snippets import (
     _CLICK_BY_XPATH_JS,
     _CLICK_ELEMENT_JS,
+    _EXTRACT_MENU_JS,
     _INPUT_TEXT_JS,
     _PAGE_INFO_JS,
     _PATCH_ANTD_JS,
@@ -511,6 +511,20 @@ class PageController:
             return ActionResult(
                 success=False, message=f"Captcha refresh failed: {e}"
             )
+
+    async def extract_menu_structure(self) -> str:
+        """Extract hierarchical menu structure from the page.
+
+        Returns a JSON string with nested menu items:
+        {"items": [{"text": "...", "href": "...", "level": 1, "tag": "a", "children": [...]}]}
+        """
+        try:
+            page = await self._get_page()
+            raw = await page.evaluate(_EXTRACT_MENU_JS)
+            return raw if isinstance(raw, str) else json.dumps(raw or {})
+        except Exception as e:
+            logger.warning("extract_menu_structure failed: %s", e)
+            return json.dumps({"items": [], "error": str(e)})
 
     def dispose(self) -> None:
         self._selector_map = {}

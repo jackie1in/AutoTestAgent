@@ -7,7 +7,6 @@ eliminating the old diamond-inheritance pattern.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -160,16 +159,11 @@ class ReActExplorerBase(BaseAgent):
                 observations.append(f"Page navigated to → {current_url}")
             self._last_url = current_url
 
+        remaining_pct = (self.total_max_steps - step) / max(self.total_max_steps, 1)
         remaining = self.total_max_steps - step
-        if remaining == 5:
+        if remaining_pct < 0.1:
             observations.append(
-                f"Only {remaining} steps remaining. "
-                "Consider wrapping up or calling done with partial results."
-            )
-        elif remaining == 2:
-            observations.append(
-                f"Critical: Only {remaining} steps left! "
-                "You must finish the task or call done immediately."
+                f"Only {remaining} steps remaining. You MUST finish NOW."
             )
 
         # Invalidate zone_filter when page has navigated away from the start URL.
@@ -620,16 +614,6 @@ class ReActExplorerBase(BaseAgent):
         )
         if should_commit:
             await self._flush_pending_transition()
-            if url_after != url_before:
-                try:
-                    _browser = self.browser
-                    if _browser is not None:
-                        page = await _browser.get_current_page()
-                        if page is not None:
-                            await page.go_back()
-                except Exception:
-                    pass
-                await asyncio.sleep(0.5)
 
     # ------------------------------------------------------------------
     # Public entry point

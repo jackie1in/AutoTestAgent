@@ -188,7 +188,8 @@ class PageActions:
         return "Zone discovery delegated to pipeline analysis"
 
     async def extract_menu(self) -> str:
-        return "Menu extraction delegated to pipeline analysis"
+        ctrl = self._require_controller()
+        return await ctrl.extract_menu_structure()
 
     async def solve_captcha(self, input_index: int | None = None, input_hint: str = "") -> str:
         browser = self._browser
