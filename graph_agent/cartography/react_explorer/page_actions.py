@@ -69,15 +69,19 @@ class PageActions:
     # ------------------------------------------------------------------
 
     def register(self, registry: Registry, supported_actions: set[str]) -> None:
-        """Wire all action handlers into *registry* and update *supported_actions*.
+        """Wire custom action handlers into *registry* and update *supported_actions*.
 
-        Creates thin wrapper closures with the correct parameter signatures
-        and action-type names.  Delegates to named handler methods so each
-        handler remains independently testable.
+        Only registers actions that browser-use does NOT provide:
+        - W3C click (overrides browser-use CDP click)
+        - scroll_horizontally, close_overlay
+        - query_knowledge, discover_zones, extract_menu, solve_captcha
+
+        All others (input, select_dropdown, scroll, wait, send_keys, go_back,
+        evaluate, done, etc.) use browser-use built-ins.
         """
         _self = self
 
-        # -- click --
+        # -- click (W3C pointer events override) --
         async def click(index: int) -> str:
             return await _self.click(index)
 
@@ -86,34 +90,6 @@ class PageActions:
             description="Click element by index using W3C pointer events"
         )(click)
         supported_actions.add("click")
-
-        # -- input --
-        async def input(index: int, text: str) -> str:
-            return await _self.input_text(index, text)
-
-        input.__name__ = "input"
-        registry.action(description="Type text into input field by index")(input)
-        supported_actions.add("input")
-
-        # -- select_dropdown --
-        async def select_dropdown(index: int, option_text: str = "") -> str:
-            return await _self.select_dropdown(index, option_text)
-
-        select_dropdown.__name__ = "select_dropdown"
-        registry.action(description="Select dropdown option by index")(
-            select_dropdown
-        )
-        supported_actions.add("select_dropdown")
-
-        # -- scroll --
-        async def scroll(
-            down: bool = True, pages: float = 1.0, index: int | None = None
-        ) -> str:
-            return await _self.scroll(down, pages, index)
-
-        scroll.__name__ = "scroll"
-        registry.action(description="Scroll the page or element vertically")(scroll)
-        supported_actions.add("scroll")
 
         # -- scroll_horizontally --
         async def scroll_horizontally(
@@ -127,14 +103,6 @@ class PageActions:
         )(scroll_horizontally)
         supported_actions.add("scroll_horizontally")
 
-        # -- wait --
-        async def wait(seconds: int = 1) -> str:
-            return await _self.wait(seconds)
-
-        wait.__name__ = "wait"
-        registry.action(description="Wait for specified seconds")(wait)
-        supported_actions.add("wait")
-
         # -- close_overlay --
         async def close_overlay() -> str:
             return await _self.close_overlay()
@@ -144,16 +112,6 @@ class PageActions:
             close_overlay
         )
         supported_actions.add("close_overlay")
-
-        # -- execute_javascript --
-        async def execute_javascript(script: str) -> str:
-            return await _self.execute_javascript(script)
-
-        execute_javascript.__name__ = "execute_javascript"
-        registry.action(description="Execute JavaScript in the page")(
-            execute_javascript
-        )
-        supported_actions.add("execute_javascript")
 
         # -- query_knowledge --
         async def query_knowledge(query_text: str, target_type: str = "all") -> str:
@@ -206,49 +164,12 @@ class PageActions:
         r = await ctrl.click_element(index)
         return r.message
 
-    async def input_text(self, index: int, text: str) -> str:
-        ctrl = self._require_controller()
-        r = await ctrl.input_text(index, text)
-        return r.message
-
-    async def select_dropdown(self, index: int, option_text: str = "") -> str:
-        ctrl = self._require_controller()
-        r = await ctrl.select_option(index, option_text)
-        return r.message
-
-    async def scroll(self, down: bool = True, pages: float = 1.0, index: int | None = None) -> str:
-        ctrl = self._require_controller()
-        direction = "down" if down else "up"
-        amount = int(pages * 500)
-        r = await ctrl.scroll(direction, amount, index)
-        return r.message
-
     async def scroll_horizontally(
         self, direction: str = "right", amount: int = 300, index: int | None = None
     ) -> str:
         ctrl = self._require_controller()
         r = await ctrl.scroll_horizontally(direction, amount, index)
         return r.message
-
-    async def wait(self, seconds: int = 1) -> str:
-        ctrl = self._require_controller()
-        seconds = min(seconds, 10)
-        self._total_wait_time_ref[0] += seconds
-        last = await ctrl.get_last_update_time()
-        elapsed = time.time() - last if last > 0 else 0
-        actual = max(0, seconds - elapsed)
-        await asyncio.sleep(actual)
-        return f"Waited {seconds}s (actual {actual:.1f}s)"
-
-    async def go_back(self) -> str:
-        browser = self._browser
-        if browser is None:
-            return "Go back failed: no browser"
-        page = await browser.get_current_page()
-        if page is None:
-            return "Go back failed: no active page"
-        await page.go_back()
-        return "Navigated back"
 
     async def close_overlay(self) -> str:
         browser = self._browser
@@ -260,11 +181,6 @@ class PageActions:
         closed = await self._close_overlays(page)
         return f"Closed {closed} overlay(s)"
 
-    async def execute_javascript(self, script: str) -> str:
-        ctrl = self._require_controller()
-        r = await ctrl.execute_javascript(script)
-        return r.message
-
     async def query_knowledge(self, query_text: str, target_type: str = "all") -> str:
         return await self._query_knowledge(query_text.strip(), target_type.strip())
 
@@ -273,24 +189,6 @@ class PageActions:
 
     async def extract_menu(self) -> str:
         return "Menu extraction delegated to pipeline analysis"
-
-    async def send_keys(self, keys: str) -> str:
-        ctrl = self._require_controller()
-        parts = keys.split("+")
-        mods = {
-            "Control": "ctrlKey", "Ctrl": "ctrlKey",
-            "Alt": "altKey", "Shift": "shiftKey", "Meta": "metaKey",
-        }
-        key = parts[-1]
-        opts = ",".join(f"{mods[m]}:true" for m in parts[:-1] if m in mods)
-        script = (
-            f"(function(){{var e=new KeyboardEvent('keydown',{{key:'{key}',{opts}}});"
-            f"document.dispatchEvent(e);"
-            f"e=new KeyboardEvent('keyup',{{key:'{key}',{opts}}});"
-            f"document.dispatchEvent(e);}})()"
-        )
-        r = await ctrl.execute_javascript(script)
-        return f"Sent keys: {keys}"
 
     async def solve_captcha(self, input_index: int | None = None, input_hint: str = "") -> str:
         browser = self._browser
