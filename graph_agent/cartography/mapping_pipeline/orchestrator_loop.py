@@ -65,7 +65,6 @@ async def _run_main_loop(
     zone_rows: list,
     zone_rows_by_id: dict,
     intervention_task_tracker: dict,
-    max_steps: int,
     orchestration_max_runtime_sec: float,
     inventory: list,
     initial_actions_log: list,
@@ -75,6 +74,7 @@ async def _run_main_loop(
     enqueue_page_fn,
     persist_checkpoint_fn,
     cleanup_foreign_tabs_fn,
+    persist_page_fn=None,
 ) -> "CartographyResult":
     from graph_agent.cartography.react_explorer import ReActExplorer
     from graph_agent.cartography.snapshot import capture_composite_fingerprint
@@ -102,7 +102,6 @@ async def _run_main_loop(
     failed_action_count = _state.failed_action_count
     semantic_conflict_count = _state.semantic_conflict_count
     cross_origin_seen = _state.cross_origin_seen
-    max_orchestration_steps = max(50, max_steps)
     runtime_limit_sec = orchestration_max_runtime_sec
     knowledge_query_count = 0
     knowledge_hit_count = 0
@@ -124,13 +123,11 @@ async def _run_main_loop(
     knowledge_timeout_ms = 15000
     knowledge_topk_val = 5
     knowledge_release_id = ""
-    time_budget_ms = 600000
+    time_budget_ms = 3_600_000
     iframe_seen = False
     captcha_seen = False
 
-    while (
-        pages_to_explore
-    ) and _state.orchestration_step < max_orchestration_steps:
+    while pages_to_explore:
         if is_shutdown_requested():
             logger.info("[PIPELINE] Shutdown requested, stopping exploration.")
             break
@@ -164,7 +161,7 @@ async def _run_main_loop(
             )
             break
         logger.info(
-            f"\n[PIPELINE] Step {_state.orchestration_step}/{max_orchestration_steps}: {url[:80]} (reason: {reason}) [queue={len(pages_to_explore)}]"
+            f"\n[PIPELINE] Step {_state.orchestration_step}: {url[:80]} (reason: {reason}) [queue={len(pages_to_explore)}]"
         )
 
         if not await ensure_browser_ready(browser, url):
@@ -305,9 +302,8 @@ async def _run_main_loop(
             or is_login_url(current_page_url)
         )
 
-        steps_remaining = max_steps - len(all_history)
         time_remaining = time_budget_ms - elapsed_ms
-        if steps_remaining <= 0 or time_remaining <= 0:
+        if time_remaining <= 0:
             break
 
         explorer_hint = f"You are exploring the page at {current_page_url}."
@@ -361,19 +357,13 @@ async def _run_main_loop(
         if knowledge_hint_text:
             explorer_hint += "\n\n" + knowledge_hint_text
 
-        page_cap = {
-            "dashboard": 20,
-            "welcome": 15,
-            "login": 10,
-            "list": 40,
-            "detail": 40,
-            "form": 40,
-            "settings": 40,
-        }.get(page_analysis.page_type, 30)
+        # Per-page ReAct step budget — generous fixed cap.
+        # The only global limiting factor is the time budget (time_budget_ms).
+        per_page_steps = 60
         if low_layout_conf:
-            page_cap = min(60, page_cap + 10)
+            per_page_steps = min(80, per_page_steps + 10)
 
-        # 区域限定模式：缩小 page_cap，附 zone_filter 提示给 explorer
+        # 区域限定模式：缩小 budget，附 zone_filter 提示给 explorer
         target_zone_selectors: list[str] = []
         if (
             skip_decision is not None
@@ -381,18 +371,13 @@ async def _run_main_loop(
             and skip_decision.target_zone_selectors
         ):
             target_zone_selectors = list(skip_decision.target_zone_selectors)
-            zones_only_cap = min(15, page_cap)
+            zones_only_cap = min(20, per_page_steps)
             logger.info(
                 f"[PIPELINE] EXPLORE_ZONES_ONLY -> {url[:80]} "
                 f"(pending_zones={len(target_zone_selectors)}, "
-                f"page_cap {page_cap}->{zones_only_cap})"
+                f"budget {per_page_steps}->{zones_only_cap})"
             )
-            page_cap = zones_only_cap
-
-        per_page_steps = min(
-            steps_remaining,
-            page_cap,
-        )
+            per_page_steps = zones_only_cap
         explorer = ReActExplorer(
             max_steps=per_page_steps,
             browser_session=browser,
@@ -440,6 +425,13 @@ async def _run_main_loop(
                 stuck_steps += 1
             else:
                 stuck_steps = 0
+
+            # Per-page flush to Neo4j for incremental durability.
+            if persist_page_fn is not None:
+                try:
+                    await persist_page_fn(explore_result)
+                except Exception as e:
+                    logger.warning("[PIPELINE] Per-page persist failed: %s", e)
 
             _update_page_zone_progress(
                 page_analysis=page_analysis,
@@ -531,7 +523,7 @@ async def _run_main_loop(
                 explored_urls,
                 recent_transitions,
                 time_remaining,
-                steps_remaining,
+                len(pages_to_explore),
             )
             if plan.strategy == "stop":
                 if not pages_to_explore:

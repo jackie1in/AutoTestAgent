@@ -123,9 +123,13 @@ class BaseAgent:
             "click",
             "input",
             "select_dropdown",
+            "dropdown_options",
             "scroll",
             "wait",
             "send_keys",
+            "evaluate",
+            "search_page",
+            "find_elements",
             "done",
         }
         # Keep screenshot action available in auto/true mode.
@@ -267,10 +271,7 @@ Remaining steps: {remaining}
         Returns:
             Human-readable result string for history tracking.
         """
-        if action_type not in self._supported_actions:
-            return f"Unsupported action type: {action_type}"
-
-        # Convert params to AgentAction then to browser-use ActionModel
+        # Convert params to browser-use ActionModel and dispatch via registry.
         action_cls = self._dynamic_action_model
         action_model = action_cls(**{action_type: params})
         assert self.browser is not None, "browser must be set before executing actions"
@@ -686,13 +687,12 @@ Remaining steps: {remaining}
             pw_page.on("response", _on_response)  # type: ignore[union-attr]
 
     def _build_dynamic_action_model(self) -> type[ActionModel]:
-        """Build a browser-use compatible ActionModel with supported actions."""
+        """Build a browser-use compatible ActionModel from all registry actions."""
         fields: dict[str, Any] = {}
-        for name in sorted(self._supported_actions):
-            if name not in self.tools.registry.registry.actions:
-                continue
-            param_model = self.tools.registry.registry.actions[name].param_model
-            fields[name] = (Optional[param_model], None)
+        for name, action in sorted(self.tools.registry.registry.actions.items()):
+            param_model = action.param_model
+            if param_model is not None:
+                fields[name] = (Optional[param_model], None)
         return create_model("DynamicAction", __base__=ActionModel, **fields)
 
     async def _get_browser_snapshot(self) -> tuple[str, str, dict]:

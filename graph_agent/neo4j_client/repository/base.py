@@ -5,9 +5,7 @@ from typing import Any
 from neo4j import AsyncDriver
 from graph_agent.models import (
     App, State, Transition, Zone, FrameNode, Entity, EntityInstance,
-    Intent, Checkpoint, FieldConstraint, TestCase, Session, Menu, Evidence,
-    GraphRelease, IngestionRun, TransitionEntity, TransitionRevision,
-    CoverageSnapshot,
+    Intent,
 )
 from graph_agent.neo4j_client.queries import CypherQueries
 

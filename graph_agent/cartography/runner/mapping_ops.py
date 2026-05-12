@@ -3,12 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
 import re
-import signal
-import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,7 +22,6 @@ from graph_agent.cartography.mapping_pipeline import (
 from graph_agent.cartography.mapping_pipeline import (
     run_orchestrated_mapping,
 )
-from graph_agent.cartography.persistence import persist_mapping_result
 from graph_agent.cartography.skip_advisor import SkipAdvisor, SkipPolicy
 from graph_agent.cartography.types import (
     EvidenceBundleItem,
@@ -188,7 +183,6 @@ async def run_mapping(
     url: str | None = None,
     output_path: str | None = None,  # Kept for API compatibility, ignored
     task: str | None = None,
-    max_steps: int = 100,
     inventory_path: str | Path | None = None,
     merge_existing: bool = False,  # Kept for API compatibility, ignored
 ) -> str:
@@ -197,7 +191,6 @@ async def run_mapping(
     - url: Start URL (required via arg or MAPPING_URL env).
     - output_path: Kept for API compatibility, data now stored in Neo4j.
     - task: Kept for API compatibility, no longer used by the pipeline.
-    - max_steps: Maximum agent steps.
     - inventory_path: Required. Path to scout inventory JSON (run scout first).
 
     Returns the app_id of the newly created app in Neo4j.
@@ -395,8 +388,8 @@ async def run_mapping(
                     start_url=resolved_url,
                     current_url=current_url or resolved_url,
                     app_id=app_id,
+                    app_name=app_name,
                     session_id=session_id,
-                    max_steps=max_steps,
                     warm_start_candidates=warm_start_candidates,
                     knowledge_on_demand_enabled=knowledge_on_demand_enabled,
                     knowledge_min_interval_sec=knowledge_min_interval_sec,
@@ -426,16 +419,8 @@ async def run_mapping(
                     continue
                 raise
 
-    await persist_mapping_result(
-        app_id=app_id,
-        app_name=app_name,
-        session_id=session_id,
-        resolved_url=resolved_url,
-        current_url=current_url or resolved_url,
-        inventory=inventory,
-        initial_actions_log=initial_actions_log,
-        result=result,
-    )
+    # Persistence is done incrementally inside run_orchestrated_mapping
+    # (per-page flush via PersistenceSession), so no final persist call here.
     return app_id
 
 
@@ -484,7 +469,9 @@ async def run_manual_mapping(
             to_state_hint=str(event.get("to_state_hint") or ""),
         )
     result = await manual_session.to_cartography_result()
-    await persist_mapping_result(
+
+    from graph_agent.cartography.persistence import PersistenceSession
+    persister = PersistenceSession(
         app_id=resolved_app_id,
         app_name=app_name,
         session_id=session_id,
@@ -492,8 +479,11 @@ async def run_manual_mapping(
         current_url=start_url,
         inventory=[],
         initial_actions_log=[],
-        result=result,
+        mode=mode,
     )
+    await persister.init()
+    await persister.persist_page(result)
+    await persister.finalize(result)
     return resolved_app_id
 
 

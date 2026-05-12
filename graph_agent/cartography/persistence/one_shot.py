@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -8,9 +9,15 @@ from typing import TYPE_CHECKING
 from graph_agent.cartography.config import clean_url, is_http_url
 from graph_agent.lib.observability import observe
 from graph_agent.cartography.persistence.semantic_stability import (
+    SEMANTIC_STABILITY_THRESHOLD,
     _as_float,
+    _as_int,
     _as_str,
+    _build_semantic_metrics,
+    _calculate_semantic_stability,
     _empty_stats,
+    _source_priority,
+    _transition_stable_key,
 )
 
 if TYPE_CHECKING:
@@ -517,7 +524,8 @@ async def persist_mapping_result(
                         zone_rows_by_id[zone_id] = row
                         continue
 
-                    merged_state_ids = set(existing_row.get("state_ids") or [])
+                    raw_ids = existing_row.get("state_ids") or []
+                    merged_state_ids = set(raw_ids if isinstance(raw_ids, list) else [])
                     merged_state_ids.update(related_state_ids)
                     existing_row["state_ids"] = sorted(
                         _as_str(v).strip() for v in merged_state_ids if _as_str(v).strip()

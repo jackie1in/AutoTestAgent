@@ -13,6 +13,7 @@ Handler method names use descriptive Python names (e.g. ``input_text``);
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -189,7 +190,61 @@ class PageActions:
 
     async def extract_menu(self) -> str:
         ctrl = self._require_controller()
-        return await ctrl.extract_menu_structure()
+        # 1. Try JS-based extraction first (fast, zero API cost)
+        js_result = await ctrl.extract_menu_structure()
+        try:
+            parsed = json.loads(js_result)
+            if parsed.get("items"):
+                return js_result
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # 2. JS returned empty — fall back to LLM-based extraction
+        browser = self._browser
+        if browser is None:
+            return js_result
+
+        try:
+            from browser_use.dom.markdown_extractor import extract_clean_markdown
+            from browser_use.llm.messages import SystemMessage, UserMessage
+
+            content, _ = await extract_clean_markdown(
+                browser_session=browser, extract_links=True, extract_images=False
+            )
+
+            MAX_CHARS = 60000
+            if len(content) > MAX_CHARS:
+                content = content[:MAX_CHARS] + "\n...[truncated]"
+
+            prompt = f"""Extract the main navigation menu structure from this webpage content.
+Return ONLY a valid JSON object (no markdown fences, no extra text) with this exact structure:
+{{"items": [{{"text": "...", "href": "...", "level": 1, "tag": "a", "children": [...]}}]}}
+
+Rules:
+- Only extract the PRIMARY navigation (navbar, sidebar, hamburger menu)
+- SKIP: footer links, breadcrumbs, content body links, utility links (login, signup, settings, language switcher)
+- "text": menu item text (trim whitespace, max 80 chars)
+- "href": URL path only (strip origin, keep path+query+hash), empty string "" if no link
+- "level": nesting depth (1=top-level menu, 2=dropdown sub-item, 3=deeper nested)
+- "tag": HTML tag name, usually "a" or "button"
+- "children": array of sub-menu items with same structure (empty array [] if no children)
+- PRESERVE hierarchical parent-child relationships
+
+<page_content>
+{content}
+</page_content>"""
+
+            response = await self._llm.ainvoke([
+                SystemMessage(content="You are an expert at extracting navigation structure from web pages. Return ONLY valid JSON, no other text."),
+                UserMessage(content=prompt),
+            ])
+
+            raw = response.completion if hasattr(response, 'completion') else str(response)
+            parsed = self._parse_menu_json(raw)
+            return json.dumps(parsed)
+        except Exception as e:
+            logger.warning("LLM-based menu extraction fallback failed: %s", e)
+            return js_result
 
     async def solve_captcha(self, input_index: int | None = None, input_hint: str = "") -> str:
         browser = self._browser
@@ -402,3 +457,28 @@ class PageActions:
         if "fill_failed" in text:
             return "fill_failed"
         return "none"
+
+    @staticmethod
+    def _parse_menu_json(raw_text: str) -> dict:
+        """Extract menu JSON from LLM response, handling markdown fences."""
+        text = (raw_text or "").strip()
+        # Try direct parse first
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            pass
+        # Try extracting from markdown code block
+        match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except (json.JSONDecodeError, TypeError):
+                pass
+        # Try finding JSON object with "items" key
+        match = re.search(r'\{[\s\S]*"items"[\s\S]*\}', text)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return {"items": [], "error": "Failed to parse LLM response"}

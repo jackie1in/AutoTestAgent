@@ -7,12 +7,12 @@ from urllib.parse import urlparse, urlunparse
 
 
 def clean_url(url: str) -> str:
-    """Strip query parameters and fragments for stable identity."""
+    """Strip query parameters for stable identity. Preserves fragment (SPA route)."""
     if not url:
         return ""
     try:
         parsed = urlparse(url)
-        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", parsed.fragment))
     except Exception:
         return url
 

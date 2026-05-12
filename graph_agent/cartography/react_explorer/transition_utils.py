@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-import re
+import json
 from typing import TYPE_CHECKING
+
+from graph_agent.cartography.react_explorer.url_utils import _extract_spa_route
 
 if TYPE_CHECKING:
     from graph_agent.models import Transition

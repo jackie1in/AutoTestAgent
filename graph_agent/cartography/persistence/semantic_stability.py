@@ -3,14 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from graph_agent.cartography.config import clean_url, is_http_url
-from graph_agent.lib.observability import observe
+from graph_agent.cartography.config import clean_url
 
 if TYPE_CHECKING:
-    from graph_agent.graph.merger import CartographyResult
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +30,14 @@ def _as_str(value: object) -> str:
     return str(value or "")
 
 
-def _as_int(value: object, default: int = 0) -> int:
+def _as_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
     except (TypeError, ValueError):
         return default
 
 
-def _as_float(value: object, default: float = 0.0) -> float:
+def _as_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):

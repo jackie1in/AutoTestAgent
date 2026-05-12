@@ -1,19 +1,18 @@
 from __future__ import annotations
 
-import json
 import logging
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
+from graph_agent.neo4j_client.repository.core import _model_to_props
 from graph_agent.neo4j_client.queries import CypherQueries
 
 if TYPE_CHECKING:
-    from neo4j import AsyncDriver
     from graph_agent.models import (
-        App, State, Transition, Zone, Frame, Intent, Entity, EntityInstance,
+        State, Intent, Entity, EntityInstance,
         Checkpoint, FieldConstraint, TestCase, Evidence, Session,
         IngestionRun, TransitionEntity, TransitionRevision,
-        GraphRelease, CoverageSnapshot, Menu, ElementConstraints,
+        GraphRelease, CoverageSnapshot, Menu,
     )
 
 logger = logging.getLogger(__name__)

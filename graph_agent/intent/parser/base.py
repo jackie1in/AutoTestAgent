@@ -9,7 +9,6 @@ import logging
 import os
 import re
 import time
-from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlparse
 
@@ -18,12 +17,6 @@ from pydantic import BaseModel, Field
 from graph_agent.models import (
     ActionType,
     Intent,
-    ElementConstraints,
-    ElementSnapshot,
-    FrameLocatorSnapshot,
-    GraphEdge,
-    TabActionType,
-    TabSnapshot,
 )
 from graph_agent.llm import get_llm, ainvoke_structured
 

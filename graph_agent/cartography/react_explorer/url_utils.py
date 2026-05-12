@@ -7,49 +7,11 @@ CartographyResult for output.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
-import json
 import logging
-import os
-import re
-import time
-from typing import cast
 from urllib.parse import parse_qsl, urlparse
 
-from browser_use.browser.session import BrowserSession as Browser
 
-from graph_agent.cartography.base_agent import BaseAgent
-from graph_agent.cartography.captcha import (
-    normalize_manual_captcha_code,
-    resolve_captcha_solve_mode,
-    solve_captcha_from_page,
-)
-from graph_agent.cartography.inference_core import (
-    SemanticInferenceInput,
-    infer_transition_semantics,
-)
-from graph_agent.cartography.react_prompts import (
-    build_system_prompt,
-    build_user_prompt,
-)
-from graph_agent.cartography.react_schema import (
-    AgentOutput,
-)
-from graph_agent.graph.merger import CartographyResult
-from graph_agent.lib.page_controller import PageController
-from graph_agent.llm import get_llm
-from graph_agent.models import (
-    ActionType,
-    Checkpoint,
-    CheckpointExpect,
-    CheckpointLayer,
-    CheckpointTiming,
-    Severity,
-    State,
-    Transition,
-    TransitionStep,
-)
 
 logger = logging.getLogger(__name__)
 

@@ -1,26 +1,15 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
-from browser_use.llm.messages import (
-    BaseMessage,
-    ContentPartImageParam,
-    ContentPartTextParam,
-    ImageURL,
-    UserMessage,
-)
 from pydantic import BaseModel, Field
 
-from graph_agent.cartography.types import LoginInfo
-from graph_agent.lib.page_controller import PageController
 
 if TYPE_CHECKING:
-    from browser_use.actor.page import Page
-    from browser_use.llm.base import BaseChatModel
+    pass
 
 logger = logging.getLogger(__name__)
 

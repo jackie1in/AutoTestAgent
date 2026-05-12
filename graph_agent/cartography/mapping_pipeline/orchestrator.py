@@ -59,8 +59,7 @@ async def run_orchestrated_mapping(
     current_url: str,
     app_id: str,
     session_id: str,
-    max_steps: int,
-    time_budget_ms: int = 600_000,
+    app_name: str = "",
     warm_start_candidates: list[dict[str, object]] | None = None,
     knowledge_on_demand_enabled: bool | None = None,
     knowledge_min_interval_sec: float | None = None,
@@ -210,11 +209,27 @@ async def run_orchestrated_mapping(
         enqueue_page=_enqueue_page,
     )
 
-    max(50, max_steps)
     loop = asyncio.get_event_loop()
     loop.time()
 
-    return await _run_main_loop(
+    # Per-page persistence: init once, flush after each page, finalize at end.
+    from graph_agent.cartography.persistence import PersistenceSession
+
+    persister = PersistenceSession(
+        app_id=app_id,
+        app_name=app_name or app_id,
+        session_id=session_id,
+        resolved_url=start_url,
+        current_url=current_url or start_url,
+        inventory=_inventory,
+        initial_actions_log=_initial_actions_log,
+    )
+    await persister.init()
+
+    async def _persist_page(page_result):
+        await persister.persist_page(page_result)
+
+    result = await _run_main_loop(
         browser=browser,
         llm=llm,
         _state=_state,
@@ -230,7 +245,6 @@ async def run_orchestrated_mapping(
         zone_rows=zone_rows,
         zone_rows_by_id=zone_rows_by_id,
         intervention_task_tracker=intervention_task_tracker,
-        max_steps=max_steps,
         orchestration_max_runtime_sec=orchestration_max_runtime_sec or 3600.0,
         inventory=_inventory,
         initial_actions_log=_initial_actions_log,
@@ -240,4 +254,8 @@ async def run_orchestrated_mapping(
         enqueue_page_fn=_enqueue_page,
         persist_checkpoint_fn=_persist_checkpoint,
         cleanup_foreign_tabs_fn=_cleanup_foreign_tabs,
+        persist_page_fn=_persist_page,
     )
+
+    await persister.finalize(result)
+    return result

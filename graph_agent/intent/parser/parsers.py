@@ -1,40 +1,23 @@
 from __future__ import annotations
 
-import json
 import logging
-import re
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field
 
 from graph_agent.models import (
     ActionType,
     ElementConstraints,
     ElementSnapshot,
     FrameLocatorSnapshot,
-    Intent,
+    GraphEdge,
     TabActionType,
     TabSnapshot,
 )
-from graph_agent.llm import get_llm, ainvoke_structured
 from graph_agent.intent.parser.base import (
     ACTION_MAPPING,
-    MIN_INTENT_CONFIDENCE,
-    UIDistillationResult,
-    _extract_json_object,
     _get_next_goal,
-    _heuristic_intent_fallback,
-    _intent_cache,
-    _make_intent_cache_key,
-    _response_to_text,
-    _schema_echo_cooldown_seconds,
-    _should_skip_distill,
-    _should_skip_refine,
-    clear_intent_cache,
     distill_ui_thought,
-    infer_intent_for_context,
     infer_intent_progressive,
 )
 

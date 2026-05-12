@@ -81,7 +81,9 @@ def _custom_action_description(name: str) -> str:
         "extract_menu": (
             "extract_menu: Extract navigation menu structure. Call AFTER opening"
             " the menu (e.g. send_keys('Alt+Z')). Returns JSON with items,"
-            " each having text/href/level/children. Empty items if menu not found. (none)"
+            " each having text/href/level/children. Uses JS for known frameworks"
+            " (Ant Design, Element UI), falls back to LLM vision for custom menus."
+            " Empty items if menu truly not found. (none)"
         ),
         "solve_captcha": (
             "solve_captcha: Detect and solve image-based captcha on the current page "

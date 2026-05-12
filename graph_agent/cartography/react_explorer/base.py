@@ -373,7 +373,7 @@ class ReActExplorerBase(BaseAgent):
             selector=selector,
             selector_chain=selector_chain,
             param_name=param_name,
-            action_value=None,
+            action_value=getattr(output.action, "text", None),
             element_snapshot=element_snapshot_json,
             thought=thought_text,
             step_index=step,

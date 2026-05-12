@@ -3,10 +3,20 @@ from __future__ import annotations
 import json
 import logging
 import re
+from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, Field
+from browser_use.llm.messages import (
+    BaseMessage,
+    ContentPartImageParam,
+    ContentPartTextParam,
+    ImageURL,
+    UserMessage,
+)
 
 from graph_agent.cartography.captcha.config_dom import CaptchaRecognitionResult
+
+if TYPE_CHECKING:
+    from langchain_core.language_models.chat_models import BaseChatModel
 
 logger = logging.getLogger(__name__)
 

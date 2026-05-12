@@ -5,21 +5,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import uuid
 from collections.abc import Awaitable, Callable
 from time import monotonic
 from typing import Any
 from urllib.parse import urlparse
 
-from playwright.async_api import async_playwright, expect
 
 from graph_agent.models import (
-    ActionType,
     ElementConstraints,
     FrameLocatorSnapshot,
     GraphEdge,
-    TabActionType,
 )
 
 DEFAULT_TIMEOUT_MS = 60_000
@@ -491,3 +487,29 @@ async def _run_with_http_wait(
         _remove_listener(page, "requestfailed", _on_request_done)
 
 
+
+
+async def _do_playback_action(loc, action_type: str, value: str = "", page=None) -> None:
+    if action_type == "fill":
+        await loc.fill(value)
+    elif action_type == "click":
+        await loc.click()
+    elif action_type == "select":
+        await loc.select_option(value)
+    elif action_type == "rich_text":
+        await loc.click()
+        kb = page.keyboard
+        await kb.press("Control+a")
+        await kb.type(value)
+
+def _capture_login_response_sync(response, login_error_message: list) -> None:
+    url = str(getattr(response, "url", "") or "").lower()
+    if "/project/login" not in url:
+        return
+    try:
+        body = response.text()
+    except Exception:
+        return
+    parsed = _extract_login_error_message(body)
+    if parsed:
+        login_error_message[0] = parsed

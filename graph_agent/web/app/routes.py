@@ -12,9 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from graph_agent.cartography.config import resolve_knowledge_trigger_profile
 from graph_agent.graph.pathfinding import get_path_from_nl_query, get_path_from_query
-from graph_agent.models import GraphEdge
 from graph_agent.web.app.config import (
-    DEFAULT_START_URL,
     _normalize_knowledge_profile,
     _resolve_app_name,
 )
@@ -38,7 +36,6 @@ from graph_agent.web.app.playback_utils import (
 from graph_agent.web.app.sse_utils import (
     _graph_stream_subscribers,
     _sse_generator,
-    notify_intent_update,
 )
 
 load_dotenv()
