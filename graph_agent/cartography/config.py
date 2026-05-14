@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 import re
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
 
+@lru_cache(maxsize=512)
 def clean_url(url: str) -> str:
     """Strip query parameters for stable identity. Preserves fragment (SPA route)."""
     if not url:
@@ -54,11 +56,13 @@ def setup_browser_use_timeouts() -> None:
             pass
 
 
+@lru_cache(maxsize=128)
 def is_http_url(value: str) -> bool:
     v = (value or "").strip()
     return v.startswith("http://") or v.startswith("https://")
 
 
+@lru_cache(maxsize=128)
 def is_login_url(url: str) -> bool:
     """Return True if the URL looks like a login/auth page."""
     if not url:
@@ -92,7 +96,7 @@ def env_bool(name: str, default: bool) -> bool:
     return default
 
 
-def load_inventory(inventory_path: str | Path) -> list[dict]:
+def load_inventory(inventory_path: str | Path) -> list[dict[str, object]]:
     path = Path(inventory_path)
     if not path.exists():
         raise FileNotFoundError(
@@ -288,3 +292,13 @@ def resolve_incremental_persist_enabled() -> bool:
 def resolve_extra_system_prompt() -> str:
     """User-provided extra system prompt injected into ReAct explorer."""
     return (os.getenv("CARTOGRAPHY_EXTRA_SYSTEM_PROMPT") or "").strip()
+
+
+def resolve_agent_marker() -> str:
+    """Prefix for agent-created records (auto-prepended to name/title fields)."""
+    return (os.getenv("CARTOGRAPHY_AGENT_MARKER") or "").strip() or "[AUTO]"
+
+
+def resolve_auto_marker_enabled() -> bool:
+    """Whether to auto-prepend agent marker to name/title input fields."""
+    return env_bool("CARTOGRAPHY_AUTO_MARKER_ENABLED", True)

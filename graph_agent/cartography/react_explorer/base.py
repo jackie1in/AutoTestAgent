@@ -10,12 +10,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any, cast
 
 from browser_use.browser.session import BrowserSession as Browser
 
 from graph_agent.cartography.base_agent import BaseAgent
-from graph_agent.cartography.captcha import normalize_manual_captcha_code
 from graph_agent.cartography.inference_core import (
     SemanticInferenceInput,
     infer_transition_semantics,
@@ -130,7 +130,11 @@ class ReActExplorerBase(BaseAgent):
     # ------------------------------------------------------------------
 
     def _build_system_prompt(self) -> str:
-        prompt = build_system_prompt()
+        all_actions = set(self.tools.registry.registry.actions.keys())
+        prompt = build_system_prompt(
+            registry=self.tools.registry,
+            supported_actions=all_actions,
+        )
         if self._extra_system_prompt:
             prompt += f"\n\n{self._extra_system_prompt}"
         return prompt
@@ -138,7 +142,7 @@ class ReActExplorerBase(BaseAgent):
     def _build_user_prompt(
         self,
         dom_text: str,
-        history: list[dict],
+        history: list[dict[str, object]],
         step: int,
         current_url: str,
         page_title: str = "",
@@ -249,14 +253,13 @@ class ReActExplorerBase(BaseAgent):
         self._dynamic_action_model = self._build_dynamic_action_model()
 
     # ------------------------------------------------------------------
-    # Proxy methods — delegate to PageActions for test monkeypatch surface
+    # Captcha helpers — delegate to captcha package
     # ------------------------------------------------------------------
 
     async def _prompt_manual_captcha_code(self, page, input_hint: str) -> str:
-        pa = self._page_actions
-        if pa is None:
-            return ""
-        return await pa._prompt_manual_captcha_code(page, input_hint)
+        from graph_agent.cartography.captcha import prompt_manual_captcha_code
+
+        return await prompt_manual_captcha_code(page, input_hint)
 
     async def _fill_captcha_code(
         self,
@@ -267,10 +270,9 @@ class ReActExplorerBase(BaseAgent):
         input_index: int | None,
         input_hint: str,
     ) -> str:
-        pa = self._page_actions
-        if pa is None:
-            return "CAPTCHA_FILL_FAILED no_page_actions"
-        return await pa._fill_captcha_code(
+        from graph_agent.cartography.captcha import fill_captcha_code
+
+        return await fill_captcha_code(
             page=page,
             controller=controller,
             captcha_code=captcha_code,
@@ -280,11 +282,15 @@ class ReActExplorerBase(BaseAgent):
 
     @staticmethod
     def _extract_captcha_result_code(result_text: str) -> str:
-        return PageActions._extract_captcha_result_code(result_text)
+        from graph_agent.cartography.captcha import extract_captcha_result_code
+
+        return extract_captcha_result_code(result_text)
 
     @staticmethod
     def _extract_captcha_fill_path(result_text: str) -> str:
-        return PageActions._extract_captcha_fill_path(result_text)
+        from graph_agent.cartography.captcha import extract_captcha_fill_path
+
+        return extract_captcha_fill_path(result_text)
 
     # ------------------------------------------------------------------
     # Lifecycle hooks
@@ -348,6 +354,17 @@ class ReActExplorerBase(BaseAgent):
                 )
                 selector_chain = _rank_selector_chain(node_selector, attrs, tag)
                 selector = selector_chain[0]
+
+                # Detect required field markers: HTML5 attr, aria, or CSS class
+                is_required = (
+                    attrs.get("required") is not None
+                    or attrs.get("aria-required") == "true"
+                    or bool(re.search(
+                        r"\b(required|is-required|mandatory|must)\b",
+                        str(attrs.get("class", "")),
+                    ))
+                )
+
                 element_snapshot_json = json.dumps(
                     {
                         "selector": selector,
@@ -359,6 +376,7 @@ class ReActExplorerBase(BaseAgent):
                         "type": attrs.get("type"),
                         "tag_name": tag,
                         "text_content": getattr(node, "node_value", ""),
+                        "required": is_required,
                         "attributes": attrs,
                         "frame_path": [],
                     },
@@ -406,6 +424,9 @@ class ReActExplorerBase(BaseAgent):
             )
         except Exception:
             fp_after = ""
+            dom_text_after = ""
+            title_after = ""
+            selector_map_after = {}
 
         current_url = ""
         _browser = self.browser
@@ -413,7 +434,7 @@ class ReActExplorerBase(BaseAgent):
             try:
                 page = await _browser.get_current_page()
                 if page is not None:
-                    current_url = page.url
+                    current_url = await page.get_url() or ""
             except Exception:
                 pass
 
@@ -433,15 +454,18 @@ class ReActExplorerBase(BaseAgent):
             view_fingerprint=self._pending_from_fp,
             data_signature=_build_data_signature(self._pending_from_url),
         )
+        # For SPA views, prefer the live browser title; fall back to cached page_title
+        resolved_to_title = (title_after or "").strip() or self._page_title or ""
         to_state = State(
             id=to_state_id,
             url=current_url or self._pending_from_url,
-            title=self._page_title or "",
+            title=resolved_to_title,
             spa_route=_extract_spa_route(current_url or self._pending_from_url),
             fingerprint=fp_after,
             view_fingerprint=fp_after,
             data_signature=_build_data_signature(
-                current_url or self._pending_from_url
+                current_url or self._pending_from_url,
+                dom_text=dom_text_after or "",
             ),
         )
 

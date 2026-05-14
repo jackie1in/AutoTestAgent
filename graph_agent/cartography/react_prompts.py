@@ -76,7 +76,10 @@ def _custom_action_description(name: str) -> str:
             "(query_text: string, target_type: string = all)"
         ),
         "discover_zones": (
-            "discover_zones: Discover functional zones on the current page. (none)"
+            "discover_zones: Analyze page with LLM to discover functional zones "
+            "(form, table, action_bar, filter, modal, tabs, etc.) and their CSS "
+            "selectors. Use as the FIRST action when encountering a new page to "
+            "understand its structure and focus exploration on interactive areas. (none)"
         ),
         "extract_menu": (
             "extract_menu: Extract navigation menu structure. Call AFTER opening"
@@ -109,7 +112,7 @@ def _fallback_descriptions() -> str:
 - wait: Wait for x seconds (seconds: integer = 1)
 - close_overlay: Close overlays/modal/drawer (none)
 - query_knowledge: Query historical knowledge (query_text: string, target_type: string = all)
-- discover_zones: Discover page functional zones (none)
+- discover_zones: Analyze page structure via LLM — call FIRST on new pages to identify functional zones by type+selector (none)
 - extract_menu: Extract navigation menu structure — call AFTER opening menu (none)
 - solve_captcha: Detect and solve image captcha (input_index: integer?, input_hint: string?)
 - done: Complete exploration task (text: string, success: boolean = true)"""
@@ -162,6 +165,65 @@ in one session using this depth-first pattern:
      Do NOT stop early — you have enough steps to complete the full tree.
 </menu_discovery>
 
+<zone_discovery>
+Before exploring interactive elements, call `discover_zones` to understand the
+page's functional layout.  It identifies zones by type (form, table, action_bar,
+filter, modal, tabs, card, chart, list, content) with their CSS selectors.
+Use these zones to:
+  - Prioritize exploration: forms > action_bars > tables > tabs > content.
+  - Scope interactions to specific zone selectors when the LLM knows them.
+  - Re-call after major page changes (tab switch, modal open, navigation).
+Call `discover_zones` as the FIRST action on every new page to avoid missing
+hidden interactive areas.
+</zone_discovery>
+
+<form_exploration>
+Forms (CREATE/EDIT dialogs) are HIGH-VALUE exploration targets — each input
+field is a transition that will be used to generate test scripts.
+
+When you open a form:
+  1. Systematically fill EVERY visible input, select, checkbox, and radio
+     field ONE AT A TIME (each `input` action is one transition).
+  2. After filling ALL fields, click the submit/save/confirm button.
+     → If validation errors appear: note which fields failed, then move on.
+     → If save succeeds: observe the result page (list updated, toast message).
+  3. EXCEPTION: skip the submit button if the form is clearly destructive
+     (delete, remove, reset password, batch delete).
+  4. For forms with more than 8 fields: fill at least 8, prioritizing those
+     marked as required (red asterisk *, aria-required, class="required").
+  5. Use `dropdown_options` before `select_dropdown` to discover available
+     options for each select field.
+</form_exploration>
+
+<data_safety>
+Before performing destructive operations (delete/remove/reset):
+
+STEP 1 — SCAN: Use `extract` tool with query="list all rows or items that
+  contain [AUTO]" to scan the data display area (table, list, card grid).
+  → Found [AUTO] records: proceed to STEP 4
+  → No [AUTO] records found: go to STEP 2
+
+STEP 2 — SEARCH: Check if the page has a search/filter input.
+  → Found a search box: input "[AUTO]" and submit the search.
+  → No search box: try scrolling or switching tabs to find [AUTO] records.
+  → Still none found after search: STOP — no agent data to operate on.
+    Report "No [AUTO] records found; destructive test skipped."
+
+STEP 3 — VERIFY: After search results appear, confirm at least one row
+  contains "[AUTO]". If the search returned unrelated results, STOP.
+
+STEP 4 — OPERATE: Now click the delete/remove button on the [AUTO] row.
+  Only operate on ONE record at a time.
+
+STEP 5 — CONFIRM: After deletion, verify the [AUTO] record is gone.
+  If the page has pagination, check that the record count decreased.
+
+Other rules:
+- When filling forms to CREATE records: name/title fields are AUTO-prefixed
+  with "[AUTO]" by the system. You don't need to add it yourself.
+- When MODIFYING: add "[Agent操作]" to remark/description fields before saving.
+</data_safety>
+
 <rules>
 - Only interact with elements that have a numeric [index].
 - After clicking something, observe the result. If a drawer/modal/overlay \
@@ -172,7 +234,7 @@ in one session using this depth-first pattern:
 - If you see a loading spinner, wait 2-3 seconds; if it persists, skip.
 - Do NOT submit destructive forms (delete, remove).
 - Switch to EVERY tab panel to discover hidden content.
-- Try filling at least one text field per form to observe validation behavior.
+- When exploring forms: fill EVERY field systematically, then submit. Each input=one transition.
 - If the page has horizontally scrollable containers (tables, carousels), \
   use scroll_horizontally to reveal hidden columns/items.
 - Use send_keys to trigger keyboard shortcuts (e.g. Alt+Z, Ctrl+S) if menus \
@@ -202,7 +264,7 @@ Respond in 中文 for evaluation/memory/next_goal fields, use English for action
 
 def build_user_prompt(
     browser_state_text: str,
-    history: list[dict],
+    history: list[dict[str, object]],
     explored_indices: set[int],
     step: int,
     max_steps: int,

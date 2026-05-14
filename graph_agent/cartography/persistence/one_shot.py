@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from typing import cast
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -37,7 +38,7 @@ async def persist_mapping_result(
     session_id: str,
     resolved_url: str,
     current_url: str,
-    inventory: list[dict],
+    inventory: list[dict[str, object]],
     initial_actions_log: list[dict[str, object]],
     result: "CartographyResult",
 ) -> None:
@@ -70,19 +71,19 @@ async def persist_mapping_result(
         }
 
         def _stats() -> dict[str, int]:
-            return runtime["stats"]  # type: ignore[return-value]
+            return cast(dict[str, int], runtime["stats"])
 
         def _ingest_version_id() -> str:
             return str(runtime["ingest_version_id"] or "")
 
         def _active_revision_ids() -> list[str]:
-            return runtime["active_revision_ids"]  # type: ignore[return-value]
+            return cast(list[str], runtime["active_revision_ids"])
 
         def _menu_rows() -> list[dict[str, object]]:
-            return runtime["menu_rows"]  # type: ignore[return-value]
+            return cast(list[dict[str, object]], runtime["menu_rows"])
 
         def _state_ids_by_url() -> dict[str, set[str]]:
-            return runtime["state_ids_by_url"]  # type: ignore[return-value]
+            return cast(dict[str, set[str]], runtime["state_ids_by_url"])
 
         def _index_state_url(state_id: str, url: str) -> None:
             raw = _as_str(url).strip()
@@ -117,7 +118,7 @@ async def persist_mapping_result(
                 f"{datetime.now(UTC).isoformat()}"
             )
             runtime["ingest_version_id"] = (
-                f"ingest:{hashlib.md5(ingest_seed.encode()).hexdigest()[:16]}"
+                f"ingest:{hashlib.md5(ingest_seed.encode(), usedforsecurity=False).hexdigest()[:16]}"
             )
             await manager.add_ingestion_run(
                 IngestionRun(
@@ -147,8 +148,8 @@ async def persist_mapping_result(
             login_url = resolved_url
             post_login_url = current_url or resolved_url
             if login_url != post_login_url and initial_actions_log:
-                login_fp = hashlib.md5(login_url.encode()).hexdigest()[:12]
-                post_fp = hashlib.md5(post_login_url.encode()).hexdigest()[:12]
+                login_fp = hashlib.md5(login_url.encode(), usedforsecurity=False).hexdigest()[:12]
+                post_fp = hashlib.md5(post_login_url.encode(), usedforsecurity=False).hexdigest()[:12]
                 from_state = State(
                     id=f"state:prelogin:{login_fp}",
                     url=login_url,
@@ -257,9 +258,9 @@ async def persist_mapping_result(
                     )
                     else TransitionSourceType.AUTO
                 )
-                revision_id = (
-                    f"trev:{hashlib.md5(f'{stable_key}|{transition.id}|{session_id}|{datetime.now(UTC).isoformat()}'.encode()).hexdigest()[:16]}"
-                )
+                revision_seed = f"{stable_key}|{transition.id}|{session_id}|{datetime.now(UTC).isoformat()}"
+                revision_digest = hashlib.md5(revision_seed.encode(), usedforsecurity=False).hexdigest()[:16]
+                revision_id = f"trev:{revision_digest}"
                 incoming_conf = max(
                     0.0, min(1.0, _as_float(transition_to_store.confidence, 0.5))
                 )
@@ -421,7 +422,7 @@ async def persist_mapping_result(
                     menu_id_src = f"{app_id}|{source_url}|{level}|{text}|{href}"
                     _menu_rows().append(
                         {
-                            "id": f"menu:{hashlib.md5(menu_id_src.encode()).hexdigest()[:12]}",
+                            "id": f"menu:{hashlib.md5(menu_id_src.encode(), usedforsecurity=False).hexdigest()[:12]}",
                             "text": text or href,
                             "href": href,
                             "level": level,
@@ -497,7 +498,7 @@ async def persist_mapping_result(
                     if not selector:
                         continue
                     zid_src = f"{app_id}|{z_type}|{selector}|{source_url_key}"
-                    zone_id = f"zone:{hashlib.md5(zid_src.encode()).hexdigest()[:12]}"
+                    zone_id = f"zone:{hashlib.md5(zid_src.encode(), usedforsecurity=False).hexdigest()[:12]}"
                     related_state_ids: set[str] = set()
                     for key in (source_url, clean_url(source_url)):
                         if not key:
@@ -598,7 +599,7 @@ async def persist_mapping_result(
                     break
 
             release_id = (
-                f"release:{app_id}:{hashlib.md5(_ingest_version_id().encode()).hexdigest()[:12]}"
+                f"release:{app_id}:{hashlib.md5(_ingest_version_id().encode(), usedforsecurity=False).hexdigest()[:12]}"
             )
             await manager.add_graph_release(
                 GraphRelease(
@@ -621,7 +622,7 @@ async def persist_mapping_result(
                 report = await analyzer.compute(app_id=app_id)
                 coverage_snapshot_id = (
                     f"cov:{session_id}:"
-                    f"{hashlib.md5(release_id.encode()).hexdigest()[:8]}"
+                    f"{hashlib.md5(release_id.encode(), usedforsecurity=False).hexdigest()[:8]}"
                 )
                 snapshot = CoverageSnapshot(
                     id=coverage_snapshot_id,
@@ -641,7 +642,7 @@ async def persist_mapping_result(
                 await manager.add_coverage_snapshot(snapshot)
                 await manager.link_session_coverage(session_id, coverage_snapshot_id)
                 await manager.link_release_coverage(release_id, coverage_snapshot_id)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("[PERSIST] coverage snapshot skipped: %s", e)
 
             semantic_metrics = _build_semantic_metrics(result)

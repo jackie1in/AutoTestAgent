@@ -89,7 +89,7 @@ def candidate_to_transition(
     step_index = int(candidate.get("step_index") or 0)
     trace_id = str(candidate.get("trace_id") or fallback_session_id or "manual")
     transition_seed = f"{trace_id}|{step_index}|{action.value}|{selector}|{from_hint}|{to_hint}"
-    transition_id = f"t:normalized:{hashlib.md5(transition_seed.encode()).hexdigest()[:16]}"
+    transition_id = f"t:normalized:{hashlib.md5(transition_seed.encode(), usedforsecurity=False).hexdigest()[:16]}"
     confidence = float(candidate.get("confidence_hint") or 0.5)
     return Transition(
         id=transition_id,

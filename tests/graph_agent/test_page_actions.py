@@ -7,10 +7,13 @@ discover_zones, extract_menu, solve_captcha.
 from __future__ import annotations
 
 import pytest
+from typing import cast
 
+from browser_use.llm.base import BaseChatModel
 from browser_use.tools.registry.service import Registry
 
 from graph_agent.cartography.react_explorer.page_actions import PageActions
+from graph_agent.lib.page_controller import PageController
 
 
 class _FakeResult:
@@ -42,7 +45,7 @@ class _FakeController:
 @pytest.mark.asyncio
 async def test_click_delegates_to_controller():
     ctrl = _FakeController()
-    pa = PageActions(ctrl, None, None, [0.0])
+    pa = PageActions(cast(PageController, ctrl), None, cast(BaseChatModel, None), [0.0])
     result = await pa.click(5)
     assert result == "clicked [5]"
     assert ctrl.click_calls == [5]
@@ -50,7 +53,7 @@ async def test_click_delegates_to_controller():
 
 @pytest.mark.asyncio
 async def test_click_without_controller_raises():
-    pa = PageActions(None, None, None, [0.0])
+    pa = PageActions(None, None, cast(BaseChatModel, None), [0.0])
     with pytest.raises(RuntimeError, match="PageController not set"):
         await pa.click(1)
 
@@ -63,12 +66,13 @@ async def test_click_without_controller_raises():
 def test_register_populates_registry():
     registry = Registry()
     supported: set[str] = set()
-    pa = PageActions(None, None, object(), [0.0])
+    pa = PageActions(None, None, cast(BaseChatModel, object()), [0.0])
     pa.register(registry, supported)
 
-    assert len(supported) == 7
+    assert len(supported) == 8
     for name in (
         "click",
+        "input",
         "scroll_horizontally",
         "close_overlay",
         "query_knowledge",
@@ -87,13 +91,13 @@ def test_register_populates_registry():
 
 @pytest.mark.asyncio
 async def test_close_overlay_without_browser():
-    pa = PageActions(None, None, None, [0.0])
+    pa = PageActions(None, None, cast(BaseChatModel, None), [0.0])
     result = await pa.close_overlay()
     assert "no browser" in result
 
 
 @pytest.mark.asyncio
-async def test_discover_zones_returns_delegation_msg():
-    pa = PageActions(None, None, None, [0.0])
+async def test_discover_zones_graceful_without_controller():
+    pa = PageActions(None, None, cast(BaseChatModel, None), [0.0])
     result = await pa.discover_zones()
-    assert "delegated" in result
+    assert "no page controller" in result.lower()

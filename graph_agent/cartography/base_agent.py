@@ -18,7 +18,7 @@ import os
 import re
 import time
 from collections import deque
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from browser_use.agent.views import ActionModel
 from browser_use.browser.session import BrowserSession as Browser
@@ -141,11 +141,11 @@ class BaseAgent:
     def _resolve_max_runtime_sec() -> float:
         raw = (os.getenv("CARTOGRAPHY_AGENT_MAX_RUNTIME_SEC") or "").strip()
         if not raw:
-            return 600.0
+            return 3600.0
         try:
             val = float(raw)
         except ValueError:
-            return 600.0
+            return 3600.0
         return max(30.0, min(4 * 3600.0, val))
 
     @staticmethod
@@ -216,7 +216,7 @@ You are an AI agent that explores a web application.
     def _build_user_prompt(
         self,
         dom_text: str,
-        history: list[dict],
+        history: list[dict[str, object]],
         step: int,
         current_url: str,
         page_title: str = "",
@@ -692,7 +692,7 @@ Remaining steps: {remaining}
         for name, action in sorted(self.tools.registry.registry.actions.items()):
             param_model = action.param_model
             if param_model is not None:
-                fields[name] = (Optional[param_model], None)
+                fields[name] = (param_model | None, None)
         return create_model("DynamicAction", __base__=ActionModel, **fields)
 
     async def _get_browser_snapshot(self) -> tuple[str, str, dict]:
@@ -792,7 +792,7 @@ Remaining steps: {remaining}
         text = re.sub(r"\b\d{4,}\b", "NUM", text)
         text = re.sub(r"\b[0-9a-fA-F]{8,}\b", "HEX", text)
         text = re.sub(r"\s+", " ", text).strip()
-        return hashlib.md5(text.encode("utf-8")).hexdigest()[:16]
+        return hashlib.md5(text.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
     @staticmethod
     def _compute_structural_fingerprint(selector_map: dict) -> str:
@@ -809,7 +809,7 @@ Remaining steps: {remaining}
                 counts[f"role:{role}"] += 1
         parts = [f"{k}={v}" for k, v in sorted(counts.items())]
         raw = "|".join(parts)
-        return hashlib.md5(raw.encode("utf-8")).hexdigest()[:12]
+        return hashlib.md5(raw.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
 
     def _compute_page_fingerprint(
         self,
@@ -821,14 +821,14 @@ Remaining steps: {remaining}
         """Composite fingerprint combining DOM text, title, and structure."""
         dom_fp = self._compute_dom_fingerprint(dom_text)
         struct_fp = self._compute_structural_fingerprint(selector_map)
-        title_part = hashlib.md5((title or "").encode("utf-8")).hexdigest()[:8]
+        title_part = hashlib.md5((title or "").encode("utf-8"), usedforsecurity=False).hexdigest()[:8]
         composite = f"{dom_fp}:{struct_fp}:{title_part}"
         include_layout = (
             (os.getenv("CARTOGRAPHY_LAYOUT_INCLUDE_IN_PAGE_FP") or "").strip().lower()
         )
         if layout_fingerprint and include_layout in {"1", "true", "yes", "on"}:
             composite = f"{composite}:{layout_fingerprint}"
-        return hashlib.md5(composite.encode("utf-8")).hexdigest()[:20]
+        return hashlib.md5(composite.encode("utf-8"), usedforsecurity=False).hexdigest()[:20]
 
     async def _detect_modal(self, page) -> bool:
         """Detect if a modal/dialog is currently visible."""

@@ -5,6 +5,7 @@ import signal
 import sys
 from contextlib import asynccontextmanager
 from types import FrameType
+from typing import Any, cast
 
 from browser_use.browser.session import BrowserSession as Browser
 
@@ -48,7 +49,7 @@ async def cleanup_all_browsers() -> None:
                 await browser.stop()
                 logger.info("Browser stopped")
             elif hasattr(browser, "close"):
-                await browser.close()
+                await cast(Any, browser).close()
                 logger.info("Browser closed")
         except Exception as e:
             logger.warning("Error during browser cleanup: %s", e)
@@ -85,7 +86,7 @@ async def managed_browser(browser: Browser):
             elif hasattr(browser, "stop"):
                 await browser.stop()
             elif hasattr(browser, "close"):
-                await browser.close()
+                await cast(Any, browser).close()
         except Exception as e:
             logger.warning("Browser cleanup error: %s", e)
         finally:

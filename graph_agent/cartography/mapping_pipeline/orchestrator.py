@@ -72,7 +72,7 @@ async def run_orchestrated_mapping(
     checkpoint_path: str = "",
     resume_from_checkpoint: bool | None = None,
     orchestration_max_runtime_sec: float | None = None,
-    inventory: list[dict] | None = None,
+    inventory: list[dict[str, object]] | None = None,
     initial_actions_log: list[dict[str, object]] | None = None,
     explorer_hint: str = "",
     warm_start_urls: set[str] | None = None,
@@ -208,6 +208,10 @@ async def run_orchestrated_mapping(
         primary_origin_url=primary_origin_url,
         enqueue_page=_enqueue_page,
     )
+
+    # Enqueue the page the browser is actually on (may have been redirected
+    # from start_url, e.g. to a login page), so exploration always begins.
+    await _enqueue_page(current_url or start_url, "initial-page")
 
     loop = asyncio.get_event_loop()
     loop.time()

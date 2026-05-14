@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from graph_agent.lib.page_controller import (
-    PageController,
-    extract_image_base64_from_src,
-)
+from graph_agent.lib.page_controller import PageController
+from graph_agent.lib.page_controller.image_utils import extract_image_base64_from_src
 
 
 @pytest.mark.asyncio

@@ -139,6 +139,7 @@ async def _run_main_loop(
             continue
         if skip_decision is None and skip_advisor is not None:
             skip_decision = await skip_advisor.evaluate(url)
+            assert skip_decision is not None
             if skip_decision.kind is SkipKind.SKIP_PAGE:
                 skip_metrics["skip_page_in_loop"] += 1
                 logger.info(
@@ -321,6 +322,8 @@ async def _run_main_loop(
             stuck_steps=stuck_steps,
             profile=knowledge_profile,
         )
+        knowledge_hint_text: str
+        knowledge_delta: dict[str, int | float]
         knowledge_hint_text, knowledge_delta, last_knowledge_query_ts = (
             await _maybe_inject_knowledge_hint(
                 knowledge_broker=knowledge_broker,

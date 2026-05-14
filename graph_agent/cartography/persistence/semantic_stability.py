@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from graph_agent.cartography.config import clean_url
 
@@ -30,18 +30,26 @@ def _as_str(value: object) -> str:
     return str(value or "")
 
 
-def _as_int(value: Any, default: int = 0) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
+def _as_int(value: object, default: int = 0) -> int:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, (float, str)):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+    return default
 
 
-def _as_float(value: Any, default: float = 0.0) -> float:
-    try:
+def _as_float(value: object, default: float = 0.0) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
-    except (TypeError, ValueError):
-        return default
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+    return default
 
 
 def _source_priority(source_type: object) -> int:
@@ -68,7 +76,7 @@ def _transition_stable_key(transition: object) -> str:
             f"{getattr(s, 'action', '')}:{getattr(s, 'selector', '')}"
             for s in steps
         )
-        steps_digest = hashlib.md5(steps_summary.encode("utf-8")).hexdigest()[:8]
+        steps_digest = hashlib.md5(steps_summary.encode("utf-8"), usedforsecurity=False).hexdigest()[:8]
     return f"{from_id}|{to_id}|{action}|{semantic}|{steps_digest}"
 
 
@@ -90,7 +98,7 @@ def _stable_signature(items: set[str]) -> str:
     if not items:
         return ""
     payload = "\n".join(sorted(item for item in items if item))
-    return hashlib.md5(payload.encode("utf-8")).hexdigest()
+    return hashlib.md5(payload.encode("utf-8"), usedforsecurity=False).hexdigest()
 
 
 SEMANTIC_STABILITY_THRESHOLD = 90.0

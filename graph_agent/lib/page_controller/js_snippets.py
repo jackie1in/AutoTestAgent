@@ -465,3 +465,47 @@ _TOP_LAYER_INFO_JS = """(el) => {
         bbox: {left: rect.left, top: rect.top, width: rect.width, height: rect.height}
     });
 }"""
+
+_PATCH_REQUIRED_FIELDS_JS = """() => {
+    // Mark required form fields so the LLM can see which inputs must be filled.
+    // Handles: native HTML5 required, aria-required, Ant Design Form.Item rules,
+    // Element UI el-form-item is-required, and generic asterisk markers.
+    const inputs = document.querySelectorAll(
+        'input[required], textarea[required], select[required], '
+        + '[aria-required="true"], '
+        + '.ant-form-item-required input, .ant-form-item-required textarea, '
+        + '.ant-form-item-required select, '
+        + '.el-form-item.is-required input, .el-form-item.is-required textarea, '
+        + '.el-form-item.is-required select, '
+        + '.is-required input, .is-required textarea, .is-required select'
+    );
+    for (const el of inputs) {
+        if (el.offsetParent !== null) {
+            // Set placeholder hint if empty
+            if (!el.getAttribute('placeholder') || el.getAttribute('placeholder') === '') {
+                const label = el.closest('.ant-form-item, .el-form-item, .form-group, '
+                    + '.form-item, .field, [class*="form-item" i]');
+                let hint = '';
+                if (label) {
+                    const labelEl = label.querySelector('label, .ant-form-item-label, '
+                        + '.el-form-item__label, [class*="label" i]');
+                    if (labelEl) {
+                        hint = (labelEl.textContent || '').replace(/[*:：\\s*]+$/g, '').trim();
+                    }
+                }
+                if (!hint) {
+                    const prev = el.previousElementSibling;
+                    if (prev) hint = (prev.textContent || '').replace(/[*:：\\s*]+$/g, '').trim();
+                }
+                // Max 20 chars, append required marker
+                if (hint) {
+                    el.setAttribute('placeholder', hint.slice(0, 20) + ' *必填');
+                }
+            }
+            // Ensure the required attribute is visible to DOM serialization
+            el.setAttribute('required', '');
+            el.setAttribute('aria-required', 'true');
+        }
+    }
+    return inputs.length;
+}"""

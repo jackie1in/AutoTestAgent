@@ -107,7 +107,7 @@ class NLResolver:
             - summary: str
             - name: str
             - score: float (similarity score)
-            - transitions: list[dict] (related transitions from Neo4j)
+            - transitions: list[dict[str, object]] (related transitions from Neo4j)
 
         Returns empty list if vector index is unavailable or no match found.
         """

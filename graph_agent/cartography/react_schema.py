@@ -7,7 +7,7 @@ browser-use-native actions.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
@@ -218,27 +218,23 @@ class SolveCaptchaAction(BaseModel):
 # ── Agent action union ───────────────────────────────────────────────
 
 AgentAction = Annotated[
-    Union[
-        # Browser-use aligned
-        ClickElementAction,
-        InputTextAction,
-        SelectDropdownAction,
-        ScrollAction,
-        ScrollHorizontallyAction,
-        WaitAction,
-        DoneAction,
-        SendKeysAction,
-        EvaluateAction,
-        DropdownOptionsAction,
-        FindElementsAction,
-        SearchPageAction,
-        CloseOverlayAction,
-        # Project-specific
-        DiscoverZonesAction,
-        ExtractMenuAction,
-        QueryKnowledgeAction,
-        SolveCaptchaAction,
-    ],
+    ClickElementAction
+    | InputTextAction
+    | SelectDropdownAction
+    | ScrollAction
+    | ScrollHorizontallyAction
+    | WaitAction
+    | DoneAction
+    | SendKeysAction
+    | EvaluateAction
+    | DropdownOptionsAction
+    | FindElementsAction
+    | SearchPageAction
+    | CloseOverlayAction
+    | DiscoverZonesAction
+    | ExtractMenuAction
+    | QueryKnowledgeAction
+    | SolveCaptchaAction,
     Field(discriminator="action_type"),
 ]
 

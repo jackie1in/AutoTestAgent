@@ -280,16 +280,24 @@ class RuntimeWatchdog:
             return GuardDecision()
 
         def _to_float(value: object, default: float) -> float:
-            try:
-                return float(value)  # type: ignore[arg-type]
-            except (TypeError, ValueError):
-                return default
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return float(value)
+            if isinstance(value, str):
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return default
+            return default
 
         def _to_int(value: object, default: int = 0) -> int:
-            try:
-                return int(value)  # type: ignore[arg-type]
-            except (TypeError, ValueError):
-                return default
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+            if isinstance(value, (float, str)):
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return default
+            return default
 
         now = time.time()
         window = [

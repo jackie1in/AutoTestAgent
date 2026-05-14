@@ -81,7 +81,7 @@ class LLMTransitionHint(TypedDict, total=False):
     to_url: str
 
 
-TransitionSourceType = Literal["auto", "manual_graph_assisted", "manual_raw"]
+type TransitionSourceType = Literal["auto", "manual_graph_assisted", "manual_raw"]
 
 
 class EvidenceBundleItem(TypedDict, total=False):

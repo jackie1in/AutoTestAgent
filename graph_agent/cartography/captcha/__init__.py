@@ -13,7 +13,13 @@ from graph_agent.cartography.captcha.recognition import (
     _needs_arithmetic_retry as _needs_arithmetic_retry,
     _normalize_captcha_code as _normalize_captcha_code,
     _parse_evaluate_result as _parse_evaluate_result,
+    extract_captcha_fill_path as extract_captcha_fill_path,
+    extract_captcha_result_code as extract_captcha_result_code,
     recognize_captcha_with_candidates as recognize_captcha_with_candidates,
     recognize_captcha_with_fallback as recognize_captcha_with_fallback,
 )
-from graph_agent.cartography.captcha.solver import solve_captcha_from_page as solve_captcha_from_page
+from graph_agent.cartography.captcha.solver import (
+    fill_captcha_code as fill_captcha_code,
+    prompt_manual_captcha_code as prompt_manual_captcha_code,
+    solve_captcha_from_page as solve_captcha_from_page,
+)

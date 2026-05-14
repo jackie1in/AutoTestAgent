@@ -1,7 +1,7 @@
 from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, LiteralString, cast
 from neo4j import AsyncDriver
 from graph_agent.models import (
     App, State, Transition, Zone, FrameNode,
@@ -12,8 +12,16 @@ logger = logging.getLogger(__name__)
 
 
 def _model_to_props(model: Any) -> dict[str, Any]:
-    """Convert Pydantic model to Neo4j-compatible property dict."""
-    data = model.model_dump(exclude_none=True, exclude={"from_state_id", "to_state_id"})
+    """Convert Pydantic model to Neo4j-compatible property dict.
+
+    ``from_state_id`` / ``to_state_id`` are only excluded for ``Transition``
+    (those are passed as separate Cypher params for relationship MATCH).
+    ``TransitionEntity`` and ``TransitionRevision`` store them as properties.
+    """
+    _TRANSITION_EXCLUDE = {"from_state_id", "to_state_id"}
+    model_class_name = type(model).__name__
+    exclude = _TRANSITION_EXCLUDE if model_class_name == "Transition" else set()
+    data = model.model_dump(exclude_none=True, exclude=exclude)
     result: dict[str, Any] = {}
     for k, v in data.items():
         if isinstance(v, datetime):
@@ -241,6 +249,7 @@ class GraphRepositoryCore:
         app_name: str = "",
     ) -> dict[str, Any]:
         async with self._driver.session() as session:
+            params: dict[str, Any]
             if app_id:
                 base_query = CypherQueries.SKIP_ADVISOR_BASE_BY_APP_ID
                 entity_query = CypherQueries.SKIP_ADVISOR_ENTITY_BY_APP_ID
@@ -277,6 +286,7 @@ class GraphRepositoryCore:
         limit: int,
     ) -> list[dict[str, Any]]:
         async with self._driver.session() as session:
+            params: dict[str, Any]
             if app_id:
                 query = CypherQueries.KNOWLEDGE_RELEASE_ROWS_BY_APP_ID
                 params = {"app_id": app_id, "release_id": release_id, "limit": limit}
@@ -287,7 +297,7 @@ class GraphRepositoryCore:
                     "release_id": release_id,
                     "limit": limit,
                 }
-            result = await session.run(query, **params)
+            result = await session.run(cast(LiteralString, query), **params)
             return await result.data()
 
     async def get_knowledge_legacy_rows(
@@ -298,13 +308,14 @@ class GraphRepositoryCore:
         limit: int,
     ) -> list[dict[str, Any]]:
         async with self._driver.session() as session:
+            params: dict[str, Any]
             if app_id:
                 query = CypherQueries.KNOWLEDGE_LEGACY_ROWS_BY_APP_ID
                 params = {"app_id": app_id, "limit": limit}
             else:
                 query = CypherQueries.KNOWLEDGE_LEGACY_ROWS_BY_APP_NAME
                 params = {"app_name": app_name, "limit": limit}
-            result = await session.run(query, **params)
+            result = await session.run(cast(LiteralString, query), **params)
             return await result.data()
 
     async def get_runner_warm_start_candidates(
@@ -481,7 +492,7 @@ class GraphRepositoryCore:
         while True:
             async with self._driver.session() as session:
                 result = await session.run(
-                    query,
+                    cast(LiteralString, query),
                     batch_size=max(1, int(batch_size)),
                     **params,
                 )

@@ -153,7 +153,7 @@ async def recognize_captcha_with_candidates(
         is_arithmetic = False
         recognition_path = "structured"
         try:
-            result = await llm.ainvoke(messages, output_format=CaptchaRecognitionResult)
+            result = await llm.ainvoke(messages, output_format=CaptchaRecognitionResult)  # type: ignore[arg-type]
             recognition: CaptchaRecognitionResult = result.completion  # type: ignore[assignment]
             raw_code = recognition.code
             is_arithmetic = recognition.is_arithmetic
@@ -166,8 +166,8 @@ async def recognize_captcha_with_candidates(
                 f"[CAPTCHA] Structured output failed ({structured_err}), falling back to plain text."
             )
             recognition_path = "plain_fallback"
-            result_plain = await llm.ainvoke(messages)
-            raw_code = str(result_plain.completion or "")
+            result_plain = await llm.ainvoke(messages)  # type: ignore[arg-type]
+            raw_code = str(getattr(result_plain, "completion", "") or "")
             logger.info("[CAPTCHA] Plain-text result: %r", raw_code)
 
         normalized_code = _normalize_captcha_code(raw_code, is_arithmetic=is_arithmetic)
@@ -190,7 +190,7 @@ async def recognize_captcha_with_candidates(
             ]
             try:
                 arith_result = await llm.ainvoke(
-                    arith_msgs,
+                    arith_msgs,  # type: ignore[arg-type]
                     output_format=CaptchaRecognitionResult,
                 )
                 arith_recognition: CaptchaRecognitionResult = arith_result.completion  # type: ignore[assignment]
@@ -199,9 +199,9 @@ async def recognize_captcha_with_candidates(
                     is_arithmetic=arith_recognition.is_arithmetic,
                 )
             except Exception:
-                arith_plain = await llm.ainvoke(arith_msgs)
+                arith_plain = await llm.ainvoke(arith_msgs)  # type: ignore[arg-type]
                 retry_normalized = _normalize_captcha_code(
-                    str(arith_plain.completion or ""), is_arithmetic=True
+                    str(getattr(arith_plain, "completion", "") or ""), is_arithmetic=True
                 )
             if retry_normalized:
                 normalized_code = retry_normalized
@@ -224,5 +224,23 @@ _CAPTCHA_INPUT_PATTERN = re.compile(
     r"captcha|图形.*码|图片.*码|验证码|verify.*code|auth.*code|\bcode\b",
     re.IGNORECASE,
 )
+
+
+def extract_captcha_result_code(result_text: str) -> str:
+    """Extract CAPTCHA_* status code from result text."""
+    match = re.search(r"(CAPTCHA_[A-Z_]+)", str(result_text or "").upper())
+    return match.group(1) if match else "CAPTCHA_UNKNOWN"
+
+
+def extract_captcha_fill_path(result_text: str) -> str:
+    """Determine how captcha was filled: input_index, semantic_match, fill_failed, or none."""
+    text = str(result_text or "").lower()
+    if "filled_index=" in text:
+        return "input_index"
+    if "filled_by_semantic_match" in text:
+        return "semantic_match"
+    if "fill_failed" in text:
+        return "fill_failed"
+    return "none"
 
 

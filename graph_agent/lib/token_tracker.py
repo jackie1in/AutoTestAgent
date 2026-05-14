@@ -128,7 +128,7 @@ class TokenUsageTracker:
             
             # Try raw_completion structure (OpenAI compatible)
             if usage.total_tokens == 0 and hasattr(llm_result, 'raw_completion'):
-                raw = llm_result.raw_completion
+                raw = llm_result.raw_completion  # type: ignore[union-attr]
                 if hasattr(raw, 'usage'):
                     u = raw.usage
                     usage.prompt_tokens = getattr(u, 'prompt_tokens', 0)

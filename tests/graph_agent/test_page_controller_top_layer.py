@@ -1,17 +1,27 @@
 from __future__ import annotations
 
 import pytest
+from typing import cast
 
-from graph_agent.lib.page_controller import (
-    PageController,
+from browser_use.browser.session import BrowserSession
+from browser_use.dom.views import DOMSelectorMap
+
+from graph_agent.lib.page_controller import PageController
+from graph_agent.lib.page_controller.js_snippets import (
     _PATCH_ANTD_JS,
     _PATCH_REACT_JS,
 )
 
 
+def _fake_browser_session() -> BrowserSession:
+    """Minimal BrowserSession — bypasses Pydantic init for tests that don't use browser."""
+    bs = BrowserSession.__new__(BrowserSession)
+    return bs
+
+
 @pytest.mark.asyncio
 async def test_render_llm_dom_with_top_marks_and_filters(monkeypatch: pytest.MonkeyPatch):
-    controller = PageController(browser_session=None)  # type: ignore[arg-type]
+    controller = PageController(browser_session=_fake_browser_session())
     controller._is_indexed = True
     controller._simplified_html = "\n".join(
         [
@@ -20,7 +30,7 @@ async def test_render_llm_dom_with_top_marks_and_filters(monkeypatch: pytest.Mon
             "plain context",
         ]
     )
-    controller._selector_map = {0: object(), 1: object()}  # type: ignore[assignment]
+    controller._selector_map = cast(DOMSelectorMap, {0: object(), 1: object()})
 
     async def _fake_extract():
         return [
@@ -56,9 +66,9 @@ async def test_click_element_reports_top_layer_fallback(monkeypatch: pytest.Monk
                 return {"is_top": self._top_checks > 1}
             return {"isBlank": False}
 
-    controller = PageController(browser_session=None)  # type: ignore[arg-type]
+    controller = PageController(browser_session=_fake_browser_session())
     controller._is_indexed = True
-    controller._selector_map = {3: _FakeNode()}  # type: ignore[assignment]
+    controller._selector_map = cast(DOMSelectorMap, {3: _FakeNode()})
     controller._element_text_map = {3: "Submit"}
 
     fake_element = _FakeElement()
@@ -101,7 +111,7 @@ async def test_update_tree_applies_react_then_antd_patches(
             return _FakeDomState(), None, None
 
     fake_page = _FakePage()
-    controller = PageController(browser_session=None)  # type: ignore[arg-type]
+    controller = PageController(browser_session=cast(BrowserSession, None))  # None ok: test monkeypatches away browser calls
 
     async def _fake_get_page():
         return fake_page
@@ -129,9 +139,9 @@ async def test_extract_interactive_elements_with_top_keeps_hit_source(
                 return {"is_visible": True, "is_top": False, "hit_source": "shadow"}
             return {}
 
-    controller = PageController(browser_session=None)  # type: ignore[arg-type]
+    controller = PageController(browser_session=_fake_browser_session())
     controller._is_indexed = True
-    controller._selector_map = {1: _FakeNode()}  # type: ignore[assignment]
+    controller._selector_map = cast(DOMSelectorMap, {1: _FakeNode()})
 
     async def _fake_get_element(index: int):
         assert index == 1

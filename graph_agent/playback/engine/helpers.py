@@ -498,7 +498,7 @@ async def _do_playback_action(loc, action_type: str, value: str = "", page=None)
         await loc.select_option(value)
     elif action_type == "rich_text":
         await loc.click()
-        kb = page.keyboard
+        kb = page.keyboard  # type: ignore[union-attr]
         await kb.press("Control+a")
         await kb.type(value)
 

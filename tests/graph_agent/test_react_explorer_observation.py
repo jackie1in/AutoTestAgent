@@ -24,7 +24,7 @@ class _FakeController:
 async def test_get_browser_snapshot_uses_update_tree_by_default() -> None:
     explorer = object.__new__(ReActExplorer)
     controller = _FakeController()
-    explorer._controller = controller
+    explorer._controller = controller  # type: ignore[assignment]
     explorer.browser = None
 
     dom_text, title, selector_map = await ReActExplorer._get_browser_snapshot(explorer)

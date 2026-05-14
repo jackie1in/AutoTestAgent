@@ -4,6 +4,8 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from neo4j import AsyncDriver
+
 from graph_agent.neo4j_client.repository.core import _model_to_props
 from graph_agent.neo4j_client.queries import CypherQueries
 
@@ -19,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class GraphRepositoryExtended:
+    _driver: AsyncDriver  # provided by GraphRepositoryCore via multiple inheritance
     async def upsert_intent(self, intent: Intent) -> None:
         logger.info("[Neo4j] upsert Intent id=%s key=%s", intent.id, getattr(intent, "key", ""))
         async with self._driver.session() as session:

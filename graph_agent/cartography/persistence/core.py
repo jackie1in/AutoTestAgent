@@ -6,6 +6,9 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from graph_agent.neo4j_client.manager import GraphManager
+
 from graph_agent.cartography.config import clean_url
 from graph_agent.lib.observability import observe
 from graph_agent.cartography.persistence.semantic_stability import (
@@ -43,7 +46,7 @@ class _PersistenceSessionCore:
         session_id: str,
         resolved_url: str,
         current_url: str,
-        inventory: list[dict],
+        inventory: list[dict[str, object]],
         initial_actions_log: list[dict[str, object]],
         mode: str = "auto",
     ) -> None:
@@ -56,7 +59,7 @@ class _PersistenceSessionCore:
         self.initial_actions_log = initial_actions_log
         self.mode = mode
 
-        self._manager = None  # type: GraphManager | None
+        self._manager: GraphManager | None = None
         self._ingest_version_id: str = ""
         self._active_revision_ids: list[str] = []
         self._menu_rows: list[dict[str, object]] = []
@@ -118,7 +121,7 @@ class _PersistenceSessionCore:
             f"{datetime.now(UTC).isoformat()}"
         )
         self._ingest_version_id = (
-            f"ingest:{hashlib.md5(ingest_seed.encode()).hexdigest()[:16]}"
+            f"ingest:{hashlib.md5(ingest_seed.encode(), usedforsecurity=False).hexdigest()[:16]}"
         )
         await manager.add_ingestion_run(
             IngestionRun(
@@ -148,8 +151,8 @@ class _PersistenceSessionCore:
         login_url = self.resolved_url
         post_login_url = self.current_url or self.resolved_url
         if login_url != post_login_url and self.initial_actions_log:
-            login_fp = hashlib.md5(login_url.encode()).hexdigest()[:12]
-            post_fp = hashlib.md5(post_login_url.encode()).hexdigest()[:12]
+            login_fp = hashlib.md5(login_url.encode(), usedforsecurity=False).hexdigest()[:12]
+            post_fp = hashlib.md5(post_login_url.encode(), usedforsecurity=False).hexdigest()[:12]
             from_state = State(
                 id=f"state:prelogin:{login_fp}",
                 url=login_url,
@@ -290,9 +293,9 @@ class _PersistenceSessionCore:
                 )
                 else TransitionSourceType.AUTO
             )
-            revision_id = (
-                f"trev:{hashlib.md5(f'{stable_key}|{transition.id}|{self.session_id}|{datetime.now(UTC).isoformat()}'.encode()).hexdigest()[:16]}"
-            )
+            revision_seed = f"{stable_key}|{transition.id}|{self.session_id}|{datetime.now(UTC).isoformat()}"
+            revision_digest = hashlib.md5(revision_seed.encode(), usedforsecurity=False).hexdigest()[:16]
+            revision_id = f"trev:{revision_digest}"
             incoming_conf = max(
                 0.0, min(1.0, _as_float(transition_to_store.confidence, 0.5))
             )

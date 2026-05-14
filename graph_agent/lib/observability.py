@@ -45,7 +45,7 @@ except Exception:  # pragma: no cover - optional dependency
 
 def observe(*args: Any, **kwargs: Any) -> Callable[[F], F]:
     """Safe observe decorator; no-op when lmnr is unavailable."""
-    return _observe(*args, **kwargs)
+    return _observe(*args, **kwargs)  # type: ignore[return-value]
 
 
 def initialize_laminar() -> bool:

@@ -4,10 +4,13 @@ import logging
 import re
 from typing import TYPE_CHECKING, cast
 
+import asyncio
+
 from graph_agent.cartography.captcha.config_dom import (
     _extract_form_ancestor_xpath,
     _score_captcha_img_node,
     _should_keep_img_candidate,
+    normalize_manual_captcha_code,
 )
 from graph_agent.cartography.captcha.recognition import (
     _parse_evaluate_result,
@@ -17,8 +20,8 @@ from graph_agent.cartography.types import LoginInfo
 from graph_agent.lib.page_controller import PageController
 
 if TYPE_CHECKING:
-    from langchain_core.language_models.chat_models import BaseChatModel
-    from playwright.async_api import Page
+    from browser_use.actor.page import Page
+    from browser_use.llm.base import BaseChatModel
 
 logger = logging.getLogger(__name__)
 
@@ -417,9 +420,81 @@ async def solve_captcha_from_page(
     )
     for idx, data_url in enumerate(image_data_urls, start=1):
         logger.debug("[CAPTCHA] Candidate #%d data_url=%s", idx, data_url)
-    code = await recognize_captcha_with_candidates(image_data_urls, llm)
+    code = await recognize_captcha_with_candidates(image_data_urls, llm)  # type: ignore[arg-type]
     if code:
         logger.info("[CAPTCHA] Recognized code: '%s'", code)
     else:
         logger.info("[CAPTCHA] Recognizer returned empty code.")
     return code
+
+
+async def prompt_manual_captcha_code(page, input_hint: str) -> str:
+    """Prompt user for captcha code via stdin. Pauses the ReAct loop."""
+    current_url = ""
+    try:
+        current_url = await page.get_url() or ""
+    except Exception:
+        current_url = ""
+    hint = input_hint.strip() or "<none>"
+    prompt = (
+        "\n[CAPTCHA][MANUAL] ReAct paused for manual captcha input.\n"
+        f"URL: {current_url or '<unknown>'}\n"
+        f"input_hint: {hint}\n"
+        "Please type captcha code and press Enter: "
+    )
+    try:
+        raw = await asyncio.to_thread(input, prompt)
+    except EOFError:
+        return ""
+    return normalize_manual_captcha_code(raw)
+
+
+async def fill_captcha_code(
+    *,
+    page,
+    controller,  # PageController
+    captcha_code: str,
+    input_index: int | None,
+    input_hint: str,
+) -> str:
+    """Fill captcha code into the target input element."""
+    import re as _re
+
+    if input_index is not None:
+        input_result = await controller.input_text(input_index, captcha_code)
+        return (
+            f"CAPTCHA_OK filled_index={input_index} "
+            f"code_len={len(captcha_code)} result={input_result.message}"
+        )
+
+    hint_pattern = (
+        _re.escape(input_hint)
+        if input_hint
+        else r"captcha|验证码|verify.*code|auth.*code"
+    )
+    fill_script = """
+    (...args) => {{
+        const [captchaCode, hintPattern] = args;
+        const re = new RegExp(hintPattern, 'i');
+        const inputs = document.querySelectorAll('input');
+        for (const inp of inputs) {{
+            const t = inp.type || 'text';
+            if (t === 'password') continue;
+            const sig = ((inp.name || '') + (inp.id || '') + (inp.placeholder || '') + (inp.className || '') + (inp.getAttribute('aria-label') || '')).toLowerCase();
+            if (re.test(sig)) {{
+                inp.focus();
+                const proto = Object.getPrototypeOf(inp);
+                const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+                if (desc && desc.set) desc.set.call(inp, captchaCode); else inp.value = captchaCode;
+                inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                return true;
+            }}
+        }}
+        return false;
+    }}
+    """
+    filled = bool(await page.evaluate(fill_script, captcha_code, hint_pattern))
+    if filled:
+        return f"CAPTCHA_OK filled_by_semantic_match code_len={len(captcha_code)}"
+    return "CAPTCHA_FILL_FAILED target_input_not_found"

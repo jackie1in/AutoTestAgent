@@ -98,7 +98,7 @@ class _FinalizeMixin:
             menu_id_src = f"{self.app_id}|{source_url}|{level}|{text}|{href}"
             self._menu_rows.append(
                 {
-                    "id": f"menu:{hashlib.md5(menu_id_src.encode()).hexdigest()[:12]}",
+                    "id": f"menu:{hashlib.md5(menu_id_src.encode(), usedforsecurity=False).hexdigest()[:12]}",
                     "text": text or href,
                     "href": href,
                     "level": level,
@@ -175,7 +175,7 @@ class _FinalizeMixin:
                 if not selector:
                     continue
                 zid_src = f"{self.app_id}|{z_type}|{selector}|{source_url_key}"
-                zone_id = f"zone:{hashlib.md5(zid_src.encode()).hexdigest()[:12]}"
+                zone_id = f"zone:{hashlib.md5(zid_src.encode(), usedforsecurity=False).hexdigest()[:12]}"
                 related_state_ids: set[str] = set()
                 for key in (source_url, clean_url(source_url)):
                     if not key:
@@ -276,9 +276,8 @@ class _FinalizeMixin:
                 mapping_stopped = True
                 break
 
-        release_id = (
-            f"release:{self.app_id}:{hashlib.md5(self._ingest_version_id.encode()).hexdigest()[:12]}"
-        )
+        release_digest = hashlib.md5(self._ingest_version_id.encode(), usedforsecurity=False).hexdigest()[:12]
+        release_id = f"release:{self.app_id}:{release_digest}"
         await manager.add_graph_release(
             GraphRelease(
                 id=release_id,
@@ -301,7 +300,7 @@ class _FinalizeMixin:
             report = await analyzer.compute(app_id=self.app_id)
             coverage_snapshot_id = (
                 f"cov:{self.session_id}:"
-                f"{hashlib.md5(release_id.encode()).hexdigest()[:8]}"
+                f"{hashlib.md5(release_id.encode(), usedforsecurity=False).hexdigest()[:8]}"
             )
             snapshot = CoverageSnapshot(
                 id=coverage_snapshot_id,
@@ -321,7 +320,7 @@ class _FinalizeMixin:
             await manager.add_coverage_snapshot(snapshot)
             await manager.link_session_coverage(self.session_id, coverage_snapshot_id)
             await manager.link_release_coverage(release_id, coverage_snapshot_id)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("[PERSIST] coverage snapshot skipped: %s", e)
 
         # --- Semantic metrics ---
@@ -401,7 +400,7 @@ class _FinalizeMixin:
         if self._manager is not None:
             try:
                 await self._manager.__aexit__(None, None, None)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("[PERSIST] Error closing manager: %s", e)
             self._manager = None
 

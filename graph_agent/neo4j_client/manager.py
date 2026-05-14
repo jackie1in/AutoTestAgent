@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, LiteralString, cast
 from graph_agent.neo4j_client.driver import Neo4jDriver
 from graph_agent.neo4j_client.repository import GraphRepository
 from graph_agent.models import (
@@ -44,12 +44,12 @@ class GraphManager:
     async def _run_write(self, query: str, **params) -> None:
         """Execute a write query."""
         async with self._driver.driver.session() as session:
-            await session.run(query, **params)
-    
+            await session.run(cast(LiteralString, query), **params)
+
     async def _run_read(self, query: str, **params) -> list[Any]:
         """Execute a read query and return records."""
         async with self._driver.driver.session() as session:
-            result = await session.run(query, **params)
+            result = await session.run(cast(LiteralString, query), **params)
             return await result.data()
 
     async def run_read(self, query: str, **params) -> list[Any]:

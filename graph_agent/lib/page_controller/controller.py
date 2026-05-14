@@ -23,6 +23,7 @@ from graph_agent.lib.page_controller.js_snippets import (
     _PAGE_INFO_JS,
     _PATCH_ANTD_JS,
     _PATCH_REACT_JS,
+    _PATCH_REQUIRED_FIELDS_JS,
     _SCROLL_HORIZONTAL_JS,
     _SCROLL_VERTICAL_JS,
     _TOP_LAYER_INFO_JS,
@@ -47,7 +48,6 @@ class PageController:
         self._element_text_map: dict[int, str] = {}
         self._simplified_html: str = ""
         self._is_indexed: bool = False
-        self._last_update_time: float = 0.0
 
     @property
     def simplified_html(self) -> str:
@@ -79,29 +79,22 @@ class PageController:
         )
 
     async def update_tree(self) -> str:
-        import time
-
-        from browser_use.dom.service import DomService
-
         page = await self._get_page()
-
         await self._apply_dom_patches(page)
 
-        dom_service = DomService(self._session)
-        dom_state, _tree, _timing = await dom_service.get_serialized_dom_tree()
-        self._simplified_html = dom_state.llm_representation()
-        self._selector_map = dom_state.selector_map
+        bs = await self._session.get_browser_state_summary(
+            include_screenshot=False,
+            include_recent_events=False,
+        )
+        self._simplified_html = bs.dom_state.llm_representation()
+        self._selector_map = bs.dom_state.selector_map
         self._element_text_map = _build_element_text_map(self._selector_map)
         self._is_indexed = True
-        self._last_update_time = time.time()
         return self._simplified_html
-
-    async def get_last_update_time(self) -> float:
-        return self._last_update_time
 
     async def _apply_dom_patches(self, page) -> None:
         """Apply lightweight DOM patches before serialized tree extraction."""
-        for script in (_PATCH_REACT_JS, _PATCH_ANTD_JS):
+        for script in (_PATCH_REACT_JS, _PATCH_ANTD_JS, _PATCH_REQUIRED_FIELDS_JS):
             try:
                 await page.evaluate(script)
             except Exception:
@@ -161,9 +154,9 @@ class PageController:
             return simplified
 
         top_info = await self.extract_interactive_elements_with_top()
-        top_map = {int(item["index"]): bool(item.get("is_top")) for item in top_info}
+        top_map = {int(str(item["index"])): bool(item.get("is_top")) for item in top_info}
         menu_map = {
-            int(item["index"]): bool(item.get("is_menu_container")) for item in top_info
+            int(str(item["index"])): bool(item.get("is_menu_container")) for item in top_info
         }
 
         lines = simplified.splitlines()

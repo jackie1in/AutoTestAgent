@@ -5,7 +5,6 @@ import hashlib
 import json
 import logging
 import re
-from collections import Counter
 from typing import TYPE_CHECKING
 
 from browser_use.browser.session import BrowserSession as Browser
@@ -185,6 +184,30 @@ def _looks_rate_limited(dom_text: str, url: str) -> bool:
 
 
 
+def _to_float(value: object) -> float:
+    """Safely convert value to float with explicit type checks."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def _to_int(value: object) -> int:
+    """Safely convert value to int with explicit type checks."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, (float, str)):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
 def rank_warm_start_candidates(
     candidates: list[dict[str, object]],
 ) -> list[dict[str, object]]:
@@ -194,18 +217,6 @@ def rank_warm_start_candidates(
     2. 历史发现但 zone 未探的（``zone_unexplored=True``）
     3. 历史 transition 置信度高
     """
-
-    def _to_float(value: object) -> float:
-        try:
-            return float(value)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return 0.0
-
-    def _to_int(value: object) -> int:
-        try:
-            return int(value)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return 0
 
     return sorted(
         candidates,
@@ -251,7 +262,7 @@ def _build_runtime_zone_id(
     selector_norm = (selector or "").strip()
     source_key = clean_url(source_url or "") if source_url else ""
     seed = f"{zone_type_norm}|{selector_norm}|{source_key}"
-    return f"zone:{hashlib.md5(seed.encode()).hexdigest()[:12]}"
+    return f"zone:{hashlib.md5(seed.encode(), usedforsecurity=False).hexdigest()[:12]}"
 
 
 async def ensure_browser_ready(browser: Browser, target_url: str) -> bool:
@@ -392,7 +403,7 @@ def build_knowledge_hint_text(
             "- action={action}, selector={selector}, conf={confidence:.2f}".format(
                 action=str(item.get("action") or ""),
                 selector=str(item.get("selector") or ""),
-                confidence=float(item.get("confidence") or 0.0),  # type: ignore[arg-type]
+                confidence=_to_float(item.get("confidence")),
             )
         )
     lines.append("- If hint conflicts with current page evidence, ignore the hint.")
@@ -461,7 +472,7 @@ async def _maybe_inject_knowledge_hint(
     knowledge_release_id: str,
     knowledge_topk_val: int,
     knowledge_timeout_ms: int,
-) -> tuple[str, dict[str, object], float]:
+) -> tuple[str, dict[str, int | float], float]:
     if not should_query_knowledge(
         enabled=knowledge_enabled,
         now_ts=now_ts,
@@ -494,7 +505,7 @@ async def _maybe_inject_knowledge_hint(
         ),
         timeout_ms=knowledge_timeout_ms,
     )
-    metrics_delta: dict[str, object] = {
+    metrics_delta: dict[str, int | float] = {
         "knowledge_query_count": 1,
         "knowledge_latency_ms": result.meta.query_latency_ms,
         "knowledge_cache_hit_count": 1 if result.meta.cache_hit else 0,
@@ -522,7 +533,7 @@ def _build_pipeline_result(
     layout_evidence,
     layout_confidence_samples: list[float],
     low_layout_confidence_hits: int,
-    low_layout_confidence_page_types: Counter[str],
+    low_layout_confidence_page_types: dict[str, int],
     knowledge_query_count: int,
     knowledge_hit_count: int,
     knowledge_cache_hit_count: int,

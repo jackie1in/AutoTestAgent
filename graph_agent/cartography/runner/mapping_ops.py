@@ -134,15 +134,19 @@ def _resolve_pipeline_resume_from_checkpoint() -> bool:
     return cartography_config.resolve_pipeline_resume_from_checkpoint()
 
 
-def _load_inventory(inventory_path: str | Path) -> list[dict]:
+def _load_inventory(inventory_path: str | Path) -> list[dict[str, object]]:
     return cartography_config.load_inventory(inventory_path)
 
 
 def _as_float(value: object, default: float = 0.0) -> float:
-    try:
-        return float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return default
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+    return default
 
 
 def _classify_runner_exception(exc: Exception) -> str:
@@ -200,7 +204,7 @@ async def run_mapping(
             "inventory_path is required. Run scout first, then pass --inventory to mapping."
         )
     initialize_laminar()
-    inventory = _load_inventory(inventory_path)
+    _inventory = _load_inventory(inventory_path)
 
     from browser_use import Browser
 
@@ -227,7 +231,7 @@ async def run_mapping(
     async with managed_browser(browser):
         llm = get_llm()
         logger.info("[RUNNER] === Pre-navigation phase starting ===")
-        initial_actions_log: list[dict[str, object]] = []
+        _initial_actions_log: list[dict[str, object]] = []
 
         # Navigate to the target URL and wait for the page to settle.
         # Login (including captcha) is handled entirely by the LLM explorer
@@ -288,7 +292,6 @@ async def run_mapping(
                         ctx = task.context or {}
                         target_url = str(ctx.get("url") or "").strip()
                         if not target_url and task.type == "explore_zone":
-                            # explore_zone 任务没有 url，反查它所属 state.url
                             sid = str(ctx.get("state_id") or "")
                             if sid:
                                 target_url = (
@@ -312,7 +315,7 @@ async def run_mapping(
                     logger.info(
                         f"[RUNNER] ExplorationScheduler injected {len(scheduler_candidates)} candidate(s)"
                     )
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("[RUNNER] scheduler warm-start skipped: %s", e)
         # 调度任务排在静态 warm-start 之前（discover_page 优先级最高）
         if scheduler_candidates:
@@ -345,7 +348,7 @@ async def run_mapping(
                     logger.info(
                         f"[RUNNER] auto-resolved active release_id={knowledge_release_id}"
                     )
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("[RUNNER] release_id auto-resolve skipped: %s", e)
 
         # SkipAdvisor — 跨 session 跳过已探索区域；失败/超时一律退化为 FULL_EXPLORE
@@ -382,7 +385,7 @@ async def run_mapping(
         retry_count = 0
         while True:
             try:
-                result = await run_orchestrated_mapping(
+                _result = await run_orchestrated_mapping(
                     browser=browser,
                     llm=llm,
                     start_url=resolved_url,
@@ -407,7 +410,7 @@ async def run_mapping(
             except asyncio.CancelledError:
                 logger.info("[RUNNER] Orchestrated exploration cancelled, cleaning up...")
                 raise
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 err_code = _classify_runner_exception(e)
                 if err_code in {"rate_limited", "unauthorized"} and retry_count < 1:
                     retry_count += 1

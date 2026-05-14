@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from browser_use.actor.page import Page
@@ -14,13 +14,13 @@ def _parse_eval_payload(raw: object) -> LayoutSnapshot:
     if raw is None or raw == "":
         return {}
     if isinstance(raw, dict):
-        return raw  # type: ignore[return-value]
+        return cast(LayoutSnapshot, raw)
     if isinstance(raw, str):
         try:
             parsed = json.loads(raw)
         except (TypeError, ValueError):
             return {}
-        return parsed if isinstance(parsed, dict) else {}  # type: ignore[return-value]
+        return cast(LayoutSnapshot, parsed) if isinstance(parsed, dict) else {}
     return {}
 
 
@@ -216,7 +216,7 @@ def compute_layout_fingerprint(snapshot: LayoutSnapshot) -> str:
         normalized.append(f"{tag}|{role}|{x},{y},{w},{h}|{fixed}{sticky}|{z}")
 
     raw = "|".join(sorted(normalized))
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()[:16]
+    return hashlib.md5(raw.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
 
 def estimate_layout_confidence(snapshot: LayoutSnapshot) -> float:

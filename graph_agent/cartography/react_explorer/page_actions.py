@@ -15,27 +15,64 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
-import time
 from typing import TYPE_CHECKING
 
 from browser_use.tools.registry.service import Registry
 
 from graph_agent.cartography.captcha import (
-    normalize_manual_captcha_code,
     resolve_captcha_solve_mode,
     solve_captcha_from_page,
 )
+from graph_agent.cartography.config import (
+    resolve_agent_marker,
+    resolve_auto_marker_enabled,
+)
+from graph_agent.cartography.react_explorer.overlay_handler import OverlayHandler
 from graph_agent.lib.page_controller import PageController
 
 if TYPE_CHECKING:
     from browser_use.browser.session import BrowserSession
     from browser_use.llm.base import BaseChatModel
-    from playwright.async_api import Page as PlaywrightPage
+    from graph_agent.cartography.llm_planning import LLMPageAnalysis
 
 logger = logging.getLogger(__name__)
 
 _PageActionsSharedWait = list[float]  # mutable reference: [total_wait_time]
+
+# Fields that get the agent marker auto-prepended (configurable via env)
+_NAME_FIELD_RE = re.compile(
+    (os.getenv("CARTOGRAPHY_NAME_FIELD_PATTERNS") or r"name|title|名称|标题|姓名"),
+    re.IGNORECASE,
+)
+
+
+# ---------------------------------------------------------------------------
+# Shared utilities
+# ---------------------------------------------------------------------------
+
+
+def _parse_menu_json(raw_text: str) -> dict:
+    """Extract menu/action JSON from LLM response, handling markdown fences."""
+    text = (raw_text or "").strip()
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    match = re.search(r'\{[\s\S]*"items"[\s\S]*\}', text)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return {"items": [], "error": "Failed to parse LLM response"}
 
 
 # ---------------------------------------------------------------------------
@@ -46,9 +83,9 @@ _PageActionsSharedWait = list[float]  # mutable reference: [total_wait_time]
 class PageActions:
     """Action handler registry backed by PageController (W3C event simulation).
 
-    Each public async method is an action handler.  ``register()`` wires them
-    into a browser-use ``Registry`` so they become available to the LLM via
-    the auto-generated ``ActionModel``.
+    Delegates complex handlers:
+    - OverlayHandler → close_overlay (5-phase dismissal)
+    - captcha/ package → solve_captcha
     """
 
     def __init__(
@@ -64,6 +101,8 @@ class PageActions:
         self._total_wait_time_ref: _PageActionsSharedWait = (
             total_wait_time_ref if total_wait_time_ref is not None else [0.0]
         )
+        self._last_zone_analysis: LLMPageAnalysis | None = None
+        self._overlay_handler = OverlayHandler(browser, llm, controller)
 
     # ------------------------------------------------------------------
     # Registration
@@ -72,12 +111,14 @@ class PageActions:
     def register(self, registry: Registry, supported_actions: set[str]) -> None:
         """Wire custom action handlers into *registry* and update *supported_actions*.
 
-        Only registers actions that browser-use does NOT provide:
+        Only registers actions that browser-use does NOT provide or
+        that need custom logic on top of browser-use built-ins:
         - W3C click (overrides browser-use CDP click)
+        - input (overrides: auto-prepends agent marker to name/title fields)
         - scroll_horizontally, close_overlay
         - query_knowledge, discover_zones, extract_menu, solve_captcha
 
-        All others (input, select_dropdown, scroll, wait, send_keys, go_back,
+        All others (select_dropdown, scroll, wait, send_keys, go_back,
         evaluate, done, etc.) use browser-use built-ins.
         """
         _self = self
@@ -87,10 +128,20 @@ class PageActions:
             return await _self.click(index)
 
         click.__name__ = "click"
-        registry.action(
-            description="Click element by index using W3C pointer events"
-        )(click)
+        registry.action(description="Click element by index using W3C pointer events")(
+            click
+        )
         supported_actions.add("click")
+
+        # -- input (override: auto-prepend agent marker to name/title fields) --
+        async def input(index: int, text: str) -> str:
+            return await _self.input_text(index, text)
+
+        input.__name__ = "input"
+        registry.action(
+            description="Click and type text into an input element; auto-prepends agent marker for name/title fields"
+        )(input)
+        supported_actions.add("input")
 
         # -- scroll_horizontally --
         async def scroll_horizontally(
@@ -99,9 +150,9 @@ class PageActions:
             return await _self.scroll_horizontally(direction, amount, index)
 
         scroll_horizontally.__name__ = "scroll_horizontally"
-        registry.action(
-            description="Scroll the page or element horizontally"
-        )(scroll_horizontally)
+        registry.action(description="Scroll the page or element horizontally")(
+            scroll_horizontally
+        )
         supported_actions.add("scroll_horizontally")
 
         # -- close_overlay --
@@ -109,9 +160,7 @@ class PageActions:
             return await _self.close_overlay()
 
         close_overlay.__name__ = "close_overlay"
-        registry.action(description="Close modal/popup/dialog overlay")(
-            close_overlay
-        )
+        registry.action(description="Close modal/popup/dialog overlay")(close_overlay)
         supported_actions.add("close_overlay")
 
         # -- query_knowledge --
@@ -119,9 +168,9 @@ class PageActions:
             return await _self.query_knowledge(query_text, target_type)
 
         query_knowledge.__name__ = "query_knowledge"
-        registry.action(
-            description="Query knowledge base for transition hints"
-        )(query_knowledge)
+        registry.action(description="Query knowledge base for transition hints")(
+            query_knowledge
+        )
         supported_actions.add("query_knowledge")
 
         # -- discover_zones --
@@ -129,9 +178,7 @@ class PageActions:
             return await _self.discover_zones()
 
         discover_zones.__name__ = "discover_zones"
-        registry.action(description="Trigger zone discovery analysis")(
-            discover_zones
-        )
+        registry.action(description="Trigger zone discovery analysis")(discover_zones)
         supported_actions.add("discover_zones")
 
         # -- extract_menu --
@@ -139,9 +186,7 @@ class PageActions:
             return await _self.extract_menu()
 
         extract_menu.__name__ = "extract_menu"
-        registry.action(description="Extract navigation menu structure")(
-            extract_menu
-        )
+        registry.action(description="Extract navigation menu structure")(extract_menu)
         supported_actions.add("extract_menu")
 
         # -- solve_captcha --
@@ -165,6 +210,18 @@ class PageActions:
         r = await ctrl.click_element(index)
         return r.message
 
+    async def input_text(self, index: int, text: str) -> str:
+        """Type text into an input element, auto-prepending agent marker for name/title fields."""
+        ctrl = self._require_controller()
+        if resolve_auto_marker_enabled():
+            marker = resolve_agent_marker()
+            if marker:
+                elem_desc = ctrl._element_text_map.get(index, "")
+                if _NAME_FIELD_RE.search(elem_desc) and marker not in text:
+                    text = f"{marker} {text}"
+        r = await ctrl.input_text(index, text)
+        return r.message
+
     async def scroll_horizontally(
         self, direction: str = "right", amount: int = 300, index: int | None = None
     ) -> str:
@@ -173,20 +230,69 @@ class PageActions:
         return r.message
 
     async def close_overlay(self) -> str:
-        browser = self._browser
-        if browser is None:
-            return "Close overlay failed: no browser"
-        page = await browser.get_current_page()
-        if page is None:
-            return "Close overlay failed: no active page"
-        closed = await self._close_overlays(page)
-        return f"Closed {closed} overlay(s)"
+        return await self._overlay_handler.close_overlay()
 
     async def query_knowledge(self, query_text: str, target_type: str = "all") -> str:
         return await self._query_knowledge(query_text.strip(), target_type.strip())
 
     async def discover_zones(self) -> str:
-        return "Zone discovery delegated to pipeline analysis"
+        """Analyze the current page's functional zones via LLM.
+
+        Returns a structured zone list the agent can use to focus exploration
+        on high-value interactive areas (forms, tables, action_bars, etc.).
+        """
+        try:
+            from graph_agent.cartography.llm_planning import analyze_page_with_llm
+        except ImportError as e:
+            return f"Zone discovery failed: cannot import analyzer — {e}"
+
+        ctrl = self._controller
+        browser = self._browser
+        if ctrl is None:
+            return "Zone discovery failed: no page controller"
+
+        dom_text = ctrl.simplified_html or ""
+        if not dom_text:
+            return "Zone discovery skipped: no DOM content available"
+
+        current_url = ""
+        page_title = ""
+        if browser is not None:
+            try:
+                current_url = await browser.get_current_page_url() or ""
+                page = await browser.get_current_page()
+                if page is not None:
+                    page_title = await page.get_title() or ""
+            except Exception:
+                pass
+
+        if not current_url:
+            return "Zone discovery skipped: cannot determine current URL"
+
+        analysis = await analyze_page_with_llm(
+            llm=self._llm,
+            dom_text=dom_text,
+            current_url=current_url,
+            page_title=page_title,
+        )
+
+        zones = analysis.functional_zones
+        if not zones:
+            return (
+                f"No functional zones detected on this page "
+                f"(page_type={analysis.page_type})."
+            )
+
+        lines = [
+            f"Discovered {len(zones)} functional zone(s) on {current_url} "
+            f"(page_type={analysis.page_type}):",
+        ]
+        for i, z in enumerate(zones, 1):
+            desc = f" — {z.description}" if z.description else ""
+            lines.append(f"  {i}. [{z.zone_type}] {z.selector}{desc}")
+
+        self._last_zone_analysis = analysis
+        return "\n".join(lines)
 
     async def extract_menu(self) -> str:
         ctrl = self._require_controller()
@@ -240,13 +346,20 @@ Rules:
             ])
 
             raw = response.completion if hasattr(response, 'completion') else str(response)
-            parsed = self._parse_menu_json(raw)
+            parsed = _parse_menu_json(raw)
             return json.dumps(parsed)
         except Exception as e:
             logger.warning("LLM-based menu extraction fallback failed: %s", e)
             return js_result
 
-    async def solve_captcha(self, input_index: int | None = None, input_hint: str = "") -> str:
+    async def solve_captcha(
+        self, input_index: int | None = None, input_hint: str = ""
+    ) -> str:
+        from graph_agent.cartography.captcha import (
+            fill_captcha_code,
+            prompt_manual_captcha_code,
+        )
+
         browser = self._browser
         if browser is None:
             return "CAPTCHA_FAILED no browser"
@@ -263,14 +376,12 @@ Rules:
         if solve_mode == "manual":
             _MAX_MANUAL_RETRIES = 5
             for _attempt in range(1, _MAX_MANUAL_RETRIES + 1):
-                pause_started = time.monotonic()
-                captcha_code = await self._prompt_manual_captcha_code(page, input_hint)
-                manual_wait_ms = int((time.monotonic() - pause_started) * 1000)
+                captcha_code = await prompt_manual_captcha_code(page, input_hint)
                 if not captcha_code:
                     if _attempt < _MAX_MANUAL_RETRIES:
                         continue
                     return f"CAPTCHA_MANUAL_EMPTY mode={solve_mode} attempts={_attempt}"
-                fill_result = await self._fill_captcha_code(
+                fill_result = await fill_captcha_code(
                     page=page, controller=ctrl,
                     captcha_code=captcha_code, input_index=input_index, input_hint=input_hint,
                 )
@@ -284,7 +395,7 @@ Rules:
             )
             if not captcha_code:
                 return f"CAPTCHA_EMPTY_CODE mode={solve_mode}"
-        fill_result = await self._fill_captcha_code(
+        fill_result = await fill_captcha_code(
             page=page, controller=ctrl,
             captcha_code=captcha_code, input_index=input_index, input_hint=input_hint,
         )
@@ -299,34 +410,6 @@ Rules:
         if ctrl is None:
             raise RuntimeError("PageController not set — call explore_page() first")
         return ctrl
-
-    async def _close_overlays(self, page: "PlaywrightPage") -> int:
-        try:
-            result = await page.evaluate(
-                """() => {
-                    let closed = 0;
-                    document.querySelectorAll(
-                        '.ant-drawer-close, .ant-modal-close, '
-                        + '.el-drawer__close-btn, .el-dialog__close'
-                    ).forEach(btn => { btn.click(); closed++; });
-                    if (closed === 0) {
-                        const mask = document.querySelector(
-                            '.ant-drawer-mask, .ant-modal-mask, .ant-modal-wrap'
-                        );
-                        if (mask && getComputedStyle(mask).display !== 'none') {
-                            document.dispatchEvent(
-                                new KeyboardEvent('keydown',
-                                    {key: 'Escape', keyCode: 27, bubbles: true})
-                            );
-                            closed++;
-                        }
-                    }
-                    return closed;
-                }"""
-            )
-            return int(result) if result else 0
-        except Exception:
-            return 0
 
     async def _query_knowledge(self, query_text: str, target_type: str) -> str:
         if not query_text:
@@ -374,111 +457,3 @@ Rules:
                 return f"Historical transition hints: {preview}"
         except Exception as e:
             return f"Knowledge query failed: {e}"
-
-    async def _prompt_manual_captcha_code(
-        self, page: "PlaywrightPage", input_hint: str
-    ) -> str:
-        current_url = ""
-        try:
-            current_url = await page.get_url() or ""
-        except Exception:
-            current_url = ""
-        hint = input_hint.strip() or "<none>"
-        prompt = (
-            "\n[CAPTCHA][MANUAL] ReAct paused for manual captcha input.\n"
-            f"URL: {current_url or '<unknown>'}\n"
-            f"input_hint: {hint}\n"
-            "Please type captcha code and press Enter: "
-        )
-        try:
-            raw = await asyncio.to_thread(input, prompt)
-        except EOFError:
-            return ""
-        return normalize_manual_captcha_code(raw)
-
-    async def _fill_captcha_code(
-        self,
-        *,
-        page: "PlaywrightPage",
-        controller: PageController,
-        captcha_code: str,
-        input_index: int | None,
-        input_hint: str,
-    ) -> str:
-        if input_index is not None:
-            input_result = await controller.input_text(input_index, captcha_code)
-            return (
-                f"CAPTCHA_OK filled_index={input_index} "
-                f"code_len={len(captcha_code)} result={input_result.message}"
-            )
-
-        hint_pattern = (
-            re.escape(input_hint) if input_hint else r"captcha|验证码|verify.*code|auth.*code"
-        )
-        fill_script = """
-        (...args) => {{
-            const [captchaCode, hintPattern] = args;
-            const re = new RegExp(hintPattern, 'i');
-            const inputs = document.querySelectorAll('input');
-            for (const inp of inputs) {{
-                const t = inp.type || 'text';
-                if (t === 'password') continue;
-                const sig = ((inp.name || '') + (inp.id || '') + (inp.placeholder || '') + (inp.className || '') + (inp.getAttribute('aria-label') || '')).toLowerCase();
-                if (re.test(sig)) {{
-                    inp.focus();
-                    const proto = Object.getPrototypeOf(inp);
-                    const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
-                    if (desc && desc.set) desc.set.call(inp, captchaCode); else inp.value = captchaCode;
-                    inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    return true;
-                }}
-            }}
-            return false;
-        }}
-        """
-        filled = bool(await page.evaluate(fill_script, captcha_code, hint_pattern))
-        if filled:
-            return "CAPTCHA_OK filled_by_semantic_match code_len={}".format(len(captcha_code))
-        return "CAPTCHA_FILL_FAILED target_input_not_found"
-
-    @staticmethod
-    def _extract_captcha_result_code(result_text: str) -> str:
-        match = re.search(r"(CAPTCHA_[A-Z_]+)", str(result_text or "").upper())
-        return match.group(1) if match else "CAPTCHA_UNKNOWN"
-
-    @staticmethod
-    def _extract_captcha_fill_path(result_text: str) -> str:
-        text = str(result_text or "").lower()
-        if "filled_index=" in text:
-            return "input_index"
-        if "filled_by_semantic_match" in text:
-            return "semantic_match"
-        if "fill_failed" in text:
-            return "fill_failed"
-        return "none"
-
-    @staticmethod
-    def _parse_menu_json(raw_text: str) -> dict:
-        """Extract menu JSON from LLM response, handling markdown fences."""
-        text = (raw_text or "").strip()
-        # Try direct parse first
-        try:
-            return json.loads(text)
-        except (json.JSONDecodeError, TypeError):
-            pass
-        # Try extracting from markdown code block
-        match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
-        if match:
-            try:
-                return json.loads(match.group(1))
-            except (json.JSONDecodeError, TypeError):
-                pass
-        # Try finding JSON object with "items" key
-        match = re.search(r'\{[\s\S]*"items"[\s\S]*\}', text)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except (json.JSONDecodeError, TypeError):
-                pass
-        return {"items": [], "error": "Failed to parse LLM response"}

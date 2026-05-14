@@ -4,11 +4,17 @@ class TransitionQueriesMixin:
     SET t += $props
     SET t.name = coalesce(t.selector, t.action, t.id)
     WITH t
-    MATCH (from_state:State {id: $from_state_id})
-    MERGE (t)-[:FROM]->(from_state)
+    OPTIONAL MATCH (from_state:State {id: $from_state_id})
+    WHERE $from_state_id <> '' AND from_state IS NOT NULL
+    FOREACH (_ IN CASE WHEN from_state IS NOT NULL THEN [1] ELSE [] END |
+        MERGE (t)-[:FROM]->(from_state)
+    )
     WITH t
-    MATCH (to_state:State {id: $to_state_id})
-    MERGE (t)-[:TO]->(to_state)
+    OPTIONAL MATCH (to_state:State {id: $to_state_id})
+    WHERE $to_state_id <> '' AND to_state IS NOT NULL
+    FOREACH (_ IN CASE WHEN to_state IS NOT NULL THEN [1] ELSE [] END |
+        MERGE (t)-[:TO]->(to_state)
+    )
     RETURN t
     """
 

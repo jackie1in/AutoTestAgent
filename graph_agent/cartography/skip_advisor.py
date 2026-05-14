@@ -22,10 +22,14 @@ from graph_agent.neo4j_client.manager import GraphManager
 
 
 def _as_float(value: object, default: float = 0.0) -> float:
-    try:
-        return float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return default
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+    return default
 
 
 def _parse_iso_or_neo_datetime(value: object) -> datetime | None:
@@ -293,7 +297,7 @@ class SkipAdvisor:
             )
             self._account_decision(decision)
             return decision
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             self._error_count += 1
             self._record_failure()
             decision = SkipDecision(

@@ -13,10 +13,14 @@ def _as_str(value: object) -> str:
 
 
 def _as_float(value: object, default: float = 0.0) -> float:
-    try:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
-    except (TypeError, ValueError):
-        return default
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+    return default
 
 
 def _extract_app_name_from_app_id(app_id: str) -> str:
@@ -285,7 +289,7 @@ class KnowledgeBroker:
             result.meta.source = "timeout"
             result.meta.query_latency_ms = (time.monotonic() - started) * 1000
             return result
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             self._record_failure()
             result = KnowledgeQueryResult()
             result.meta.error = str(e)

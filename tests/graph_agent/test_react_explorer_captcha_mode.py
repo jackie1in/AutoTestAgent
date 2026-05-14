@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from graph_agent.cartography.react_explorer.page_actions import (
-    PageActions,
-    solve_captcha_from_page,
-)
+from graph_agent.cartography.captcha import solve_captcha_from_page  # noqa: F401
+from graph_agent.cartography.react_explorer.page_actions import PageActions
 
 
 class _FakeInputResult:
@@ -20,9 +18,6 @@ class _FakeController:
     async def input_text(self, index: int, text: str) -> _FakeInputResult:
         self.filled.append((index, text))
         return _FakeInputResult("input-ok")
-
-    async def get_last_update_time(self) -> float:
-        return 0.0
 
 
 class _FakePage:
@@ -45,7 +40,7 @@ def _make_page_actions(controller, browser, llm=None):
     return PageActions(
         controller=controller,
         browser=browser,
-        llm=llm or object(),
+        llm=llm or object(),  # type: ignore[arg-type]
         total_wait_time_ref=[0.0],
     )
 

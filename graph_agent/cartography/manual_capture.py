@@ -34,7 +34,7 @@ def _state_id_from_hint(value: str) -> str:
     cleaned = (value or "").strip()
     if cleaned.startswith("state:"):
         return cleaned
-    digest = hashlib.md5(cleaned.encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.md5(cleaned.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
     return f"state:manual:{digest}"
 
 

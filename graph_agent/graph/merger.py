@@ -496,11 +496,11 @@ class GraphMerger:
             )
             conflicts = [record async for record in conflict_result]
             new_sel_len = len(transition.selector or "")
-            new_priority = _source_priority(
-                getattr(transition, "source_type", "auto").value
-                if hasattr(getattr(transition, "source_type", None), "value")
-                else str(getattr(transition, "source_type", "auto"))
-            )
+            source_type_val = getattr(transition, "source_type", None)
+            if hasattr(source_type_val, "value"):
+                new_priority = _source_priority(source_type_val.value)  # type: ignore[union-attr]
+            else:
+                new_priority = _source_priority(str(source_type_val or "auto"))
             for rec in conflicts:
                 old_priority = _source_priority(str(rec.get("source_type") or "auto"))
                 if new_priority > old_priority:
