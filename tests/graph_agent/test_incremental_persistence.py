@@ -9,12 +9,10 @@ Covers:
 """
 from __future__ import annotations
 
-import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from graph_agent.cartography.config import resolve_incremental_persist_enabled
 from graph_agent.cartography.persistence import (
     PersistenceSession,
     _empty_stats,
@@ -82,22 +80,6 @@ class TestEmptyStats:
         assert b["states_added"] == 0
 
 
-class TestResolveIncrementalPersistEnabled:
-    def test_default_false(self):
-        with patch.dict(os.environ, {}, clear=True):
-            assert resolve_incremental_persist_enabled() is False
-
-    def test_enabled_true(self):
-        with patch.dict(os.environ, {"INCREMENTAL_PERSIST_ENABLED": "true"}):
-            assert resolve_incremental_persist_enabled() is True
-
-    def test_enabled_1(self):
-        with patch.dict(os.environ, {"INCREMENTAL_PERSIST_ENABLED": "1"}):
-            assert resolve_incremental_persist_enabled() is True
-
-    def test_enabled_false(self):
-        with patch.dict(os.environ, {"INCREMENTAL_PERSIST_ENABLED": "false"}):
-            assert resolve_incremental_persist_enabled() is False
 
 
 def _make_mock_manager():

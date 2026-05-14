@@ -429,6 +429,12 @@ async def _run_main_loop(
             else:
                 stuck_steps = 0
 
+            # Attach accumulated page-level data to explore_result
+            # so they are persisted incrementally (not just at finalize).
+            explore_result.menus = list(menu_items_discovered)
+            explore_result.zone_hints = list(zones_discovered)
+            explore_result.layout_evidence = list(layout_evidence)
+
             # Per-page flush to Neo4j for incremental durability.
             if persist_page_fn is not None:
                 try:

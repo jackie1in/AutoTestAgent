@@ -68,8 +68,8 @@ class _FinalizeMixin:
                 if transition.id not in seen_tids:
                     self._accumulated_result.transitions.append(transition)
                     seen_tids.add(transition.id)
-            if final_result.history:
-                self._accumulated_result.history.extend(final_result.history)
+            if final_result.history and not self._accumulated_result.history:
+                self._accumulated_result.history = final_result.history
             if final_result.layout_evidence:
                 self._accumulated_result.layout_evidence.extend(final_result.layout_evidence)
             if final_result.menus:
@@ -85,44 +85,45 @@ class _FinalizeMixin:
         result = self._accumulated_result
         assert result is not None
 
-        # --- Menus ---
-        for i, menu in enumerate(result.menus):
-            if not isinstance(menu, dict):
-                continue
-            text = _as_str(menu.get("text")).strip()
-            href = _as_str(menu.get("href")).strip()
-            level = _as_int(menu.get("level") or 0, 0)
-            source_url = _as_str(menu.get("source_url")).strip()
-            if not text and not href:
-                continue
-            menu_id_src = f"{self.app_id}|{source_url}|{level}|{text}|{href}"
-            self._menu_rows.append(
-                {
-                    "id": f"menu:{hashlib.md5(menu_id_src.encode(), usedforsecurity=False).hexdigest()[:12]}",
-                    "text": text or href,
-                    "href": href,
-                    "level": level,
-                    "order": i,
-                    "is_active": True,
-                    "ingest_version_id": self._ingest_version_id,
-                }
-            )
-        if self._menu_rows:
-            await manager.add_menus(
-                app_id=self.app_id,
-                menus=self._menu_rows,
-                page_url=self.current_url or self.resolved_url,
-                session_id=self.session_id,
-            )
-            for menu in self._menu_rows:
-                menu_id = _as_str(menu.get("id"))
-                if menu_id:
-                    await manager.link_ingestion_emits_menu(
-                        self._ingest_version_id, menu_id
-                    )
+        # --- Menus (skip if already written incrementally) ---
+        if not self._menu_rows:
+            for i, menu in enumerate(result.menus):
+                if not isinstance(menu, dict):
+                    continue
+                text = _as_str(menu.get("text")).strip()
+                href = _as_str(menu.get("href")).strip()
+                level = _as_int(menu.get("level") or 0, 0)
+                source_url = _as_str(menu.get("source_url")).strip()
+                if not text and not href:
+                    continue
+                menu_id_src = f"{self.app_id}|{source_url}|{level}|{text}|{href}"
+                self._menu_rows.append(
+                    {
+                        "id": f"menu:{hashlib.md5(menu_id_src.encode(), usedforsecurity=False).hexdigest()[:12]}",
+                        "text": text or href,
+                        "href": href,
+                        "level": level,
+                        "order": i,
+                        "is_active": True,
+                        "ingest_version_id": self._ingest_version_id,
+                    }
+                )
+            if self._menu_rows:
+                await manager.add_menus(
+                    app_id=self.app_id,
+                    menus=self._menu_rows,
+                    page_url=self.current_url or self.resolved_url,
+                    session_id=self.session_id,
+                )
+                for menu in self._menu_rows:
+                    menu_id = _as_str(menu.get("id"))
+                    if menu_id:
+                        await manager.link_ingestion_emits_menu(
+                            self._ingest_version_id, menu_id
+                        )
 
-        # --- Zones ---
-        if getattr(result, "zone_hints", None):
+        # --- Zones (skip if already written incrementally) ---
+        if not self._zone_rows and getattr(result, "zone_hints", None):
             _status_priority = {
                 "undiscovered": 0,
                 "stale": 0,

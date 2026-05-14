@@ -182,18 +182,56 @@ Forms (CREATE/EDIT dialogs) are HIGH-VALUE exploration targets — each input
 field is a transition that will be used to generate test scripts.
 
 When you open a form:
+  IMPORTANT: Filling and submitting the form IS the exploration. Do NOT
+  skip a form because "this is just exploration" or "the form has too many
+  fields." Every field you fill and every submit result is a recorded
+  transition used to generate real test scripts later.
   1. Systematically fill EVERY visible input, select, checkbox, and radio
      field ONE AT A TIME (each `input` action is one transition).
   2. After filling ALL fields, click the submit/save/confirm button.
-     → If validation errors appear: note which fields failed, then move on.
      → If save succeeds: observe the result page (list updated, toast message).
+     → If save fails (page stays, no network request, or validation errors):
+       a. Scan for unfilled required fields: red border-color, red asterisk *,
+          aria-required, HTML5 required. Fill every one you find.
+       b. Click submit again. Repeat this retry loop up to 3 times.
+       c. Only after 3 failed submit attempts, give up — click back/cancel to
+          return to the list page (do NOT skip the form without trying to save).
   3. EXCEPTION: skip the submit button if the form is clearly destructive
      (delete, remove, reset password, batch delete).
-  4. For forms with more than 8 fields: fill at least 8, prioritizing those
-     marked as required (red asterisk *, aria-required, class="required").
+  4. Fill ALL required fields (marked with red asterisk *, aria-required,
+     class="required", HTML5 required attribute, or red border-color).
+     Do not skip any required field regardless of how many fields the form has.
   5. Use `dropdown_options` before `select_dropdown` to discover available
-     options for each select field.
+     options for each select field.  If `dropdown_options` says the element
+     is NOT a native <select>, do NOT use `select_dropdown` — instead click
+     the option directly.
+  6. For inputs whose placeholder contains "搜索": click the input first.
+     If NO dropdown appears, look for a "设置" or "创建" button in the same
+     row. Click it to open a creation dialog, fill and submit, then type
+     the created record's name into the original search input.
 </form_exploration>
+
+<dropdown_handling>
+Before using `dropdown_options` or `select_dropdown`, understand the dropdown type:
+
+1. The system checks the element's HTML tag. If it's NOT <select>, it returns
+   a warning. Pay attention to this warning!
+
+2. STANDARD (<select> tag): `dropdown_options` lists options, `select_dropdown`
+   selects one. Works as expected.
+
+3. NON-STANDARD (<div>, <span>, <input>, or anything not <select>):
+   a. Click the trigger element to open the dropdown panel
+   b. Identify the dropdown panel that appeared — look for the popup/dropdown
+      container directly adjacent to or below the trigger you clicked.
+      IMPORTANT: scope to THIS dropdown only, NOT all dropdowns on the page.
+      If using evaluate/JS, first locate the parent dropdown container
+      (the popup/panel adjacent to the trigger you clicked), then query
+      options only within that parent — never query options globally.
+   c. Use regular `click` on the specific option you want within that panel
+   d. For tree: expand parent nodes first, then click the leaf option
+   e. For searchable selects: input text to filter, then click the match
+</dropdown_handling>
 
 <data_safety>
 Before performing destructive operations (delete/remove/reset):

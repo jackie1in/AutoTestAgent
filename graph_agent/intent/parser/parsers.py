@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -243,6 +244,15 @@ def _element_snapshot_from_interacted(
             if text_content:
                 break
     
+    required = (
+        attrs.get("required") is not None
+        or attrs.get("aria-required") == "true"
+        or bool(re.search(
+            r"\b(required|is-required|mandatory|must)\b",
+            str(attrs.get("class", "")),
+        ))
+    )
+
     return ElementSnapshot(
         selector=selector,
         xpath=str(element.get("xpath")) if element.get("xpath") else None,
@@ -262,6 +272,7 @@ def _element_snapshot_from_interacted(
         value=str(attrs.get("value")) if attrs.get("value") else None,
         href=str(attrs.get("href")) if attrs.get("href") else None,
         title=str(attrs.get("title")) if attrs.get("title") else None,
+        required=required,
         attributes=attrs,
         frame_path=_extract_frame_path_from_interacted(interacted),
     )

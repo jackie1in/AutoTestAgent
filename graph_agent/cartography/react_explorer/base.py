@@ -16,6 +16,7 @@ from typing import Any, cast
 from browser_use.browser.session import BrowserSession as Browser
 
 from graph_agent.cartography.base_agent import BaseAgent
+from graph_agent.cartography.config import resolve_include_attributes
 from graph_agent.cartography.inference_core import (
     SemanticInferenceInput,
     infer_transition_semantics,
@@ -86,7 +87,7 @@ class ReActExplorerBase(BaseAgent):
             os.getenv("BROWSER_USE_VISION_DETAIL_LEVEL") or ""
         ).strip()
         super().__init__(
-            task="Explore the page and record all interactive elements and transitions.",
+            task="Explore the page: interact with EVERY element (click, fill, select), submit forms, and map all transitions.",
             llm=llm,
             browser=browser_session,
             max_steps=max_steps,
@@ -673,7 +674,7 @@ class ReActExplorerBase(BaseAgent):
             self._state_id = state_id
 
         assert bs is not None, "BrowserSession must not be None at this point"
-        self._controller = PageController(bs)
+        self._controller = PageController(bs, include_attributes=resolve_include_attributes())
 
         # Wire actions now that controller is ready.
         self._register_actions()

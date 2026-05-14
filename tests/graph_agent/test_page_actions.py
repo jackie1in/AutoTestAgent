@@ -69,10 +69,11 @@ def test_register_populates_registry():
     pa = PageActions(None, None, cast(BaseChatModel, object()), [0.0])
     pa.register(registry, supported)
 
-    assert len(supported) == 8
+    assert len(supported) == 9
     for name in (
         "click",
         "input",
+        "dropdown_options",
         "scroll_horizontally",
         "close_overlay",
         "query_knowledge",

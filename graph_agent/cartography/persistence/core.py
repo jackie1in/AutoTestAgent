@@ -63,6 +63,7 @@ class _PersistenceSessionCore:
         self._ingest_version_id: str = ""
         self._active_revision_ids: list[str] = []
         self._menu_rows: list[dict[str, object]] = []
+        self._zone_rows: list[dict[str, object]] = []
         self._stats: dict[str, int] = _empty_stats()
         self._state_ids_by_url: dict[str, set[str]] = {}
         self._seen_state_ids: set[str] = set()
@@ -444,6 +445,105 @@ class _PersistenceSessionCore:
                 await manager.link_ingestion_emits_evidence(
                     self._ingest_version_id, evidence_id
                 )
+
+        # --- Menus (incremental: write per page, dedupe by menu_id) ---
+        existing_menu_ids = {_as_str(m.get("id")) for m in self._menu_rows}
+        new_menus: list[dict[str, object]] = []
+        for i, menu in enumerate(page_result.menus):
+            if not isinstance(menu, dict):
+                continue
+            text = _as_str(menu.get("text")).strip()
+            href = _as_str(menu.get("href")).strip()
+            level = _as_int(menu.get("level") or 0, 0)
+            source_url = _as_str(menu.get("source_url")).strip()
+            if not text and not href:
+                continue
+            menu_id_src = f"{self.app_id}|{source_url}|{level}|{text}|{href}"
+            menu_id = f"menu:{hashlib.md5(menu_id_src.encode(), usedforsecurity=False).hexdigest()[:12]}"
+            if menu_id in existing_menu_ids:
+                continue
+            row = {
+                "id": menu_id,
+                "text": text or href,
+                "href": href,
+                "level": level,
+                "order": len(self._menu_rows) + len(new_menus),
+                "is_active": True,
+                "ingest_version_id": self._ingest_version_id,
+            }
+            new_menus.append(row)
+            existing_menu_ids.add(menu_id)
+
+        if new_menus:
+            await manager.add_menus(
+                app_id=self.app_id,
+                menus=new_menus,
+                page_url="",  # Skip _clear_page_menus for incremental writes
+                session_id=self.session_id,
+            )
+            for m in new_menus:
+                await manager.link_ingestion_emits_menu(
+                    self._ingest_version_id, _as_str(m.get("id"))
+                )
+            self._menu_rows.extend(new_menus)
+
+            # --- Menu-transition navigated_via links ---
+            for transition in page_result.transitions:
+                signal = f"{transition.selector} {transition.thought or ''}".lower()
+                for menu in self._menu_rows:
+                    text = str(menu.get("text") or "").strip().lower()
+                    if text and text in signal:
+                        await manager.link_transition_navigated_via(
+                            transition.id, str(menu["id"])
+                        )
+                        break
+
+        # --- Zones (incremental: write per page, dedupe by zone_id) ---
+        existing_zone_ids = {_as_str(z.get("id")) for z in self._zone_rows}
+        new_zones: list[dict[str, object]] = []
+        for zone in page_result.zone_hints:
+            if not isinstance(zone, dict):
+                continue
+            selector = _as_str(zone.get("selector")).strip()
+            z_type = _as_str(zone.get("zone_type") or "content").strip()
+            source_url = _as_str(zone.get("source_url")).strip()
+            source_url_key = clean_url(source_url) if source_url else ""
+            if not selector:
+                continue
+            zid_src = f"{self.app_id}|{z_type}|{selector}|{source_url_key}"
+            zone_id = f"zone:{hashlib.md5(zid_src.encode(), usedforsecurity=False).hexdigest()[:12]}"
+            if zone_id in existing_zone_ids:
+                continue
+            # Resolve state_ids linked to this zone's source URL
+            related_state_ids: set[str] = set()
+            for key in (source_url, source_url_key):
+                if key:
+                    related_state_ids.update(self._state_ids_by_url.get(key, set()))
+            row = {
+                "id": zone_id,
+                "type": z_type,
+                "selector": selector,
+                "text_sample": _as_str(zone.get("description")).strip(),
+                "summary": _as_str(zone.get("description")).strip(),
+                "element_count": 0,
+                "bounds": "",
+                "exploration_status": "discovered",
+                "ingest_version_id": self._ingest_version_id,
+                "state_ids": sorted(related_state_ids),
+            }
+            new_zones.append(row)
+            existing_zone_ids.add(zone_id)
+
+        if new_zones:
+            await manager.add_zones(
+                app_id=self.app_id,
+                zones=new_zones,
+            )
+            for z in new_zones:
+                await manager.link_ingestion_emits_zone(
+                    self._ingest_version_id, _as_str(z.get("id"))
+                )
+            self._zone_rows.extend(new_zones)
 
         # Accumulate for final stats
         if self._accumulated_result is not None:

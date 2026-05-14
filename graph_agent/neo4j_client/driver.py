@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 
-from neo4j import AsyncDriver, AsyncGraphDatabase
+from neo4j import AsyncDriver, AsyncGraphDatabase, NotificationMinimumSeverity
 
 logger = logging.getLogger(__name__)
 
@@ -18,15 +18,28 @@ class Neo4jDriver:
         password: str | None = None,
     ):
         logging.getLogger("neo4j.notifications").setLevel(logging.DEBUG)
+        if not logging.getLogger("neo4j.notifications").handlers:
+            _h = logging.StreamHandler()
+            _h.setFormatter(logging.Formatter("%(levelname)s [neo4j] %(message)s"))
+            logging.getLogger("neo4j.notifications").addHandler(_h)
         self._uri: str = uri or os.getenv("NEO4J_URI", "bolt://localhost:7687")
         self._user: str = user or os.getenv("NEO4J_USER", "neo4j")
         self._password: str = password or os.getenv("NEO4J_PASSWORD", "autotestagent")
         self._driver: AsyncDriver | None = None
 
+    @staticmethod
+    def _resolve_notification_severity() -> NotificationMinimumSeverity:
+        raw = (os.getenv("NEO4J_WARN_NOTIFICATIONS") or "").strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            return NotificationMinimumSeverity.INFORMATION
+        return NotificationMinimumSeverity.OFF
+
     async def connect(self) -> AsyncDriver:
         if self._driver is None:
             self._driver = AsyncGraphDatabase.driver(
-                self._uri, auth=(self._user, self._password)
+                self._uri,
+                auth=(self._user, self._password),
+                notifications_min_severity=self._resolve_notification_severity(),
             )
             await self._driver.verify_connectivity()
             logger.info("Connected to Neo4j at %s", self._uri)
@@ -49,57 +62,141 @@ class Neo4jDriver:
         driver = await self.connect()
         async with driver.session() as session:
             # Constraints
-            await session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (a:App) REQUIRE a.id IS UNIQUE")
-            await session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (s:State) REQUIRE s.id IS UNIQUE")
-            await session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (t:Transition) REQUIRE t.id IS UNIQUE")
-            await session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (z:Zone) REQUIRE z.id IS UNIQUE")
-            await session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (f:Frame) REQUIRE f.id IS UNIQUE")
-            await session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (e:Entity) REQUIRE e.id IS UNIQUE")
-            await session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (ei:EntityInstance) REQUIRE ei.id IS UNIQUE")
-            await session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (i:Intent) REQUIRE i.id IS UNIQUE")
-            await session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (c:Checkpoint) REQUIRE c.id IS UNIQUE")
-            await session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (fc:FieldConstraint) REQUIRE fc.id IS UNIQUE")
-            await session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (tc:TestCase) REQUIRE tc.id IS UNIQUE")
-            await session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (s:Session) REQUIRE s.id IS UNIQUE")
-            await session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (m:Menu) REQUIRE m.id IS UNIQUE")
-            await session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (ev:Evidence) REQUIRE ev.id IS UNIQUE")
-            await session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (run:IngestionRun) REQUIRE run.id IS UNIQUE")
-            await session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (ent:TransitionEntity) REQUIRE ent.stable_key IS UNIQUE")
-            await session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (rev:TransitionRevision) REQUIRE rev.revision_id IS UNIQUE")
-            await session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (gr:GraphRelease) REQUIRE gr.id IS UNIQUE")
-            await session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (cov:CoverageSnapshot) REQUIRE cov.id IS UNIQUE")
+            await session.run(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (a:App) REQUIRE a.id IS UNIQUE"
+            )
+            await session.run(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (s:State) REQUIRE s.id IS UNIQUE"
+            )
+            await session.run(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (t:Transition) REQUIRE t.id IS UNIQUE"
+            )
+            await session.run(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (z:Zone) REQUIRE z.id IS UNIQUE"
+            )
+            await session.run(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (f:Frame) REQUIRE f.id IS UNIQUE"
+            )
+            await session.run(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (e:Entity) REQUIRE e.id IS UNIQUE"
+            )
+            await session.run(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (ei:EntityInstance) REQUIRE ei.id IS UNIQUE"
+            )
+            await session.run(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (i:Intent) REQUIRE i.id IS UNIQUE"
+            )
+            await session.run(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (c:Checkpoint) REQUIRE c.id IS UNIQUE"
+            )
+            await session.run(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (fc:FieldConstraint) REQUIRE fc.id IS UNIQUE"
+            )
+            await session.run(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (tc:TestCase) REQUIRE tc.id IS UNIQUE"
+            )
+            await session.run(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (s:Session) REQUIRE s.id IS UNIQUE"
+            )
+            await session.run(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (m:Menu) REQUIRE m.id IS UNIQUE"
+            )
+            await session.run(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (ev:Evidence) REQUIRE ev.id IS UNIQUE"
+            )
+            await session.run(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (run:IngestionRun) REQUIRE run.id IS UNIQUE"
+            )
+            await session.run(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (ent:TransitionEntity) REQUIRE ent.stable_key IS UNIQUE"
+            )
+            await session.run(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (rev:TransitionRevision) REQUIRE rev.revision_id IS UNIQUE"
+            )
+            await session.run(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (gr:GraphRelease) REQUIRE gr.id IS UNIQUE"
+            )
+            await session.run(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (cov:CoverageSnapshot) REQUIRE cov.id IS UNIQUE"
+            )
 
             # Indexes
             await session.run("CREATE INDEX IF NOT EXISTS FOR (a:App) ON (a.entry_url)")
             await session.run("CREATE INDEX IF NOT EXISTS FOR (s:State) ON (s.url)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (s:State) ON (s.fingerprint)")
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (s:State) ON (s.fingerprint)"
+            )
             await session.run("CREATE INDEX IF NOT EXISTS FOR (s:State) ON (s.app_id)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (t:Transition) ON (t.confidence)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (t:Transition) ON (t.session_id)")
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (t:Transition) ON (t.confidence)"
+            )
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (t:Transition) ON (t.session_id)"
+            )
             await session.run("CREATE INDEX IF NOT EXISTS FOR (i:Intent) ON (i.key)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (c:Checkpoint) ON (c.layer)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (c:Checkpoint) ON (c.session_id)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (z:Zone) ON (z.exploration_status)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (sess:Session) ON (sess.app_id)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (ei:EntityInstance) ON (ei.status)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (ei:EntityInstance) ON (ei.session_id)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (tc:TestCase) ON (tc.category)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (fc:FieldConstraint) ON (fc.field_name)")
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (c:Checkpoint) ON (c.layer)"
+            )
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (c:Checkpoint) ON (c.session_id)"
+            )
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (z:Zone) ON (z.exploration_status)"
+            )
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (sess:Session) ON (sess.app_id)"
+            )
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (ei:EntityInstance) ON (ei.status)"
+            )
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (ei:EntityInstance) ON (ei.session_id)"
+            )
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (tc:TestCase) ON (tc.category)"
+            )
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (fc:FieldConstraint) ON (fc.field_name)"
+            )
             await session.run("CREATE INDEX IF NOT EXISTS FOR (m:Menu) ON (m.app_id)")
             await session.run("CREATE INDEX IF NOT EXISTS FOR (m:Menu) ON (m.level)")
             await session.run("CREATE INDEX IF NOT EXISTS FOR (m:Menu) ON (m.menu_key)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (m:Menu) ON (m.stable_path)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (ev:Evidence) ON (ev.evidence_type)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (ev:Evidence) ON (ev.transition_id)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (run:IngestionRun) ON (run.app_id)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (run:IngestionRun) ON (run.session_id)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (rev:TransitionRevision) ON (rev.transition_id, rev.is_active)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (rev:TransitionRevision) ON (rev.stable_key)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (gr:GraphRelease) ON (gr.app_id)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (cov:CoverageSnapshot) ON (cov.app_id)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (cov:CoverageSnapshot) ON (cov.session_id)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (cov:CoverageSnapshot) ON (cov.captured_at)")
-            await session.run("CREATE INDEX IF NOT EXISTS FOR (ent:TransitionEntity) ON (ent.confirmed_session_count)")
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (m:Menu) ON (m.stable_path)"
+            )
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (ev:Evidence) ON (ev.evidence_type)"
+            )
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (ev:Evidence) ON (ev.transition_id)"
+            )
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (run:IngestionRun) ON (run.app_id)"
+            )
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (run:IngestionRun) ON (run.session_id)"
+            )
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (rev:TransitionRevision) ON (rev.transition_id, rev.is_active)"
+            )
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (rev:TransitionRevision) ON (rev.stable_key)"
+            )
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (gr:GraphRelease) ON (gr.app_id)"
+            )
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (cov:CoverageSnapshot) ON (cov.app_id)"
+            )
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (cov:CoverageSnapshot) ON (cov.session_id)"
+            )
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (cov:CoverageSnapshot) ON (cov.captured_at)"
+            )
+            await session.run(
+                "CREATE INDEX IF NOT EXISTS FOR (ent:TransitionEntity) ON (ent.confirmed_session_count)"
+            )
 
     async def __aenter__(self) -> Neo4jDriver:
         await self.connect()

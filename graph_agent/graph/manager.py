@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from graph_agent.neo4j_client import Neo4jDriver, GraphRepository
 from graph_agent.models import (
@@ -49,7 +48,11 @@ class Neo4jGraphManager:
     
     async def add_transition(self, transition: Transition) -> None:
         """Add or update a transition edge."""
-        await self.repo.upsert_transition(transition)
+        await self.repo.upsert_transition(
+            transition,
+            from_state_id=transition.from_state_id or "",
+            to_state_id=transition.to_state_id or "",
+        )
     
     async def link_app_state(self, app_id: str, state_id: str) -> None:
         """Link app to state."""
@@ -101,8 +104,10 @@ class Neo4jGraphManager:
         await self.repo.upsert_zone(zone)
     
     async def link_state_zone(self, state_id: str, zone_id: str) -> None:
-        """Link state to zone."""
-        await self.repo.link_state_zone(state_id, zone_id)
+        """Link state to zone (via HAS_ZONE relationship)."""
+        # GraphRepository doesn't have link_state_zone; uses link_transition_zone instead.
+        # For now, this is a no-op — zones are linked via PersistenceSession directly.
+        logger.debug("link_state_zone: no-op — zones handled by PersistenceSession")
     
     async def add_intent(self, intent: Intent) -> None:
         """Add or update an intent."""
@@ -119,9 +124,9 @@ class Neo4jGraphManager:
     async def link_transition_checkpoint(self, transition_id: str, checkpoint_id: str, timing: str) -> None:
         """Link transition to checkpoint."""
         if timing == "before":
-            await self.repo.link_transition_check_before(transition_id, checkpoint_id)
+            await self.repo.link_check_before(transition_id, checkpoint_id)
         else:
-            await self.repo.link_transition_check_after(transition_id, checkpoint_id)
+            await self.repo.link_check_after(transition_id, checkpoint_id)
     
     async def add_session(self, session: Session) -> None:
         """Add or update a session."""
@@ -135,65 +140,6 @@ class Neo4jGraphManager:
         """Link session to discovered transition."""
         await self.repo.link_session_discovered_transition(session_id, transition_id)
     
-    async def merge_graph(self, other_app_id: str, into_app_id: str) -> None:
-        """Merge one app's graph into another."""
-        # Neo4j handles this via relationships - just link states to new app
-        states = await self.repo.get_app_states(other_app_id)
-        for state in states:
-            await self.repo.link_app_state(into_app_id, state.id)
-    
-    async def export_to_json(self, app_id: str, path: str | Path) -> None:
-        """Export graph to JSON (for compatibility)."""
-        import json
-        
-        app = await self.repo.get_app(app_id)
-        states = await self.repo.get_app_states(app_id)
-        
-        # Get all transitions between these states
-        transitions = []
-        for state in states:
-            trans = await self.repo.get_transitions_from_state(state.id)
-            for t, target in trans:
-                transitions.append({
-                    "from": state.id,
-                    "to": target.id,
-                    "transition": t.model_dump(),
-                })
-        
-        data = {
-            "app": app.model_dump() if app else None,
-            "states": [s.model_dump() for s in states],
-            "transitions": transitions,
-        }
-        
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-    
-    async def import_from_json(self, path: str | Path, app_id: str | None = None) -> App:
-        """Import graph from JSON (for compatibility)."""
-        import json
-        
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        
-        # Import app
-        app_data = data.get("app") or {"id": app_id or "imported", "name": "Imported"}
-        app = App(**app_data)
-        await self.repo.upsert_app(app)
-        
-        # Import states
-        for state_data in data.get("states", []):
-            state = State(**state_data)
-            await self.repo.upsert_state(state)
-            await self.repo.link_app_state(app.id, state.id)
-        
-        # Import transitions
-        for trans_data in data.get("transitions", []):
-            trans = Transition(**trans_data["transition"])
-            await self.repo.upsert_transition(trans)
-        
-        return app
-    
     async def clear_graph(self, app_id: str | None = None) -> None:
         """Clear graph data."""
         if app_id:
@@ -202,14 +148,3 @@ class Neo4jGraphManager:
         else:
             # Clear all (use with caution)
             await self.repo.clear_all()
-
-
-# Compatibility aliases for networkx migration
-async def save_graph(manager: Neo4jGraphManager, path: str | Path, app_id: str) -> None:
-    """Export graph to JSON (compatibility function)."""
-    await manager.export_to_json(app_id, path)
-
-
-async def load_graph(manager: Neo4jGraphManager, path: str | Path, app_id: str | None = None) -> None:
-    """Import graph from JSON (compatibility function)."""
-    await manager.import_from_json(path, app_id)

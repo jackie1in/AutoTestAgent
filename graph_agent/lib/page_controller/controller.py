@@ -42,12 +42,17 @@ class PageController:
     - Smart container-aware scrolling (vertical + horizontal)
     """
 
-    def __init__(self, browser_session: "BrowserSession") -> None:
+    def __init__(
+        self,
+        browser_session: "BrowserSession",
+        include_attributes: list[str] | None = None,
+    ) -> None:
         self._session = browser_session
         self._selector_map: DOMSelectorMap = {}
         self._element_text_map: dict[int, str] = {}
         self._simplified_html: str = ""
         self._is_indexed: bool = False
+        self._include_attributes = include_attributes
 
     @property
     def simplified_html(self) -> str:
@@ -86,7 +91,9 @@ class PageController:
             include_screenshot=False,
             include_recent_events=False,
         )
-        self._simplified_html = bs.dom_state.llm_representation()
+        self._simplified_html = bs.dom_state.llm_representation(
+            include_attributes=self._include_attributes
+        )
         self._selector_map = bs.dom_state.selector_map
         self._element_text_map = _build_element_text_map(self._selector_map)
         self._is_indexed = True
@@ -96,9 +103,25 @@ class PageController:
         """Apply lightweight DOM patches before serialized tree extraction."""
         for script in (_PATCH_REACT_JS, _PATCH_ANTD_JS, _PATCH_REQUIRED_FIELDS_JS):
             try:
-                await page.evaluate(script)
+                raw = await page.evaluate(script)
             except Exception:
                 continue
+            if script is _PATCH_REQUIRED_FIELDS_JS and raw:
+                import json
+
+                try:
+                    fields = json.loads(raw) if isinstance(raw, str) else (raw or [])
+                    for f in fields:
+                        marker = " *REQUIRED" if f.get("required") else ""
+                        logger.info(
+                            "form-field | tag=%s id=%s name=%s%s",
+                            f.get("tag", ""),
+                            f.get("id", ""),
+                            f.get("name", ""),
+                            marker,
+                        )
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
     async def extract_interactive_elements_with_top(self) -> list[dict[str, object]]:
         self._assert_indexed()

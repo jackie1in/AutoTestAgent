@@ -115,6 +115,7 @@ class PageActions:
         that need custom logic on top of browser-use built-ins:
         - W3C click (overrides browser-use CDP click)
         - input (overrides: auto-prepends agent marker to name/title fields)
+        - dropdown_options (overrides: detects non-standard dropdowns)
         - scroll_horizontally, close_overlay
         - query_knowledge, discover_zones, extract_menu, solve_captcha
 
@@ -142,6 +143,16 @@ class PageActions:
             description="Click and type text into an input element; auto-prepends agent marker for name/title fields"
         )(input)
         supported_actions.add("input")
+
+        # -- dropdown_options (override: detect non-standard dropdowns) --
+        async def dropdown_options(index: int) -> str:
+            return await _self._dropdown_options(index)
+
+        dropdown_options.__name__ = "dropdown_options"
+        registry.action(
+            description="Get dropdown option values. Only works on native <select> elements — returns guidance for custom dropdowns."
+        )(dropdown_options)
+        supported_actions.add("dropdown_options")
 
         # -- scroll_horizontally --
         async def scroll_horizontally(
@@ -221,6 +232,54 @@ class PageActions:
                     text = f"{marker} {text}"
         r = await ctrl.input_text(index, text)
         return r.message
+
+    async def _dropdown_options(self, index: int) -> str:
+        """Check element type and return dropdown options or guidance."""
+        ctrl = self._require_controller()
+        node = ctrl.selector_map.get(index)
+        tag = (getattr(node, "tag_name", "") or "").lower() if node else ""
+
+        if tag != "select":
+            return (
+                f"Element [{index}] is <{tag}>, NOT a native <select>. "
+                f"Skip dropdown_options/select_dropdown. Instead: "
+                f"click this element to open the dropdown panel, "
+                f"then click the desired option directly."
+            )
+
+        # Standard <select> — extract options via JS
+        browser = self._browser
+        if browser is None:
+            return "Cannot read dropdown options: no browser"
+
+        try:
+            page = await browser.get_current_page()
+            if page is None:
+                return "Cannot read dropdown options: no active page"
+
+            element = await ctrl._get_element(index)
+            if element is None:
+                return f"Element [{index}] not found"
+
+            raw = await element.evaluate(
+                """(el) => {
+                    const opts = [];
+                    for (const o of el.options || []) {
+                        opts.push({index: o.index, text: o.text, value: o.value});
+                    }
+                    return JSON.stringify(opts);
+                }"""
+            )
+            options = json.loads(raw) if isinstance(raw, str) else (raw or [])
+            if not options:
+                return f"No options found in <select> [{index}]."
+
+            lines = [f"Dropdown options for <{tag}> [{index}]:"]
+            for o in options:
+                lines.append(f"  {o['index']}: {o['text'][:60]}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Failed to read dropdown options: {e}"
 
     async def scroll_horizontally(
         self, direction: str = "right", amount: int = 300, index: int | None = None

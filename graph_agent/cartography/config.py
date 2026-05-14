@@ -285,13 +285,21 @@ def resolve_pipeline_resume_from_checkpoint() -> bool:
     return env_bool("CARTOGRAPHY_PIPELINE_RESUME_CHECKPOINT", False)
 
 
-def resolve_incremental_persist_enabled() -> bool:
-    return env_bool("INCREMENTAL_PERSIST_ENABLED", False)
-
-
 def resolve_extra_system_prompt() -> str:
     """User-provided extra system prompt injected into ReAct explorer."""
     return (os.getenv("CARTOGRAPHY_EXTRA_SYSTEM_PROMPT") or "").strip()
+
+
+def resolve_include_attributes() -> list[str] | None:
+    """Comma-separated list of HTML attributes to include in DOM serialization.
+
+    Extends browser-use's DEFAULT_INCLUDE_ATTRIBUTES. Use when custom JS patches
+    set attributes that aren't in the default list (e.g. aria-required).
+    """
+    raw = (os.getenv("CARTOGRAPHY_INCLUDE_ATTRIBUTES") or "").strip()
+    if not raw:
+        return None
+    return [a.strip() for a in raw.split(",") if a.strip()]
 
 
 def resolve_agent_marker() -> str:

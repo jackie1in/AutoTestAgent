@@ -17,13 +17,14 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TokenUsage:
     """Token usage for a single LLM call."""
+
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
     model: str = ""
     call_id: str = ""
     timestamp: float = field(default_factory=time.time)
-    
+
     def __str__(self) -> str:
         return (
             f"TokenUsage(prompt={self.prompt_tokens}, "
@@ -35,6 +36,7 @@ class TokenUsage:
 @dataclass
 class UsageStats:
     """Cumulative token usage statistics."""
+
     total_calls: int = 0
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
@@ -72,84 +74,86 @@ class UsageStats:
 
 class TokenUsageTracker:
     """Tracks token usage across multiple LLM calls.
-    
+
     Usage:
         tracker = TokenUsageTracker()
-        
+
         # In LLM call:
         result = await llm.ainvoke(...)
         usage = tracker.extract_usage(result)
         tracker.record(usage)
-        
+
         # Get stats:
         stats = tracker.get_stats()
-        logger.info("Token usage: %s", stats)
+        logger.debug("Token usage: %s", stats)
     """
-    
+
     def __init__(self):
         self._usages: list[TokenUsage] = []
         self._stats = UsageStats()
         self._call_counter = 0
-    
+
     def extract_usage(self, llm_result: Any, model: str = "") -> TokenUsage | None:
         """Extract token usage from LLM result.
-        
+
         Supports browser-use ChatOpenAI and langchain OpenAI results.
         """
         usage = TokenUsage(model=model)
-        
+
         try:
             # Try browser-use ChatInvokeCompletion structure
-            if hasattr(llm_result, 'usage'):
+            if hasattr(llm_result, "usage"):
                 u = llm_result.usage
-                if hasattr(u, 'prompt_tokens'):
+                if hasattr(u, "prompt_tokens"):
                     usage.prompt_tokens = u.prompt_tokens
-                if hasattr(u, 'completion_tokens'):
+                if hasattr(u, "completion_tokens"):
                     usage.completion_tokens = u.completion_tokens
-                if hasattr(u, 'total_tokens'):
+                if hasattr(u, "total_tokens"):
                     usage.total_tokens = u.total_tokens
-            
+
             # Try raw response structure
-            elif hasattr(llm_result, 'response'):
+            elif hasattr(llm_result, "response"):
                 response = llm_result.response
-                if hasattr(response, 'usage'):
+                if hasattr(response, "usage"):
                     u = response.usage
-                    usage.prompt_tokens = getattr(u, 'prompt_tokens', 0)
-                    usage.completion_tokens = getattr(u, 'completion_tokens', 0)
-                    usage.total_tokens = getattr(u, 'total_tokens', 0)
-            
+                    usage.prompt_tokens = getattr(u, "prompt_tokens", 0)
+                    usage.completion_tokens = getattr(u, "completion_tokens", 0)
+                    usage.total_tokens = getattr(u, "total_tokens", 0)
+
             # Try dict-like structure
             elif isinstance(llm_result, dict):
-                if 'usage' in llm_result:
-                    u = llm_result['usage']
-                    usage.prompt_tokens = u.get('prompt_tokens', 0)
-                    usage.completion_tokens = u.get('completion_tokens', 0)
-                    usage.total_tokens = u.get('total_tokens', 0)
-            
+                if "usage" in llm_result:
+                    u = llm_result["usage"]
+                    usage.prompt_tokens = u.get("prompt_tokens", 0)
+                    usage.completion_tokens = u.get("completion_tokens", 0)
+                    usage.total_tokens = u.get("total_tokens", 0)
+
             # Try raw_completion structure (OpenAI compatible)
-            if usage.total_tokens == 0 and hasattr(llm_result, 'raw_completion'):
+            if usage.total_tokens == 0 and hasattr(llm_result, "raw_completion"):
                 raw = llm_result.raw_completion  # type: ignore[union-attr]
-                if hasattr(raw, 'usage'):
+                if hasattr(raw, "usage"):
                     u = raw.usage
-                    usage.prompt_tokens = getattr(u, 'prompt_tokens', 0)
-                    usage.completion_tokens = getattr(u, 'completion_tokens', 0)
-                    usage.total_tokens = getattr(u, 'total_tokens', 0)
-            
+                    usage.prompt_tokens = getattr(u, "prompt_tokens", 0)
+                    usage.completion_tokens = getattr(u, "completion_tokens", 0)
+                    usage.total_tokens = getattr(u, "total_tokens", 0)
+
             # Calculate total if not provided
-            if usage.total_tokens == 0 and (usage.prompt_tokens or usage.completion_tokens):
+            if usage.total_tokens == 0 and (
+                usage.prompt_tokens or usage.completion_tokens
+            ):
                 usage.total_tokens = usage.prompt_tokens + usage.completion_tokens
-            
+
             if usage.total_tokens > 0:
                 self._call_counter += 1
                 usage.call_id = f"call_{self._call_counter}"
                 return usage
-            
+
             return None
-            
+
         except Exception as e:
             logger.debug("Failed to extract token usage: %s", e)
             return None
-    
+
     def record(self, usage: TokenUsage | None) -> None:
         """Record a token usage entry."""
         if usage is None or usage.total_tokens == 0:
@@ -162,13 +166,13 @@ class TokenUsageTracker:
         self._stats.total_tokens += usage.total_tokens
 
         # Log each call
-        logger.info(
+        logger.debug(
             "[TokenUsage] #%d: prompt=%d, completion=%d, total=%d, model=%s",
             self._stats.total_calls,
             usage.prompt_tokens,
             usage.completion_tokens,
             usage.total_tokens,
-            usage.model or "unknown"
+            usage.model or "unknown",
         )
 
     def record_embedding(self, total_tokens: int, model: str = "") -> None:
@@ -179,23 +183,23 @@ class TokenUsageTracker:
         self._stats.total_embedding_calls += 1
         self._stats.total_embedding_tokens += total_tokens
 
-        logger.info(
+        logger.debug(
             "[TokenUsage] embedding #%d: total=%d, model=%s",
             self._stats.total_embedding_calls,
             total_tokens,
-            model or "unknown"
+            model or "unknown",
         )
-    
+
     def get_stats(self) -> UsageStats:
         """Get current usage statistics."""
         return self._stats
-    
+
     def log_summary(self) -> None:
         """Log a summary of all token usage."""
         stats = self.get_stats()
 
         if stats.total_calls == 0 and stats.total_embedding_calls == 0:
-            logger.info("[TokenUsage] No LLM calls recorded")
+            logger.debug("[TokenUsage] No LLM calls recorded")
             return
 
         # Calculate cost (approximate, based on OpenAI pricing)
@@ -205,7 +209,7 @@ class TokenUsageTracker:
         completion_cost = stats.total_completion_tokens * 0.00006
         total_cost = prompt_cost + completion_cost
 
-        logger.info(
+        logger.debug(
             "[TokenUsage] Summary: LLM=%d calls (%d prompt + %d completion = %d tokens), "
             "Embedding=%d calls (%d tokens), ~$%.4f estimated cost, %.1fs elapsed",
             stats.total_calls,
@@ -215,15 +219,15 @@ class TokenUsageTracker:
             stats.total_embedding_calls,
             stats.total_embedding_tokens,
             total_cost,
-            stats.elapsed_seconds
+            stats.elapsed_seconds,
         )
-    
+
     def reset(self) -> None:
         """Reset all tracking."""
         self._usages.clear()
         self._stats = UsageStats()
         self._call_counter = 0
-    
+
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
         stats = self.get_stats()

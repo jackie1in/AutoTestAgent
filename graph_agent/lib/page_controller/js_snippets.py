@@ -468,9 +468,98 @@ _TOP_LAYER_INFO_JS = """(el) => {
 
 _PATCH_REQUIRED_FIELDS_JS = """() => {
     // Mark required form fields so the LLM can see which inputs must be filled.
-    // Handles: native HTML5 required, aria-required, Ant Design Form.Item rules,
-    // Element UI el-form-item is-required, and generic asterisk markers.
-    const inputs = document.querySelectorAll(
+    // Handles: native HTML5 required, aria-required, Ant Design / Element UI
+    // form-item markers, CSS ::before/::after asterisk on <label>, and
+    // label[for] -> input[id] relationships.
+    //
+    // Runs per-frame (controller.py iterates page.frames), so input.closest()
+    // is naturally frame-scoped and won't leak across iframe boundaries.
+    var processed = new Set();
+    var i, el, container, label, name, ph, req, bc, ac, txt;
+
+    // --- helpers ---
+    var cleanText = function(s) {
+        return (s || '').replace(/[*:\\uFF1A\\s*]+$/g, '').trim();
+    };
+    var isLabelRequired = function(lbl) {
+        if (!lbl) return false;
+        if (lbl.classList.contains('ant-form-item-required')) return true;
+        var fi = lbl.closest('.ant-form-item');
+        if (fi && fi.classList.contains('ant-form-item-required')) return true;
+        try { bc = window.getComputedStyle(lbl, '::before').content; }
+        catch(e) { bc = 'none'; }
+        if (bc && bc !== 'none' && bc !== 'normal' && bc.indexOf('*') !== -1) return true;
+        try { ac = window.getComputedStyle(lbl, '::after').content; }
+        catch(e) { ac = 'none'; }
+        if (ac && ac !== 'none' && ac !== 'normal' && ac.indexOf('*') !== -1) return true;
+        txt = (lbl.textContent || '').trim();
+        if (txt && (txt.charAt(txt.length - 1) === '*' || /[\\u2605\\u2731\\u2732\\u2734\\u2736\\u2737\\u2738\\u2739]/.test(txt))) return true;
+        return false;
+    };
+
+    // --- Phase 1: label[for] -> input[id] ---
+    var inputs = document.querySelectorAll('input, select, textarea');
+    for (i = 0; i < inputs.length; i++) {
+        el = inputs[i];
+        if (processed.has(el) || el.offsetParent === null) continue;
+        if (!el.id) continue;
+
+        // Find containing form / modal / fieldset first (frame-scoped)
+        container = el.closest('form, .ant-form, .el-form, fieldset, .ant-modal, .ant-drawer, .ant-modal-wrap, [class*="form" i]');
+        label = container
+            ? container.querySelector('label[for="' + el.id + '"]')
+            : document.querySelector('label[for="' + el.id + '"]');
+
+        if (!label) continue;
+
+        req = isLabelRequired(label);
+        if (req) {
+            el.setAttribute('required', '');
+            el.setAttribute('aria-required', 'true');
+        }
+
+        name = cleanText(label.title || label.textContent || '');
+        if (name && !el.getAttribute('name')) {
+            el.setAttribute('name', name);
+        }
+
+        ph = el.getAttribute('placeholder');
+        if (name && (!ph || ph === '')) {
+            el.setAttribute('placeholder', name.slice(0, 20) + (req ? ' *\\u5fc5\\u586b' : ''));
+        }
+
+        processed.add(el);
+    }
+
+    // --- Phase 2: <label> wrapping <input> (no for attribute) ---
+    var wrapped = document.querySelectorAll('label:not([for]) > input, label:not([for]) > textarea, label:not([for]) > select');
+    for (i = 0; i < wrapped.length; i++) {
+        el = wrapped[i];
+        if (processed.has(el) || el.offsetParent === null) continue;
+        label = el.parentElement;
+        if (!label || label.tagName !== 'LABEL') continue;
+
+        req = isLabelRequired(label);
+        if (req) {
+            el.setAttribute('required', '');
+            el.setAttribute('aria-required', 'true');
+        }
+
+        name = cleanText(label.title || label.textContent || '');
+        if (name && !el.getAttribute('name')) {
+            el.setAttribute('name', name);
+        }
+
+        ph = el.getAttribute('placeholder');
+        if (name && (!ph || ph === '')) {
+            el.setAttribute('placeholder', name.slice(0, 20) + (req ? ' *\\u5fc5\\u586b' : ''));
+        }
+
+        processed.add(el);
+    }
+
+    // --- Phase 3: existing class-based selectors (fallback) ---
+    var fallback = document.querySelectorAll(
         'input[required], textarea[required], select[required], '
         + '[aria-required="true"], '
         + '.ant-form-item-required input, .ant-form-item-required textarea, '
@@ -479,33 +568,38 @@ _PATCH_REQUIRED_FIELDS_JS = """() => {
         + '.el-form-item.is-required select, '
         + '.is-required input, .is-required textarea, .is-required select'
     );
-    for (const el of inputs) {
-        if (el.offsetParent !== null) {
-            // Set placeholder hint if empty
-            if (!el.getAttribute('placeholder') || el.getAttribute('placeholder') === '') {
-                const label = el.closest('.ant-form-item, .el-form-item, .form-group, '
-                    + '.form-item, .field, [class*="form-item" i]');
-                let hint = '';
-                if (label) {
-                    const labelEl = label.querySelector('label, .ant-form-item-label, '
-                        + '.el-form-item__label, [class*="label" i]');
-                    if (labelEl) {
-                        hint = (labelEl.textContent || '').replace(/[*:：\\s*]+$/g, '').trim();
-                    }
-                }
-                if (!hint) {
-                    const prev = el.previousElementSibling;
-                    if (prev) hint = (prev.textContent || '').replace(/[*:：\\s*]+$/g, '').trim();
-                }
-                // Max 20 chars, append required marker
-                if (hint) {
-                    el.setAttribute('placeholder', hint.slice(0, 20) + ' *必填');
-                }
+    for (i = 0; i < fallback.length; i++) {
+        el = fallback[i];
+        if (processed.has(el) || el.offsetParent === null) continue;
+
+        if (!el.getAttribute('placeholder') || el.getAttribute('placeholder') === '') {
+            var hint = '';
+            container = el.closest('.ant-form-item, .el-form-item, .form-group, .form-item, .field, [class*="form-item" i]');
+            if (container) {
+                var lbl = container.querySelector('label, .ant-form-item-label, .el-form-item__label, [class*="label" i]');
+                if (lbl) hint = cleanText(lbl.textContent || '');
             }
-            // Ensure the required attribute is visible to DOM serialization
-            el.setAttribute('required', '');
-            el.setAttribute('aria-required', 'true');
+            if (!hint) {
+                var prev = el.previousElementSibling;
+                if (prev) hint = cleanText(prev.textContent || '');
+            }
+            if (hint) el.setAttribute('placeholder', hint.slice(0, 20) + ' *\\u5fc5\\u586b');
         }
+        el.setAttribute('required', '');
+        el.setAttribute('aria-required', 'true');
+        processed.add(el);
     }
-    return inputs.length;
+
+    // Build result summary for console logging
+    var results = [];
+    processed.forEach(function(el) {
+        results.push({
+            tag: (el.tagName || '').toLowerCase(),
+            id: el.id || '',
+            name: el.getAttribute('name') || '',
+            required: el.hasAttribute('required'),
+            placeholder: (el.getAttribute('placeholder') || '').slice(0, 30)
+        });
+    });
+    return JSON.stringify(results);
 }"""

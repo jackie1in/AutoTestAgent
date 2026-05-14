@@ -495,8 +495,6 @@ Remaining steps: {remaining}
             # CDP error messages like "element index X not found" that the
             # LLM uses to decide whether to retry.
             _result_snippet = (result_text or "").strip().replace("\n", " ")
-            if len(_result_snippet) > 200:
-                _result_snippet = _result_snippet[:200] + "..."
             logger.info(
                 "  [Agent Step %d] result=%s",
                 step,
@@ -821,14 +819,18 @@ Remaining steps: {remaining}
         """Composite fingerprint combining DOM text, title, and structure."""
         dom_fp = self._compute_dom_fingerprint(dom_text)
         struct_fp = self._compute_structural_fingerprint(selector_map)
-        title_part = hashlib.md5((title or "").encode("utf-8"), usedforsecurity=False).hexdigest()[:8]
+        title_part = hashlib.md5(
+            (title or "").encode("utf-8"), usedforsecurity=False
+        ).hexdigest()[:8]
         composite = f"{dom_fp}:{struct_fp}:{title_part}"
         include_layout = (
             (os.getenv("CARTOGRAPHY_LAYOUT_INCLUDE_IN_PAGE_FP") or "").strip().lower()
         )
         if layout_fingerprint and include_layout in {"1", "true", "yes", "on"}:
             composite = f"{composite}:{layout_fingerprint}"
-        return hashlib.md5(composite.encode("utf-8"), usedforsecurity=False).hexdigest()[:20]
+        return hashlib.md5(
+            composite.encode("utf-8"), usedforsecurity=False
+        ).hexdigest()[:20]
 
     async def _detect_modal(self, page) -> bool:
         """Detect if a modal/dialog is currently visible."""

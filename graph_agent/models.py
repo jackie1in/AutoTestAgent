@@ -465,6 +465,7 @@ class ElementSnapshot(BaseModel):
     value: str | None = None                    # Current value (for inputs)
     href: str | None = None                     # For links
     title: str | None = None                    # Title attribute
+    required: bool = False
     attributes: dict[str, Any] = Field(default_factory=dict)
     frame_path: list[FrameLocatorSnapshot] = Field(default_factory=list)
 

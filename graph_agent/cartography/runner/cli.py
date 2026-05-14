@@ -27,13 +27,24 @@ _shutdown_requested = False
 load_dotenv()
 
 
+def _configure_logging() -> None:
+    """Set logging levels from LOG_LEVEL env var."""
+    raw = (os.getenv("LOG_LEVEL") or "").strip().upper()
+    level = getattr(logging, raw, None)
+    if isinstance(level, int):
+        logging.getLogger("graph_agent").setLevel(level)
+        logging.getLogger("browser_use").setLevel(level)
+    else:
+        # Default: suppress verbose browser-use logs, show our own INFO+
+        logging.getLogger("graph_agent").setLevel(logging.INFO)
+        logging.getLogger("browser_use").setLevel(logging.WARNING)
+
+
 def main() -> None:
     """CLI entry: run scout then mapping. Scout writes inventory, mapping uses it to build graph."""
     from urllib.parse import urlparse
 
-    from browser_use.utils import logger as bu_logger
-
-    bu_logger.setLevel(logging.WARNING)
+    _configure_logging()
 
     default_output = os.getenv("MAPPING_OUTPUT", "mapping_output.json")
     default_inventory = os.getenv("MAPPING_INVENTORY", "mapping_inventory.json")

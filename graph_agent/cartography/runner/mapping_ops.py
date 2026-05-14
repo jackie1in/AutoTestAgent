@@ -277,21 +277,21 @@ async def run_mapping(
         # mapping_pipeline 据此把 stale 任务标记为 ``EXPLORE_ZONES_ONLY``。
         if cartography_config.resolve_scheduler_warm_start_enabled():
             try:
-                from graph_agent.coverage.scheduler import ExplorationScheduler
+                from graph_agent.coverage.scheduler import ExplorationScheduler, ScheduledTask
 
                 scheduler = ExplorationScheduler()
                 async with GraphManager() as sched_manager:
-                    scheduler_tasks = await scheduler.schedule(
+                    scheduler_tasks: list[ScheduledTask] = await scheduler.schedule(
                         sched_manager.get_driver(),
                         focus="breadth",
                         max_tasks=cartography_config.resolve_scheduler_warm_start_topk(),
                         app_id=app_id,
                     )
                     seen_urls: set[str] = set()
-                    for task in scheduler_tasks:
-                        ctx = task.context or {}
+                    for sched_task in scheduler_tasks:
+                        ctx = sched_task.context or {}
                         target_url = str(ctx.get("url") or "").strip()
-                        if not target_url and task.type == "explore_zone":
+                        if not target_url and sched_task.type == "explore_zone":
                             sid = str(ctx.get("state_id") or "")
                             if sid:
                                 target_url = (
@@ -302,13 +302,13 @@ async def run_mapping(
                         seen_urls.add(target_url)
                         scheduler_candidates.append(
                             {
-                                "transition_id": f"sched:{task.target_id}",
-                                "confidence": min(1.0, task.priority / 100.0),
+                                "transition_id": f"sched:{sched_task.target_id}",
+                                "confidence": min(1.0, sched_task.priority / 100.0),
                                 "target_url": target_url,
-                                "zone_unexplored": task.type == "discover_page",
-                                "scheduler_priority": task.priority,
-                                "scheduler_reason": str(ctx.get("reason") or task.type),
-                                "scheduler_task_type": task.type,
+                                "zone_unexplored": sched_task.type == "discover_page",
+                                "scheduler_priority": sched_task.priority,
+                                "scheduler_reason": str(ctx.get("reason") or sched_task.type),
+                                "scheduler_task_type": sched_task.type,
                             }
                         )
                 if scheduler_candidates:

@@ -662,7 +662,7 @@ class GraphRepositoryExtended:
                 state_id=state_id, next_id=next_id,
             )
 
-    # ===== Graph Operations (for networkx migration) =====
+    # ===== Graph operations =====
 
     async def get_shortest_path(self, from_state_id: str, to_state_id: str) -> list[State] | None:
         """Find shortest path between two states."""
