@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import json
 import logging
 import os
+import queue
 import signal
 from datetime import datetime, timezone
+from logging.handlers import QueueHandler, QueueListener
 from pathlib import Path
+
+# Prevent browser-use from hijacking root logger on import.
+# We configure async-safe logging ourselves in _configure_logging().
+os.environ["BROWSER_USE_SETUP_LOGGING"] = "false"
 
 from dotenv import load_dotenv
 
@@ -28,16 +35,40 @@ load_dotenv()
 
 
 def _configure_logging() -> None:
-    """Set logging levels from LOG_LEVEL env var."""
+    """Async-safe logging setup via QueueHandler + QueueListener.
+
+    browser-use's default setup_logging() is skipped (BROWSER_USE_SETUP_LOGGING=false),
+    so we install a QueueHandler on the root logger.  All log records pass through an
+    in-process queue; a dedicated thread serialises writes to stderr, guaranteeing
+    that each log line is atomic even when multiple asyncio tasks log concurrently.
+    """
     raw = (os.getenv("LOG_LEVEL") or "").strip().upper()
-    level = getattr(logging, raw, None)
-    if isinstance(level, int):
-        logging.getLogger("graph_agent").setLevel(level)
+    level: int = getattr(logging, raw, None) if raw else None  # type: ignore[assignment]
+    if not isinstance(level, int):
+        level = logging.INFO
+
+    fmt = logging.Formatter("%(levelname)-8s [%(name)s] %(message)s")
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+    console.setLevel(level)
+
+    _log_queue: queue.Queue[logging.LogRecord] = queue.Queue(-1)
+    root = logging.getLogger()
+    root.setLevel(level)
+    root.handlers.clear()
+    root.addHandler(QueueHandler(_log_queue))
+
+    _listener = QueueListener(_log_queue, console)
+    _listener.start()
+    atexit.register(_listener.stop)
+
+    # Per-logger defaults: browser-use is verbose, suppress unless LOG_LEVEL is set
+    if raw:
         logging.getLogger("browser_use").setLevel(level)
     else:
-        # Default: suppress verbose browser-use logs, show our own INFO+
-        logging.getLogger("graph_agent").setLevel(logging.INFO)
         logging.getLogger("browser_use").setLevel(logging.WARNING)
+
+    logging.getLogger("graph_agent").setLevel(level)
 
 
 def main() -> None:
@@ -81,8 +112,13 @@ def main() -> None:
     parser.add_argument(
         "--mode",
         default=os.getenv("MAPPING_MODE", "auto"),
-        choices=["auto", "manual_graph_assisted", "manual_raw"],
-        help="Run mode: auto (default), manual_graph_assisted, manual_raw.",
+        choices=["auto", "manual_graph_assisted", "manual_raw", "replay-intent"],
+        help="Run mode: auto (default), manual_graph_assisted, manual_raw, replay-intent.",
+    )
+    parser.add_argument(
+        "--intent",
+        default="",
+        help="Intent key for replay-intent mode.",
     )
     parser.add_argument(
         "--manual-events",
@@ -174,6 +210,23 @@ def main() -> None:
             except asyncio.CancelledError:
                 logger.info("[RUNNER] Mapping cancelled")
                 raise
+            return
+
+        if run_mode == "replay-intent":
+            from graph_agent.cartography.runner.replay_ops import run_replay_intent
+
+            intent_key = (args.intent or "").strip()
+            if not intent_key:
+                intent_key = input("Enter intent key to replay: ").strip()
+            if not intent_key:
+                raise ValueError("--intent is required for replay-intent mode.")
+            summary = await run_replay_intent(
+                intent_key,
+                start_url=url,
+                output_path=output,
+                headless=True,
+            )
+            logger.info("[RUNNER] Replay result:\n%s", summary)
             return
 
         manual_events_path = (args.manual_events or "").strip()

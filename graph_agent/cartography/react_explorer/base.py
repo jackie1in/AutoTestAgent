@@ -11,6 +11,7 @@ timeout, MessageManager, SignalHandler) and injects project-specific behaviors:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -55,9 +56,80 @@ from graph_agent.models import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from browser_use.dom.views import DOMInteractedElement as _DOMInteractedElement
+    from browser_use.dom.views import EnhancedDOMTreeNode as _EnhancedDOMTreeNode
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Monkey-patch: inject frame_path into DOMInteractedElement
+# Walks EnhancedDOMTreeNode.parent_node to find <iframe> ancestors and builds
+# a FrameLocatorSnapshot-compatible list, without modifying browser-use source.
+# ---------------------------------------------------------------------------
+
+
+def _build_frame_path_from_node(
+    enhanced_node: "_EnhancedDOMTreeNode",
+) -> list[dict[str, str | dict[str, str | None] | None]]:
+    """Walk up parent_node chain from *enhanced_node* and collect iframe ancestors."""
+    frame_path: list[dict[str, str | dict[str, str | None] | None]] = []
+    current: "_EnhancedDOMTreeNode | None" = enhanced_node.parent_node  # type: ignore[assignment]
+    while current is not None:
+        tag = (current.tag_name or "").upper()
+        if tag in ("IFRAME", "FRAME"):
+            attrs: dict[str, str | None] = getattr(current, "attributes", None) or {}
+            frame_id = attrs.get("id", "")
+            frame_name = attrs.get("name", "")
+            if frame_id:
+                css_sel = f"iframe#{frame_id}"
+            elif frame_name:
+                css_sel = f'iframe[name="{frame_name}"]'
+            else:
+                css_sel = "iframe"
+            frame_path.insert(
+                0,
+                {
+                    "selector": css_sel,
+                    "css_selector": css_sel,
+                    "id": frame_id or None,
+                    "name": frame_name or None,
+                    "attributes": attrs,
+                },
+            )
+        current = current.parent_node
+    return frame_path
+
+
+def _apply_frame_path_patch() -> None:
+    from browser_use.dom.views import DOMInteractedElement
+
+    # Capture originals before replacing
+    _orig_load = DOMInteractedElement.load_from_enhanced_dom_tree
+    _orig_to_dict = DOMInteractedElement.to_dict
+
+    def _patched_load(
+        cls: type["_DOMInteractedElement"],
+        enhanced_dom_tree: "_EnhancedDOMTreeNode",
+    ) -> "_DOMInteractedElement":
+        instance = _orig_load(enhanced_dom_tree)
+        try:
+            fp = _build_frame_path_from_node(enhanced_dom_tree)
+            object.__setattr__(instance, "_frame_path", fp)
+        except Exception:
+            object.__setattr__(instance, "_frame_path", [])
+        return instance
+
+    def _patched_to_dict(self: "_DOMInteractedElement") -> dict[str, Any]:
+        result = _orig_to_dict(self)
+        result["frame_path"] = getattr(self, "_frame_path", [])
+        return result
+
+    DOMInteractedElement.load_from_enhanced_dom_tree = classmethod(_patched_load)  # pyright: ignore[reportAttributeAccessIssue]
+    DOMInteractedElement.to_dict = _patched_to_dict  # pyright: ignore[reportAttributeAccessIssue]
+    logger.debug("frame_path monkey-patch applied to DOMInteractedElement")
+
+
+_apply_frame_path_patch()
 
 # Effectively unlimited — runtime budget is the real governor
 _UNLIMITED_STEPS = 10**8
@@ -153,6 +225,9 @@ Form fields with name/title automatically receive an "[AUTO]" prefix by the syst
 - Switch to EVERY tab panel to discover hidden content.
 - Use send_keys for keyboard shortcuts (e.g. Alt+Z) if menus are hidden behind icons.
 - Use scroll_horizontally to reveal hidden columns in wide tables/carousels.
+- If you encounter a situation you truly cannot resolve after 3 attempts
+  (captcha too complex, unexpected login wall, stuck overlay), call
+  request_human_help to ask a human to intervene.
 </rules>
 
 <language>
@@ -296,6 +371,10 @@ class ExplorerAgent(Agent):
         self._pending_from_fp = ""
         self._explore_start_url = ""
 
+        # Keyboard pause gate: cleared = paused, set = running
+        self._kb_pause_event = asyncio.Event()
+        self._kb_pause_event.set()
+
         # Pre-step tracking for state change detection (set in on_step_end)
         self._url_before = ""
         self._fp_before = ""
@@ -414,6 +493,12 @@ class ExplorerAgent(Agent):
             agent.state.stopped = True
             return
 
+        # --- Keyboard pause gate (inter-step safe point) ---
+        if not agent._kb_pause_event.is_set():
+            logger.info("[KEYBOARD] Paused between steps. Press Space to resume.")
+            await agent._kb_pause_event.wait()
+            logger.info("[KEYBOARD] Resumed — continuing exploration.")
+
         # --- DOM patch 3: required fields ---
         try:
             page = await agent.browser_session.get_current_page()
@@ -486,12 +571,27 @@ class ExplorerAgent(Agent):
                 agent._pending_from_url = agent._url_before
                 agent._pending_from_fp = agent._fp_before or ""
 
+            # Extract iframe frame_path from browser-use's history
+            frame_path: list[dict[str, object]] = []
+            try:
+                history_list = agent.history.history
+                if history_list:
+                    last_h = history_list[-1]
+                    interacted = last_h.state.interacted_element
+                    if interacted and interacted[0] is not None:
+                        fp = interacted[0].to_dict().get("frame_path", [])
+                        if isinstance(fp, list):
+                            frame_path = fp  # type: ignore[assignment]
+            except Exception:
+                pass
+
             ts = agent._build_transition_step(
                 step=agent.state.n_steps,
                 action_type=action_type,
                 action=action,
                 model_output=model_output,
                 selector_map=selector_map,
+                frame_path=frame_path,
             )
             agent._pending_steps.append(ts)
 
@@ -527,6 +627,7 @@ class ExplorerAgent(Agent):
         action: Any,  # browser-use ActionModel
         model_output: Any,  # browser-use AgentOutput
         selector_map: dict,
+        frame_path: list[dict[str, object]] | None = None,
     ) -> TransitionStep:
         """Build a TransitionStep from browser-use model output.
 
@@ -583,7 +684,7 @@ class ExplorerAgent(Agent):
                         "text_content": getattr(node, "node_value", ""),
                         "required": is_required,
                         "attributes": attrs,
-                        "frame_path": [],
+                        "frame_path": frame_path or [],
                     },
                     ensure_ascii=False,
                 )
@@ -689,6 +790,17 @@ class ExplorerAgent(Agent):
         semantic_suffix = f"react-{overall_action.value}-{first_step.step_index}"
         transition_id = f"t:{state_digest}:{semantic_suffix}"
 
+        # Extract frame_path from element_snapshot JSON for replay
+        _frame_path_json: str | None = None
+        if overall_element_snapshot:
+            try:
+                _snap = json.loads(overall_element_snapshot)
+                _fp = _snap.get("frame_path")
+                if _fp:
+                    _frame_path_json = json.dumps(_fp, ensure_ascii=False)
+            except Exception:
+                pass
+
         transition = Transition(
             id=transition_id,
             selector=overall_selector,
@@ -702,6 +814,7 @@ class ExplorerAgent(Agent):
             step_index=first_step.step_index or 0,
             element_snapshot=overall_element_snapshot,
             param_name=overall_param_name,
+            frame_path=_frame_path_json,
             steps=steps,
             evidence_ids=[
                 f"evidence:{state_digest}:{first_step.step_index}:url_change",
@@ -836,8 +949,73 @@ class ExplorerAgent(Agent):
         return history
 
     # ------------------------------------------------------------------
-    # Public entry point
+    # Keyboard monitor (Space = toggle pause/resume)
     # ------------------------------------------------------------------
+
+    async def _monitor_keyboard(self) -> None:
+        """Background task: listen for Space key to toggle pause/resume.
+
+        Opens /dev/tty in raw mode (bypasses sys.stdin buffering) so it
+        does not conflict with input() used by request_human_help.
+        Silently exits if no terminal is available (e.g. CI, piped stdin).
+        """
+        import os as _os
+        import select
+        import termios
+        import tty
+
+        tty_path = "/dev/tty"
+        _paused = False
+
+        try:
+            tty_fd = _os.open(tty_path, _os.O_RDONLY | _os.O_NONBLOCK)
+        except OSError:
+            logger.debug("[KEYBOARD] /dev/tty not available, monitor disabled.")
+            return
+        try:
+            old_attrs = termios.tcgetattr(tty_fd)
+            # cbreak-alike but with ISIG disabled so Ctrl+C (\x03) passes
+            # through to the read buffer instead of generating a signal.
+            # OPOST stays on → clean log output (no raw-mode line misalignment).
+            new_attrs = termios.tcgetattr(tty_fd)
+            new_attrs[3] = new_attrs[3] & ~(termios.ECHO | termios.ICANON | termios.ISIG)
+            termios.tcsetattr(tty_fd, termios.TCSANOW, new_attrs)
+        except (termios.error, OSError):
+            logger.debug("[KEYBOARD] Cannot set keyboard monitor mode, monitor disabled.")
+            _os.close(tty_fd)
+            return
+
+        logger.info(
+            "[KEYBOARD] Space = toggle pause/resume, Ctrl+C = stop (listening on %s)",
+            tty_path,
+        )
+
+        try:
+            while True:
+                await asyncio.sleep(0.1)
+                r, _, _ = select.select([tty_fd], [], [], 0)
+                if r:
+                    ch = _os.read(tty_fd, 1).decode("utf-8", errors="replace")
+                    if ch == "\x03":  # Ctrl+C — request stop
+                        self.stop()
+                        logger.info("[KEYBOARD] Ctrl+C — stopping agent")
+                    elif ch == " ":
+                        _paused = not _paused
+                        if _paused:
+                            self._kb_pause_event.clear()
+                            logger.info("[KEYBOARD] Paused. Press Space to resume.")
+                        else:
+                            self._kb_pause_event.set()
+                            logger.info("[KEYBOARD] Resumed.")
+        except asyncio.CancelledError:
+            pass
+        finally:
+            try:
+                termios.tcsetattr(tty_fd, termios.TCSANOW, old_attrs)
+            except Exception:
+                pass
+            _os.close(tty_fd)
+            logger.debug("[KEYBOARD] Monitor stopped.")
 
     async def explore_page(
         self,
@@ -902,6 +1080,9 @@ class ExplorerAgent(Agent):
         reset_global_tracker()
         self._run_start_time = time.monotonic()
 
+        # Start keyboard monitor for Space-triggered pause/resume
+        kb_task = asyncio.create_task(self._monitor_keyboard(), name="keyboard-monitor")
+
         # Run browser-use Agent loop.  max_steps is effectively unlimited;
         # runtime budget (checked in _on_step_start) is the real governor.
         try:
@@ -912,6 +1093,11 @@ class ExplorerAgent(Agent):
             )
             self._result.history = self._extract_history(agent_history)
         finally:
+            kb_task.cancel()
+            try:
+                await kb_task
+            except asyncio.CancelledError:
+                pass
             if self._pending_steps:
                 await self._flush_pending_transition()
 

@@ -121,7 +121,30 @@ def _summary_matches(intent: Intent | None, user_query: str) -> bool:
         return False
     summary = (intent.summary or "").lower()
     query = (user_query or "").lower()
-    return query in summary or summary in query
+    if query in summary or summary in query:
+        return True
+    # Fuzzy: check word-level overlap for Chinese queries
+    if _fuzzy_word_match(intent.key or "", user_query) or _fuzzy_word_match(summary, user_query):
+        return True
+    return False
+
+
+def _fuzzy_word_match(target: str, query: str) -> bool:
+    """Match if any 2+ char token from query appears in target."""
+    query_clean = query.lower().strip()
+    if len(query_clean) < 2:
+        return False
+    target_clean = target.lower()
+    # Try each 2-char sliding window from query
+    for i in range(len(query_clean) - 1):
+        chunk = query_clean[i:i + 2]
+        if chunk in target_clean:
+            return True
+    # Also try query split by spaces
+    for word in query_clean.split():
+        if len(word) >= 2 and word in target_clean:
+            return True
+    return False
 
 
 def _match_score(intent: Intent | None, user_query: str) -> float:
@@ -163,6 +186,10 @@ def neo4j_transition_to_edge_data(t: dict[str, Any]) -> dict[str, Any]:
             intent = Intent(**intent)
         except Exception:
             intent = None
+    if intent is None:
+        intent_key = t.get("intent_key")
+        if intent_key and isinstance(intent_key, str):
+            intent = Intent(key=intent_key)
 
     element = None
     element_snapshot_raw = t.get("element_snapshot")
@@ -203,17 +230,17 @@ def neo4j_transition_to_edge_data(t: dict[str, Any]) -> dict[str, Any]:
         "step_index": t.get("step_index"),
         "source_url": t.get("source_url"),
         "target_url": t.get("target_url"),
-        "selector": t.get("selector", ""),
+        "selector": t.get("selector") or "",
         "action": action,
-        "tab_id": t.get("tab_id", "tab-0"),
-        "target_tab_id": t.get("target_tab_id"),
+        "tab_id": t.get("tab_id") or "tab-0",
+        "target_tab_id": t.get("target_tab_id") or None,
         "tab_action": tab_action,
         "frame_path": frame_path,
         "intent": intent,
-        "intent_failure_reason": t.get("intent_failure_reason"),
-        "param_name": t.get("param_name"),
-        "action_value": t.get("action_value"),
-        "thought": t.get("thought"),
+        "intent_failure_reason": t.get("intent_failure_reason") or None,
+        "param_name": t.get("param_name") or None,
+        "action_value": t.get("action_value") or None,
+        "thought": t.get("thought") or None,
         "element": element,
     }
 
@@ -350,7 +377,7 @@ def _to_step_index(raw: object) -> int:
     if raw is None:
         return -1
     try:
-        return int(raw)
+        return int(str(raw))
     except (TypeError, ValueError):
         return -1
 
@@ -534,6 +561,148 @@ def get_path_from_query(user_query: str, edges: list[GraphEdge]) -> list[GraphEd
 def get_path_from_intent(user_query: str, edges: list[GraphEdge]) -> list[GraphEdge]:
     """Backward-compatible wrapper."""
     return get_path_from_query(user_query, edges)
+
+
+def find_all_paths_for_intent(
+    user_query: str, edges: list[GraphEdge]
+) -> list[list[GraphEdge]]:
+    """Find all matching paths for a given intent, ranked by score descending.
+
+    Returns list of paths, each path is a list of GraphEdge in execution order.
+    """
+    if not edges:
+        return []
+
+    adjacency = _build_adjacency(edges)
+    entries = _find_entry_nodes(edges)
+    results: list[list[GraphEdge]] = []
+
+    def _path_score(path: list[GraphEdge]) -> float:
+        total = 0.0
+        for e in path:
+            if e.intent and isinstance(e.intent, Intent):
+                total += _match_score(e.intent, user_query)
+        return total
+
+    def dfs_collect(
+        node: str,
+        path: list[GraphEdge],
+        visited: set[str],
+        has_matched: bool,
+        used_edges: set[tuple[str, str, int, str]],
+    ) -> None:
+        matching: list[tuple[float, GraphEdge]] = []
+        traversal: list[GraphEdge] = []
+        for edge in _iter_out_edges(adjacency, node):
+            step_index = _to_step_index(edge.step_index)
+            edge_key = (edge.source, edge.target, step_index, edge.selector)
+            if edge_key in used_edges:
+                continue
+            intent = edge.intent
+            if intent is None or not isinstance(intent, Intent):
+                traversal.append(edge)
+                continue
+            score = _match_score(intent, user_query)
+            if score > 0:
+                matching.append((score, edge))
+            else:
+                traversal.append(edge)
+
+        matching.sort(key=lambda x: x[0], reverse=True)
+        for _score, edge in matching:
+            step_index = _to_step_index(edge.step_index)
+            edge_key = (edge.source, edge.target, step_index, edge.selector)
+            v = edge.target
+            u = edge.source
+            if v in visited and u == v:
+                candidate = list(path)
+                candidate.append(edge)
+                results.append(_prepend_entry_path(edges, candidate))
+                continue
+            if v in visited:
+                continue
+
+            # Prerequisites (self-loops before this edge)
+            prereq_keys: list[tuple[str, str, int, str]] = []
+            prereq_edges: list[GraphEdge] = []
+            for pre_edge in _iter_out_edges(adjacency, node):
+                p_step = _to_step_index(pre_edge.step_index)
+                if pre_edge.source != node or pre_edge.target != node:
+                    continue
+                if p_step < 0 or p_step >= step_index:
+                    continue
+                p_key = (pre_edge.source, pre_edge.target, p_step, pre_edge.selector)
+                if p_key in used_edges:
+                    continue
+                prereq_keys.append(p_key)
+                prereq_edges.append(pre_edge)
+
+            for idx, p_model in enumerate(prereq_edges):
+                used_edges.add(prereq_keys[idx])
+                path.append(p_model)
+            visited.add(v)
+            used_edges.add(edge_key)
+            path.append(edge)
+            dfs_collect(v, path, visited, True, used_edges)
+            path.pop()
+            used_edges.discard(edge_key)
+            visited.discard(v)
+            for idx in range(len(prereq_edges) - 1, -1, -1):
+                path.pop()
+                used_edges.discard(prereq_keys[idx])
+
+        if has_matched and path:
+            results.append(_prepend_entry_path(edges, list(path)))
+
+        for edge in traversal:
+            step_index = _to_step_index(edge.step_index)
+            edge_key = (edge.source, edge.target, step_index, edge.selector)
+            if edge_key in used_edges:
+                continue
+            v = edge.target
+            u = edge.source
+            if v in visited and u == v:
+                used_edges.add(edge_key)
+                path.append(edge)
+                dfs_collect(v, path, visited, has_matched, used_edges)
+                path.pop()
+                used_edges.discard(edge_key)
+                continue
+            if v in visited:
+                continue
+            visited.add(v)
+            used_edges.add(edge_key)
+            path.append(edge)
+            dfs_collect(v, path, visited, has_matched, used_edges)
+            path.pop()
+            used_edges.discard(edge_key)
+            visited.discard(v)
+
+    for start in entries:
+        visited: set[str] = {start}
+        dfs_collect(start, [], visited, False, set())
+
+    all_nodes = {e.source for e in edges} | {e.target for e in edges}
+    for node in all_nodes:
+        if node in entries:
+            continue
+        visited = {node}
+        dfs_collect(node, [], visited, False, set())
+
+    # Deduplicate by edge_id sequence
+    seen: set[tuple] = set()
+    unique: list[list[GraphEdge]] = []
+    for path in results:
+        key = tuple(e.edge_id for e in path if e.edge_id)
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(path)
+        elif not key and path not in unique:
+            unique.append(path)
+
+    # Sort by score descending
+    unique.sort(key=_path_score, reverse=True)
+    return unique
 
 
 async def get_path_from_nl_query(

@@ -43,6 +43,10 @@ class SolveCaptchaParams(BaseModel):
     input_hint: str = Field(default="", description="Optional semantic hint for locating the captcha input, e.g. placeholder or label text")
 
 
+class HumanHelpParams(BaseModel):
+    reason: str = Field(description="Why you need human help, e.g. 'captcha too complex', 'unexpected login wall', 'stuck overlay'")
+
+
 def _parse_menu_json(raw_text: str) -> dict:
     """Extract menu/action JSON from LLM response, handling markdown fences."""
     text = (raw_text or "").strip()
@@ -384,6 +388,41 @@ Rules:
             browser_session, page, captcha_code, params.input_index, params.input_hint
         )
         return f"{fill_result} mode={solve_mode}"
+
+    # ── request_human_help ───────────────────────────────────────────
+
+    @tools.action(description="Pause exploration and request human help", param_model=HumanHelpParams)
+    async def request_human_help(
+        params: HumanHelpParams,
+        browser_session: BrowserSession,
+    ) -> str:
+        page = await browser_session.get_current_page()
+        current_url = ""
+        if page is not None:
+            try:
+                current_url = await page.get_url() or ""
+            except Exception:
+                pass
+
+        from graph_agent.cartography.config import resolve_human_help_mode
+
+        mode = resolve_human_help_mode()
+        if mode == "auto":
+            return (
+                f"Human help skipped (auto mode). Reason: {params.reason}. "
+                f"Try an alternative approach."
+            )
+
+        prompt = (
+            f"\n{'=' * 60}\n"
+            f"[HUMAN_HELP] Agent needs your intervention.\n"
+            f"URL: {current_url}\n"
+            f"Reason: {params.reason}\n"
+            f"{'=' * 60}\n"
+            f"Resolve the issue, then press Enter to continue..."
+        )
+        await asyncio.to_thread(input, prompt)
+        return f"Human help completed. Reason: {params.reason}"
 
     return tools
 

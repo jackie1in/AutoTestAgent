@@ -378,6 +378,17 @@ class TransitionRevision(BaseModel):
     ingest_version_id: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     is_active: bool = True
+    # Playback fields carried over from Transition
+    action_value: str | None = None
+    param_name: str | None = None
+    element_snapshot: str | None = None  # JSON
+    frame_path: str | None = None  # JSON
+    tab_id: str = "tab-0"
+    target_tab_id: str | None = None
+    tab_action: str | None = None
+    thought: str | None = None
+    step_index: int | None = None
+    intent_failure_reason: str | None = None
 
 
 class GraphRelease(BaseModel):

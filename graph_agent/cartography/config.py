@@ -72,6 +72,12 @@ def resolve_wait_between_actions() -> float:
         return 0.1
 
 
+def resolve_human_help_mode() -> str:
+    """HUMAN_HELP_MODE: manual (block for input) or auto (skip)."""
+    raw = (os.getenv("HUMAN_HELP_MODE") or "manual").strip().lower()
+    return raw if raw in {"auto", "manual"} else "manual"
+
+
 def setup_browser_use_timeouts() -> None:
     mapping_timeout = os.getenv("MAPPING_TIMEOUT", "").strip()
     if mapping_timeout:

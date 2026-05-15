@@ -296,6 +296,16 @@ async def persist_mapping_result(
                     session_id=session_id,
                     ingest_version_id=_ingest_version_id(),
                     is_active=should_activate,
+                    action_value=_as_str(getattr(transition_to_store, "action_value", None)) or None,
+                    param_name=_as_str(getattr(transition_to_store, "param_name", None)) or None,
+                    element_snapshot=_as_str(getattr(transition_to_store, "element_snapshot", None)) or None,
+                    frame_path=_as_str(getattr(transition_to_store, "frame_path", None)) or None,
+                    tab_id=_as_str(getattr(transition_to_store, "tab_id", "tab-0")) or "tab-0",
+                    target_tab_id=_as_str(getattr(transition_to_store, "target_tab_id", None)) or None,
+                    tab_action=_as_str(getattr(transition_to_store, "tab_action", None)) or None,
+                    thought=_as_str(getattr(transition_to_store, "thought", None)) or None,
+                    step_index=getattr(transition_to_store, "step_index", None),
+                    intent_failure_reason=_as_str(getattr(transition_to_store, "intent_failure_reason", None)) or None,
                 )
                 await manager.add_transition_revision(revision)
                 await manager.link_ingestion_emits_revision(
