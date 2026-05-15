@@ -1,4 +1,4 @@
-from graph_agent.cartography.react_explorer.base import ReActExplorerBase as _ReActExplorerBase
+from graph_agent.cartography.react_explorer.base import ExplorerAgent as _ExplorerAgent
 from graph_agent.cartography.react_explorer.url_utils import (
     _build_data_signature as _build_data_signature,
     _build_state_identity as _build_state_identity,
@@ -12,5 +12,5 @@ from graph_agent.cartography.react_explorer.transition_utils import (
 )
 
 
-class ReActExplorer(_ReActExplorerBase):
+class ReActExplorer(_ExplorerAgent):
     pass

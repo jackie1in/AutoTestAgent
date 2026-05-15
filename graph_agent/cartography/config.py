@@ -44,6 +44,34 @@ def resolve_mapping_channel() -> str | None:
     return raw or None
 
 
+def resolve_browser_window_size() -> dict[str, int]:
+    """Parse BROWSER_WINDOW_SIZE=1920x1080 into {"width": 1920, "height": 1080}."""
+    raw = (os.getenv("BROWSER_WINDOW_SIZE") or "1920x1080").strip()
+    try:
+        w, h = raw.split("x", 1)
+        return {"width": int(w), "height": int(h)}
+    except (ValueError, TypeError):
+        return {"width": 1920, "height": 1080}
+
+
+def resolve_minimum_wait_page_load_time() -> float:
+    """BROWSER_MINIMUM_WAIT_PAGE_LOAD_TIME in seconds (default: 0.1)."""
+    raw = (os.getenv("BROWSER_MINIMUM_WAIT_PAGE_LOAD_TIME") or "0.1").strip()
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.1
+
+
+def resolve_wait_between_actions() -> float:
+    """BROWSER_WAIT_BETWEEN_ACTIONS in seconds (default: 0.1)."""
+    raw = (os.getenv("BROWSER_WAIT_BETWEEN_ACTIONS") or "0.1").strip()
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.1
+
+
 def setup_browser_use_timeouts() -> None:
     mapping_timeout = os.getenv("MAPPING_TIMEOUT", "").strip()
     if mapping_timeout:

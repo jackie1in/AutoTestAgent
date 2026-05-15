@@ -360,13 +360,7 @@ async def _run_main_loop(
         if knowledge_hint_text:
             explorer_hint += "\n\n" + knowledge_hint_text
 
-        # Per-page ReAct step budget — generous fixed cap.
-        # The only global limiting factor is the time budget (time_budget_ms).
-        per_page_steps = 60
-        if low_layout_conf:
-            per_page_steps = min(80, per_page_steps + 10)
-
-        # 区域限定模式：缩小 budget，附 zone_filter 提示给 explorer
+        # Zone-only exploration: pass zone filter selectors to explorer.
         target_zone_selectors: list[str] = []
         if (
             skip_decision is not None
@@ -374,15 +368,11 @@ async def _run_main_loop(
             and skip_decision.target_zone_selectors
         ):
             target_zone_selectors = list(skip_decision.target_zone_selectors)
-            zones_only_cap = min(20, per_page_steps)
             logger.info(
                 f"[PIPELINE] EXPLORE_ZONES_ONLY -> {url[:80]} "
-                f"(pending_zones={len(target_zone_selectors)}, "
-                f"budget {per_page_steps}->{zones_only_cap})"
+                f"(pending_zones={len(target_zone_selectors)})"
             )
-            per_page_steps = zones_only_cap
         explorer = ReActExplorer(
-            max_steps=per_page_steps,
             browser_session=browser,
             extra_system_prompt=_build_extra_system_prompt(explorer_hint) + "\n\n" + build_login_hint_from_env(),
             target_zone_selectors=target_zone_selectors or None,

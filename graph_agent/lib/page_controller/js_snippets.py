@@ -468,24 +468,21 @@ _TOP_LAYER_INFO_JS = """(el) => {
 
 _PATCH_REQUIRED_FIELDS_JS = """() => {
     // Mark required form fields so the LLM can see which inputs must be filled.
-    // Handles: native HTML5 required, aria-required, Ant Design / Element UI
-    // form-item markers, CSS ::before/::after asterisk on <label>, and
-    // label[for] -> input[id] relationships.
-    //
-    // Runs per-frame (controller.py iterates page.frames), so input.closest()
-    // is naturally frame-scoped and won't leak across iframe boundaries.
+    // Broad detection: scans all labels for required indicators (`::before *`,
+    // aria-required, class markers, etc.), then finds the nearest associated
+    // input via any structural relationship — no hardcoded DOM patterns.
     var processed = new Set();
-    var i, el, container, label, name, ph, req, bc, ac, txt;
+    var i, el, label, name, ph, req, bc, ac, txt;
 
-    // --- helpers ---
     var cleanText = function(s) {
         return (s || '').replace(/[*:\\uFF1A\\s*]+$/g, '').trim();
     };
-    var isLabelRequired = function(lbl) {
+
+    var isMarkedRequired = function(lbl) {
         if (!lbl) return false;
         if (lbl.classList.contains('ant-form-item-required')) return true;
-        var fi = lbl.closest('.ant-form-item');
-        if (fi && fi.classList.contains('ant-form-item-required')) return true;
+        var fi = lbl.closest('.ant-form-item, .el-form-item, [class*="form-item" i]');
+        if (fi && (fi.classList.contains('ant-form-item-required') || fi.classList.contains('is-required'))) return true;
         try { bc = window.getComputedStyle(lbl, '::before').content; }
         catch(e) { bc = 'none'; }
         if (bc && bc !== 'none' && bc !== 'normal' && bc.indexOf('*') !== -1) return true;
@@ -497,68 +494,59 @@ _PATCH_REQUIRED_FIELDS_JS = """() => {
         return false;
     };
 
-    // --- Phase 1: label[for] -> input[id] ---
-    var inputs = document.querySelectorAll('input, select, textarea');
-    for (i = 0; i < inputs.length; i++) {
-        el = inputs[i];
-        if (processed.has(el) || el.offsetParent === null) continue;
-        if (!el.id) continue;
-
-        // Find containing form / modal / fieldset first (frame-scoped)
-        container = el.closest('form, .ant-form, .el-form, fieldset, .ant-modal, .ant-drawer, .ant-modal-wrap, [class*="form" i]');
-        label = container
-            ? container.querySelector('label[for="' + el.id + '"]')
-            : document.querySelector('label[for="' + el.id + '"]');
-
-        if (!label) continue;
-
-        req = isLabelRequired(label);
-        if (req) {
-            el.setAttribute('required', '');
-            el.setAttribute('aria-required', 'true');
+    // Walk up the DOM tree to find the nearest input within the same form/field container.
+    var findAssociatedInput = function(start) {
+        // Strategy 1: label[for] -> input[id]
+        var labelFor = start.closest('label');
+        if (labelFor) {
+            var fid = labelFor.getAttribute('for');
+            if (fid) {
+                var target = document.getElementById(fid);
+                if (target) return target;
+            }
         }
-
-        name = cleanText(label.title || label.textContent || '');
-        if (name && !el.getAttribute('name')) {
-            el.setAttribute('name', name);
+        // Strategy 2: shared form-item container
+        var container = start.closest('.ant-form-item, .el-form-item, .form-group, .form-item, .field, [class*="form-item" i], form, .ant-form, .el-form, fieldset');
+        if (container) {
+            var inp = container.querySelector('input, select, textarea');
+            if (inp) return inp;
         }
+        // Strategy 3: sibling/parent walk — look for input nearby
+        var el = start;
+        for (var depth = 0; depth < 4 && el; depth++) {
+            var parent = el.parentElement;
+            if (!parent) break;
+            var inp = parent.querySelector('input, select, textarea');
+            if (inp) return inp;
+            el = parent;
+        }
+        return null;
+    };
 
-        ph = el.getAttribute('placeholder');
+    // --- Phase 1: Scan ALL <label> elements for required markers ---
+    var allLabels = document.querySelectorAll('label, [class*="label" i], .ant-form-item-label, .el-form-item__label');
+    for (i = 0; i < allLabels.length; i++) {
+        label = allLabels[i];
+        if (!isMarkedRequired(label)) continue;
+
+        var input = findAssociatedInput(label);
+        if (!input || processed.has(input) || input.offsetParent === null) continue;
+
+        input.setAttribute('required', '');
+        input.setAttribute('aria-required', 'true');
+
+        name = cleanText(label.textContent || '');
+        if (name && !input.getAttribute('name')) {
+            input.setAttribute('name', name);
+        }
+        ph = input.getAttribute('placeholder');
         if (name && (!ph || ph === '')) {
-            el.setAttribute('placeholder', name.slice(0, 20) + (req ? ' *\\u5fc5\\u586b' : ''));
+            input.setAttribute('placeholder', name.slice(0, 20) + ' *\\u5fc5\\u586b');
         }
-
-        processed.add(el);
+        processed.add(input);
     }
 
-    // --- Phase 2: <label> wrapping <input> (no for attribute) ---
-    var wrapped = document.querySelectorAll('label:not([for]) > input, label:not([for]) > textarea, label:not([for]) > select');
-    for (i = 0; i < wrapped.length; i++) {
-        el = wrapped[i];
-        if (processed.has(el) || el.offsetParent === null) continue;
-        label = el.parentElement;
-        if (!label || label.tagName !== 'LABEL') continue;
-
-        req = isLabelRequired(label);
-        if (req) {
-            el.setAttribute('required', '');
-            el.setAttribute('aria-required', 'true');
-        }
-
-        name = cleanText(label.title || label.textContent || '');
-        if (name && !el.getAttribute('name')) {
-            el.setAttribute('name', name);
-        }
-
-        ph = el.getAttribute('placeholder');
-        if (name && (!ph || ph === '')) {
-            el.setAttribute('placeholder', name.slice(0, 20) + (req ? ' *\\u5fc5\\u586b' : ''));
-        }
-
-        processed.add(el);
-    }
-
-    // --- Phase 3: existing class-based selectors (fallback) ---
+    // --- Phase 2: Scan inputs for native/class-based required markers ---
     var fallback = document.querySelectorAll(
         'input[required], textarea[required], select[required], '
         + '[aria-required="true"], '
@@ -574,7 +562,7 @@ _PATCH_REQUIRED_FIELDS_JS = """() => {
 
         if (!el.getAttribute('placeholder') || el.getAttribute('placeholder') === '') {
             var hint = '';
-            container = el.closest('.ant-form-item, .el-form-item, .form-group, .form-item, .field, [class*="form-item" i]');
+            var container = el.closest('.ant-form-item, .el-form-item, .form-group, .form-item, .field, [class*="form-item" i]');
             if (container) {
                 var lbl = container.querySelector('label, .ant-form-item-label, .el-form-item__label, [class*="label" i]');
                 if (lbl) hint = cleanText(lbl.textContent || '');
@@ -590,7 +578,6 @@ _PATCH_REQUIRED_FIELDS_JS = """() => {
         processed.add(el);
     }
 
-    // Build result summary for console logging
     var results = [];
     processed.forEach(function(el) {
         results.push({

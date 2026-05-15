@@ -218,15 +218,33 @@ async def run_mapping(
 
     channel = _resolve_mapping_channel()
     base_headless = _resolve_mapping_headless()
+    window_size = cartography_config.resolve_browser_window_size()
+    min_wait = cartography_config.resolve_minimum_wait_page_load_time()
+    action_wait = cartography_config.resolve_wait_between_actions()
     base_args = ["--incognito"]  # Force incognito mode: no session cache
     if channel:
         try:
-            browser = Browser(headless=base_headless, args=base_args, channel=channel)
+            browser = Browser(
+                headless=base_headless, args=base_args, channel=channel,
+                window_size=window_size,
+                minimum_wait_page_load_time=min_wait,
+                wait_between_actions=action_wait,
+            )
         except TypeError:
             # Older browser-use versions may not support channel keyword.
-            browser = Browser(headless=base_headless, args=base_args)
+            browser = Browser(
+                headless=base_headless, args=base_args,
+                window_size=window_size,
+                minimum_wait_page_load_time=min_wait,
+                wait_between_actions=action_wait,
+            )
     else:
-        browser = Browser(headless=base_headless, args=base_args)
+        browser = Browser(
+            headless=base_headless, args=base_args,
+            window_size=window_size,
+            minimum_wait_page_load_time=min_wait,
+            wait_between_actions=action_wait,
+        )
 
     async with managed_browser(browser):
         llm = get_llm()
