@@ -21,110 +21,35 @@ from graph_agent.models import (
 
 LOW_CONFIDENCE_THRESHOLD = 0.4
 MATCHABLE_CONFIDENCE_THRESHOLD = 0.5
-_KEY_ALIASES: dict[str, tuple[str, ...]] = {
-    "fill_username": ("fill_username", "username", "填写用户名", "输入用户名"),
-    "fill_password": ("fill_password", "password", "填写密码", "输入密码"),
-    "submit_login": ("submit_login", "login", "登录", "提交登录"),
-    "logout": ("logout", "log out", "登出", "退出"),
-    "search": ("search", "搜索", "查询"),
-    "click": ("click", "点击"),
-    "fill": ("fill", "输入", "填写"),
-    "navigate": ("navigate", "跳转", "访问"),
-    "auth.login": ("auth.login", "submit_login", "login", "登录", "提交登录"),
-    "auth.submit.login": (
-        "auth.submit.login",
-        "submit_login",
-        "login",
-        "登录",
-        "提交登录",
-    ),
-    "auth.fill.username": (
-        "auth.fill.username",
-        "fill_username",
-        "username",
-        "用户名",
-        "账号",
-    ),
-    "auth.fill.password": ("auth.fill.password", "fill_password", "password", "密码"),
-    "auth.logout": ("auth.logout", "logout", "登出", "退出"),
-    "elements.iframe.type": (
-        "elements.iframe.type",
-        "iframe.type",
-        "iframe",
-        "iframe 输入",
-    ),
-    "navigation.module.select": (
-        "navigation.module.select",
-        "登录后进入目标模块",
-        "进入目标模块",
-        "进入一级业务模块",
-        "项目管理",
-        "项目模块",
-        "project.navigation.report_access",
-        "report_access",
-        "elements.navigation.select",
-        "module.select",
-    ),
-    "elements.management.add": (
-        "elements.management.add",
-        "项目列表进入子项目并打开概览",
-        "项目列表进入子项目",
-        "项目进入子项目打开概览",
-        "elements.navigation.select",
-        "elements.add",
-    ),
-}
 
 
 def _key_matches(intent_key: str | None, user_query: str) -> bool:
-    """True if user query semantically maps to intent key aliases."""
+    """True if user query appears as substring of the structural intent key."""
     if not intent_key:
         return False
     key = intent_key.lower()
     query = (user_query or "").lower()
-    module_flow_terms = ("进入", "目标模块", "一级业务模块")
-    if any(term in query for term in module_flow_terms):
-        if "login" in key or "auth" in key:
-            return False
-        if "module" in key:
-            return True
-    aliases = _KEY_ALIASES.get(key, (key,))
-    if any(alias in query or query in alias for alias in aliases if alias):
-        return True
-
-    submit_terms = ("submit", "提交")
-    if any(term in query for term in submit_terms) and not any(
-        term in key for term in submit_terms
-    ):
+    if not query:
         return False
-
-    login_terms = ("登录", "login", "signin", "sign in", "auth")
-    if any(term in query for term in login_terms) and any(
-        term in key for term in ("login", "auth")
-    ):
-        return True
-    password_terms = ("密码", "password", "passwd")
-    if any(term in query for term in password_terms) and "password" in key:
-        return True
-    username_terms = ("用户名", "账号", "username", "user")
-    if any(term in query for term in username_terms) and "username" in key:
-        return True
-    logout_terms = ("登出", "退出", "logout", "log out", "signout", "sign out")
-    if any(term in query for term in logout_terms) and "logout" in key:
+    # Simple substring match on the structural key (e.g. 'click.submit' matches 'submit')
+    if query in key or key in query:
         return True
     return False
 
 
 def _summary_matches(intent: Intent | None, user_query: str) -> bool:
-    """Fallback summary match using substring, case-insensitive."""
+    """Primary match: user query against intent summary and name (substring, case-insensitive)."""
     if not intent:
         return False
     summary = (intent.summary or "").lower()
+    name = (intent.name or "").lower()
     query = (user_query or "").lower()
     if query in summary or summary in query:
         return True
+    if query in name or name in query:
+        return True
     # Fuzzy: check word-level overlap for Chinese queries
-    if _fuzzy_word_match(intent.key or "", user_query) or _fuzzy_word_match(summary, user_query):
+    if _fuzzy_word_match(summary, user_query) or _fuzzy_word_match(name, user_query):
         return True
     return False
 
@@ -148,7 +73,7 @@ def _fuzzy_word_match(target: str, query: str) -> bool:
 
 
 def _match_score(intent: Intent | None, user_query: str) -> float:
-    """Score intent-query match; key match preferred, low confidence down-weighted."""
+    """Score intent-query match; summary match preferred (LLM-generated), key match secondary."""
     if not intent:
         return 0.0
     confidence = intent.confidence if intent.confidence is not None else 0.5
@@ -156,9 +81,9 @@ def _match_score(intent: Intent | None, user_query: str) -> float:
         return 0.0
     confidence_factor = 1.0 if confidence >= LOW_CONFIDENCE_THRESHOLD else 0.35
 
-    if _key_matches(intent.key, user_query):
-        return 1.0 * confidence_factor
     if _summary_matches(intent, user_query):
+        return 1.0 * confidence_factor
+    if _key_matches(intent.key, user_query):
         return 0.7 * confidence_factor
     return 0.0
 

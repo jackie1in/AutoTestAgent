@@ -885,8 +885,10 @@ class ExplorerAgent(Agent):
             logger.debug("    → Semantic inference skipped: %s", e)
             extra_checkpoints = []
 
-        if transition.intent and transition.intent.key:
-            intent_suffix = transition.intent.key
+        if transition.intent:
+            intent_suffix = transition.intent.key or transition.intent.summary or "intent"
+            # Sanitize for use in id
+            intent_suffix = re.sub(r"[^a-zA-Z0-9._-]+", "_", intent_suffix)[:60]
             transition.id = f"t:{state_digest}:{intent_suffix}"
 
         cp = Checkpoint(

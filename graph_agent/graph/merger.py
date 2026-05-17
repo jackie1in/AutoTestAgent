@@ -452,7 +452,8 @@ class GraphMerger:
             # Create Intent node and REALIZES relationship if intent is present
             if transition.intent:
                 intent = transition.intent
-                intent_id = intent.id or intent.key or f"intent:{intent.summary or session_id}"
+                # Intent id is now structural (set by persistence layer); fallback to structural derivation
+                intent_id = intent.id or f"intent:{transition.from_state_id or 's'}:{transition.selector or 'el'}:{transition.action.value if hasattr(transition.action, 'value') else str(transition.action)}"
                 logger.info(
                     "[Neo4j] MERGE Intent id=%s key=%s transition=%s",
                     intent_id, getattr(intent, "key", ""), transition.id,

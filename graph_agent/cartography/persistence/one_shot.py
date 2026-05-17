@@ -16,6 +16,7 @@ from graph_agent.cartography.persistence.semantic_stability import (
     _as_str,
     _build_semantic_metrics,
     _calculate_semantic_stability,
+    _clean_selector_suffix,
     _empty_stats,
     _source_priority,
     _transition_stable_key,
@@ -330,16 +331,24 @@ async def persist_mapping_result(
             for transition in result.transitions:
                 intent_obj = transition.intent
                 if intent_obj is not None:
+                    # Derive stable intent identity from graph structure, not LLM output.
+                    from_id = _as_str(transition.from_state_id).strip()
+                    sel = _as_str(transition.selector).strip()
+                    action_val = _as_str(transition.action.value if hasattr(transition.action, "value") else transition.action).strip().lower()
+                    structural_id = f"intent:{from_id}:{sel}:{action_val}"
+                    structural_key = f"{action_val}.{_clean_selector_suffix(sel)}"
                     resolved_intent_id = (
                         _as_str(intent_obj.id).strip()
-                        or _as_str(intent_obj.key).strip()
-                        or _as_str(intent_obj.summary).strip()
+                        or structural_id
                     )
                     if resolved_intent_id:
                         if not resolved_intent_id.startswith("intent:"):
                             resolved_intent_id = f"intent:{resolved_intent_id}"
                         intent_to_store = intent_obj.model_copy(
-                            update={"id": resolved_intent_id}
+                            update={
+                                "id": resolved_intent_id,
+                                "key": _as_str(intent_obj.key).strip() or structural_key,
+                            }
                         )
                         await manager.add_intent(intent_to_store)
                         await manager.link_transition_intent(
@@ -347,8 +356,8 @@ async def persist_mapping_result(
                         )
                         if transition.from_state_id and transition.selector:
                             await manager.link_zone_covers_intent(
-                                from_state_id=_as_str(transition.from_state_id),
-                                selector=_as_str(transition.selector),
+                                from_state_id=from_id,
+                                selector=sel,
                                 intent_id=resolved_intent_id,
                                 confidence=_as_float(intent_obj.confidence, 0.5),
                                 session_id=session_id,

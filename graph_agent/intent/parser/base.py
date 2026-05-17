@@ -27,17 +27,15 @@ INDEX_SELECTOR_RE = re.compile(r"^\[\d+\]$")
 
 
 class IntentInferenceResult(BaseModel):
-    """Result of intent inference from browser automation step."""
-    key: str = Field(description="Short dot-separated intent key, e.g. auth.fill.username")
+    """Result of intent inference from browser automation step.
+
+    Note: key is no longer LLM-generated. It is derived from graph structure
+    (menu path + zone type + action) at persistence time.
+    """
     confidence: float = Field(ge=0.0, le=1.0, description="Confidence score between 0 and 1")
     summary: str = Field(description="Concise natural language summary")
     verb: str = Field(default="Interact", description="Action verb")
     object: str = Field(default="Element", description="Target object")
-
-
-class KeyRefinementResult(BaseModel):
-    """Result of refining an intent key."""
-    key: str = Field(description="Dot-separated lowercase intent key")
 
 
 class UIDistillationResult(BaseModel):
@@ -113,33 +111,24 @@ def _heuristic_intent_fallback(
     if action in (ActionType.FILL, ActionType.RICH_TEXT, ActionType.SELECT):
         field_raw = (param_name or "").strip() or "field"
         field = re.sub(r"[^a-z0-9_]+", "_", field_raw.lower()).strip("_") or "field"
-        key = f"{'auth' if login_context else 'form'}.fill.{field}"
         summary = f"Fill {field} input"
-        return Intent(raw=thought_text or summary, verb="Fill", object=field, summary=summary, key=key, confidence=0.34)
+        return Intent(raw=thought_text or summary, verb="Fill", object=field, summary=summary, key="", confidence=0.34)
 
     if action == ActionType.CLICK:
         if login_context and any(token in selector_l for token in ("submit", "login", "signin", "btn")):
-            key = "auth.click.submit"
             summary = "Click login submit button"
             obj = "Login Button"
         else:
-            key = "elements.click.control"
             summary = "Click page control"
             obj = "Control"
-        return Intent(raw=thought_text or summary, verb="Click", object=obj, summary=summary, key=key, confidence=0.31)
+        return Intent(raw=thought_text or summary, verb="Click", object=obj, summary=summary, key="", confidence=0.31)
 
     if action == ActionType.NAVIGATE:
         summary = "Navigate to page"
-        return Intent(raw=thought_text or summary, verb="Navigate", object="Page", summary=summary, key="navigation.page.change", confidence=0.33)
+        return Intent(raw=thought_text or summary, verb="Navigate", object="Page", summary=summary, key="", confidence=0.33)
 
     summary = "Interact with page element"
-    return Intent(raw=thought_text or summary, verb="Interact", object="Element", summary=summary, key="elements.interact.unknown", confidence=0.3)
-
-
-def _should_skip_refine() -> bool:
-    return (os.getenv("MAPPING_SKIP_REFINE") or "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
+    return Intent(raw=thought_text or summary, verb="Interact", object="Element", summary=summary, key="", confidence=0.3)
 
 
 def _should_skip_distill() -> bool:
@@ -281,7 +270,7 @@ async def infer_intent_for_context(
         playback_section = f"Playback failure hint:\n- error: {playback_error_hint}\n"
 
     system_prompt = """You are an intent normalizer for browser automation steps.
-Given one interaction step context, infer business intent."""
+Given one interaction step context, infer business intent summary, verb, and object."""
     
     user_prompt = f"""Infer the business intent for this browser automation step:
 
@@ -296,9 +285,9 @@ Context:
 {neighbor_section}{page_signal_section}{playback_section}
 
 Rules:
-- Prefer domain/business keys over generic/navigation when action is click/fill.
-- Avoid broad keys like navigation.click.link unless step is only pure page jump.
-- Use selector/param_name/url/thought cues to produce specific key (e.g., auth.*, form.*, elements.*).
+- Provide a concise summary of what this step does in business terms.
+- verb should be a short action word (Fill, Click, Select, Navigate, etc.).
+- object should be the target of the action (e.g. "username", "submit button", "search form").
 - If uncertain, still provide best guess with low confidence."""
 
     try:
@@ -320,7 +309,6 @@ Rules:
             except Exception:
                 return None, "parse_error:invalid_json"
 
-        key = parsed_result.key
         confidence = parsed_result.confidence
         summary = parsed_result.summary
         verb = parsed_result.verb
@@ -356,112 +344,33 @@ Rules:
             return fallback, "fallback:structured_parse_failed"
         return None, f"llm_error:{exc}"
 
-    if not key or not summary:
+    if not summary:
         logger.warning(
-            "[Intent] parse_error: missing key or summary. key=%r summary=%r",
-            key,
+            "[Intent] parse_error: missing summary. summary=%r",
             summary,
         )
-        return None, "parse_error:missing_key_or_summary"
+        return None, "parse_error:missing_summary"
     if confidence <= MIN_INTENT_CONFIDENCE:
         logger.info(
-            "[Intent] low_confidence: %.2f < %.2f. key=%r summary=%r",
+            "[Intent] low_confidence: %.2f < %.2f. summary=%r",
             confidence,
             MIN_INTENT_CONFIDENCE,
-            key,
             summary,
         )
         return None, f"low_confidence:{confidence:.2f}"
     confidence = max(0.0, min(1.0, confidence))
-
-    key = await _refine_non_business_key_if_needed(
-        llm=llm,
-        action=action,
-        key=key,
-        selector=selector,
-        source_url=source_url,
-        target_url=target_url,
-        param_name=param_name,
-        thought_text=thought_text,
-        summary=summary,
-    )
 
     intent = Intent(
         raw=thought_text or summary,
         verb=verb,
         object=obj,
         summary=summary,
-        key=key,
+        key="",  # derived from graph structure at persistence time
         confidence=confidence,
     )
     if cache_key:
         _intent_cache[cache_key] = (intent, context_level)
     return intent, None
-
-
-async def _refine_non_business_key_if_needed(
-    llm: Any,
-    action: ActionType,
-    key: str,
-    selector: str,
-    source_url: str,
-    target_url: str,
-    param_name: str | None,
-    thought_text: str,
-    summary: str,
-) -> str:
-    """AI-only refinement to reduce over-broad navigation keys on click/fill."""
-    raw_key = (key or "").strip()
-    if _should_skip_refine():
-        return raw_key
-    if action not in (ActionType.CLICK, ActionType.FILL):
-        return raw_key
-    if not raw_key.startswith("navigation."):
-        return raw_key
-
-    system_prompt = "You refine an existing intent key for browser automation. Current key may be too broad."
-    
-    user_prompt = f"""Refine this intent key:
-
-Context:
-- action: {action.value}
-- current_key: {raw_key}
-- selector: {selector}
-- source_url: {source_url}
-- target_url: {target_url}
-- param_name: {param_name or ""}
-- thought: {thought_text or ""}
-- summary: {summary}
-
-Constraints:
-- Keep dot-separated lowercase key.
-- If action is click/fill, prefer business/domain key when possible.
-- Avoid navigation.* when there is a concrete business operation.
-- If truly only navigation, keep current key unchanged."""
-
-    try:
-        result = await ainvoke_structured(
-            llm,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            output_format=KeyRefinementResult,
-        )
-    except Exception:
-        return raw_key
-    if isinstance(result, KeyRefinementResult):
-        refined = result.key.strip().lower()
-    else:
-        raw_text = _response_to_text(result)
-        parsed_obj = _extract_json_object(raw_text)
-        if not parsed_obj:
-            return raw_key
-        refined_raw = str(parsed_obj.get("key") or "").strip().lower()
-        if not refined_raw:
-            return raw_key
-        refined = refined_raw
-    if not refined or "." not in refined:
-        return raw_key
-    return refined
 
 
 def _action_intent_conflict(
@@ -472,10 +381,9 @@ def _action_intent_conflict(
     target_url: str = "",
 ) -> bool:
     """Heuristic semantic conflict detector for progressive escalation."""
-    key = (intent.key or "").lower()
     summary = (intent.summary or "").lower()
     sel = (selector or "").lower()
-    text = f"{key} {summary}"
+    text = summary
     if action == ActionType.SELECT:
         return False
     if action == ActionType.RICH_TEXT:
@@ -581,12 +489,12 @@ async def infer_intent_progressive(
             action, intent, selector=selector,
             source_url=source_url, target_url=target_url,
         ):
-            logger.info("[Intent] OK full: %r %r", intent.key, intent.summary)
+            logger.info("[Intent] OK full: %r", intent.summary)
             return intent, None, "full"
         logger.info(
-            "[Intent] conflict full: action=%s intent=%r selector=%r",
+            "[Intent] conflict full: action=%s summary=%r selector=%r",
             action.value,
-            intent.key,
+            intent.summary,
             selector,
         )
         reason = "semantic_conflict:action_intent_mismatch"
@@ -607,7 +515,7 @@ async def infer_intent_progressive(
             action, intent, selector=selector,
             source_url=source_url, target_url=target_url,
         ):
-            logger.info("[Intent] OK retry: %r %r", intent.key, intent.summary)
+            logger.info("[Intent] OK retry: %r", intent.summary)
             return intent, None, "full_retry"
 
     logger.warning(

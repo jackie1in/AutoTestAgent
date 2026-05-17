@@ -103,12 +103,11 @@ async def run_replay_intent(
 
 
 async def _list_available_intents_from_neo4j(driver: Any) -> None:
-    """Query Neo4j directly for distinct intents from TransitionRevision nodes."""
+    """Query Neo4j directly for distinct intents from Intent nodes (with summary)."""
     query = """
-        MATCH (rev:TransitionRevision)
-        WHERE rev.intent_key IS NOT NULL
-        RETURN DISTINCT rev.intent_key AS key
-        ORDER BY key
+        MATCH (i:Intent)
+        RETURN i.key AS key, i.summary AS summary
+        ORDER BY i.key
     """
     async with driver.session() as session:
         result = await session.run(query)
@@ -121,7 +120,9 @@ async def _list_available_intents_from_neo4j(driver: Any) -> None:
     print(f"\nAvailable intents ({len(records)}):\n")
     for r in records:
         key = r.get("key", "")
-        print(f"  {key}")
+        summary = r.get("summary", "")
+        display = f"{key}  — {summary}" if summary else key
+        print(f"  {display}")
 
 
 # ---------------------------------------------------------------------------
@@ -156,13 +157,13 @@ def _interactive_select(paths: list[list[Any]]) -> list[Any] | None:
 def _action_tag(edge: Any) -> str:
     action = str(edge.action) if edge.action else "?"
     sel = edge.selector or "?"
-    intent_key = ""
-    if edge.intent and hasattr(edge.intent, "key"):
-        intent_key = edge.intent.key or ""
+    label = ""
+    if edge.intent and hasattr(edge.intent, "summary"):
+        label = edge.intent.summary or edge.intent.key or ""
     fp = ""
     if edge.frame_path:
         fp = f" [iframe:{len(edge.frame_path)}]"
-    return f"  {action} {sel[:50]} {intent_key}{fp}"
+    return f"  {action} {sel[:50]} {label}{fp}"
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from graph_agent.cartography.config import clean_url
@@ -50,6 +51,47 @@ def _as_float(value: object, default: float = 0.0) -> float:
         except (TypeError, ValueError):
             return default
     return default
+
+
+def _clean_selector_suffix(selector: str) -> str:
+    """Extract a short human-readable suffix from a CSS selector for intent key display.
+
+    e.g. '#user' → 'user', 'button[type=\"submit\"]' → 'button.submit',
+         '.ant-select' → 'ant-select', 'a[href=\"/login\"]' → 'a.login'
+    """
+    s = selector.strip()
+    if not s:
+        return "unknown"
+    # Grab the last segment
+    parts = s.rsplit(" ", 1)
+    last = parts[-1]
+    # Extract tag/class/id
+    tag = ""
+    extra = ""
+    m = re.match(r"^(\w+)", last)
+    if m:
+        tag = m.group(1)
+    # class
+    cls_m = re.search(r"\.([\w-]+)", last)
+    if cls_m:
+        extra = cls_m.group(1)
+    # id
+    id_m = re.search(r"#([\w-]+)", last)
+    if id_m:
+        extra = id_m.group(1)
+    # attribute like type="submit" or name="username"
+    attr_m = re.search(r'\[(?:type|name|role)\s*=\s*"([^"]+)"\]', last)
+    if attr_m and not extra:
+        extra = attr_m.group(1)
+    if tag and extra:
+        return f"{tag}.{extra}"
+    if extra:
+        return extra
+    if tag:
+        return tag
+    # Fallback: take last 40 chars, clean non-alnum
+    short = re.sub(r"[^a-zA-Z0-9._-]+", "_", last)[:40].strip("_")
+    return short or "element"
 
 
 def _source_priority(source_type: object) -> int:

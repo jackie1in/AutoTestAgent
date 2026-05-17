@@ -29,9 +29,9 @@ def _mock_llm_response(content: str):
 
 @pytest.mark.asyncio
 async def test_infer_intent_success():
-    """AI returns valid JSON -> intent is returned, no failure reason."""
+    """AI returns valid JSON -> intent is returned, no failure reason. Key is empty (set by persistence)."""
     mock_response = _mock_llm_response(
-        '{"key":"auth.fill.username","confidence":0.9,"summary":"Fill username","verb":"Fill","object":"Username field"}'
+        '{"confidence":0.9,"summary":"Fill username","verb":"Fill","object":"Username field"}'
     )
 
     mock_llm = AsyncMock()
@@ -48,7 +48,7 @@ async def test_infer_intent_success():
         )
 
     assert intent is not None
-    assert intent.key == "auth.fill.username"
+    assert intent.key == ""  # key is now structural, set later by persistence
     assert intent.confidence == 0.9
     assert intent.summary == "Fill username"
     assert intent.verb == "Fill"
@@ -104,7 +104,7 @@ async def test_infer_intent_failure_invalid_json():
 async def test_infer_intent_failure_low_confidence():
     """LLM returns low confidence -> returns (None, low_confidence:...)."""
     mock_response = _mock_llm_response(
-        '{"key":"generic.click","confidence":0.2,"summary":"Click","verb":"Click","object":"Button"}'
+        '{"confidence":0.2,"summary":"Click","verb":"Click","object":"Button"}'
     )
 
     mock_llm = AsyncMock()
@@ -126,10 +126,10 @@ async def test_infer_intent_failure_low_confidence():
 
 
 @pytest.mark.asyncio
-async def test_infer_intent_failure_missing_key_or_summary():
-    """LLM returns empty key/summary -> returns (None, parse_error:missing_key_or_summary)."""
+async def test_infer_intent_failure_missing_summary():
+    """LLM returns empty summary -> returns (None, parse_error:missing_summary)."""
     mock_response = _mock_llm_response(
-        '{"key":"","confidence":0.8,"summary":"","verb":"Click","object":"Button"}'
+        '{"confidence":0.8,"summary":"","verb":"Click","object":"Button"}'
     )
 
     mock_llm = AsyncMock()
@@ -146,58 +146,7 @@ async def test_infer_intent_failure_missing_key_or_summary():
         )
 
     assert intent is None
-    assert reason == "parse_error:missing_key_or_summary"
-
-
-@pytest.mark.asyncio
-async def test_infer_intent_refines_navigation_key_for_click():
-    """Click intent with navigation.* key should be refined by AI second-pass."""
-    first_pass = _mock_llm_response(
-        '{"key":"navigation.click.link","confidence":0.91,"summary":"Click login link","verb":"Click","object":"Login link"}'
-    )
-    refined_pass = _mock_llm_response('{"key":"auth.navigate.login"}')
-    mock_llm = AsyncMock()
-    mock_llm.ainvoke = AsyncMock(side_effect=[first_pass, refined_pass])
-
-    with patch("graph_agent.intent.parser.get_llm", return_value=mock_llm):
-        intent, reason = await infer_intent_for_context(
-            action=ActionType.CLICK,
-            selector="a[href='/login']",
-            source_url="https://a.com",
-            target_url="https://a.com/login",
-            param_name=None,
-            thought_text="go to login page",
-        )
-
-    assert reason is None
-    assert intent is not None
-    assert intent.key == "auth.navigate.login"
-    assert mock_llm.ainvoke.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_infer_intent_skip_refine_for_navigate_action():
-    """Navigate action should not trigger second-pass key refinement."""
-    mock_response = _mock_llm_response(
-        '{"key":"navigation.open.page","confidence":0.9,"summary":"Open page","verb":"Navigate","object":"Page"}'
-    )
-    mock_llm = AsyncMock()
-    mock_llm.ainvoke = AsyncMock(return_value=mock_response)
-
-    with patch("graph_agent.intent.parser.get_llm", return_value=mock_llm):
-        intent, reason = await infer_intent_for_context(
-            action=ActionType.NAVIGATE,
-            selector="",
-            source_url="https://a.com",
-            target_url="https://a.com/b",
-            param_name=None,
-            thought_text="open page",
-        )
-
-    assert reason is None
-    assert intent is not None
-    assert intent.key == "navigation.open.page"
-    assert mock_llm.ainvoke.await_count == 1
+    assert reason == "parse_error:missing_summary"
 
 
 @pytest.mark.asyncio
@@ -255,7 +204,7 @@ async def test_parse_browser_use_step_ai_success():
         verb="Submit",
         object="Form",
         summary="Submit login form",
-        key="auth.submit.login",
+        key="",  # key is structural, set later by persistence
         confidence=0.85,
     )
 
@@ -285,7 +234,7 @@ async def test_parse_browser_use_step_ai_success():
 
     assert edge.intent is expected_intent
     assert edge.intent_failure_reason is None
-    assert edge.intent.key == "auth.submit.login"
+    assert edge.intent.key == ""
     assert edge.intent.confidence == 0.85
 
 
@@ -301,7 +250,7 @@ async def test_infer_intent_progressive_retries_on_low_confidence():
         verb="Submit",
         object="Login form",
         summary="Submit login form",
-        key="auth.submit.login",
+        key="",
         confidence=0.91,
     )
 
@@ -335,7 +284,7 @@ async def test_infer_intent_progressive_succeeds_on_first_pass():
         verb="Click",
         object="Login button",
         summary="Click login button",
-        key="auth.click.login",
+        key="",
         confidence=0.95,
     )
 
@@ -365,7 +314,7 @@ def test_action_intent_conflict_allows_click_navigation_link():
         verb="Navigate",
         object="Login page",
         summary="Navigate to login page",
-        key="auth.navigate.login",
+        key="",
         confidence=0.91,
     )
     assert (
@@ -380,7 +329,7 @@ def test_action_intent_conflict_allows_fill_on_input_selector():
         verb="Provide",
         object="Credentials",
         summary="Provide credentials",
-        key="auth.credentials.password",
+        key="",
         confidence=0.82,
     )
     assert (
@@ -395,7 +344,7 @@ def test_action_intent_conflict_allows_navigate_when_url_changes():
         verb="Submit",
         object="Form",
         summary="Submit login form",
-        key="auth.submit.login",
+        key="",
         confidence=0.87,
     )
     assert (
@@ -416,7 +365,7 @@ def test_action_intent_conflict_keeps_navigate_conflict_without_transition():
         verb="Toggle",
         object="Checkbox",
         summary="Toggle checkbox",
-        key="form.toggle.checkbox",
+        key="",
         confidence=0.87,
     )
     assert (
@@ -447,7 +396,7 @@ async def test_parse_browser_use_step_fill_extracts_param_name_element_and_actio
         verb="Fill",
         object="Username field",
         summary="Fill username",
-        key="auth.fill.username",
+        key="",
         confidence=0.92,
     )
 
@@ -499,7 +448,7 @@ async def test_parse_browser_use_step_extracts_nested_frame_path():
         verb="Submit",
         object="Form",
         summary="Submit form",
-        key="form.submit",
+        key="",
         confidence=0.88,
     )
 
@@ -544,7 +493,7 @@ async def test_parse_browser_use_step_extracts_tab_context():
         verb="Open",
         object="Quality page",
         summary="Open quality page",
-        key="quality.open.page",
+        key="",
         confidence=0.9,
     )
 
@@ -587,7 +536,7 @@ async def test_parse_browser_use_step_detects_contenteditable_as_rich_text():
         verb="Type",
         object="Rich text editor",
         summary="Type content in the rich text editor",
-        key="elements.iframe.type",
+        key="",
         confidence=0.9,
     )
 
@@ -708,7 +657,7 @@ def test_parse_browser_use_step_lite_fill_extracts_param_and_value():
 async def test_intent_cache_hit():
     """Second call with same inputs should return cached intent without LLM call."""
     mock_response = _mock_llm_response(
-        '{"key":"auth.fill.user","confidence":0.9,"summary":"Fill user","verb":"Fill","object":"User"}'
+        '{"confidence":0.9,"summary":"Fill user","verb":"Fill","object":"User"}'
     )
     mock_llm = AsyncMock()
     mock_llm.ainvoke = AsyncMock(return_value=mock_response)
@@ -727,28 +676,6 @@ async def test_intent_cache_hit():
 
     assert intent1 is not None
     assert intent2 is intent1
-    assert mock_llm.ainvoke.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_skip_refine_env(monkeypatch):
-    """MAPPING_SKIP_REFINE=true should skip the refinement LLM call."""
-    monkeypatch.setenv("MAPPING_SKIP_REFINE", "true")
-    mock_response = _mock_llm_response(
-        '{"key":"navigation.click.link","confidence":0.91,"summary":"Click link","verb":"Click","object":"Link"}'
-    )
-    mock_llm = AsyncMock()
-    mock_llm.ainvoke = AsyncMock(return_value=mock_response)
-
-    with patch("graph_agent.intent.parser.get_llm", return_value=mock_llm):
-        intent, reason = await infer_intent_for_context(
-            action=ActionType.CLICK, selector="a[href='/']",
-            source_url="https://a.com", target_url="https://a.com/b",
-            param_name=None, thought_text="click link",
-        )
-
-    assert intent is not None
-    assert intent.key == "navigation.click.link"
     assert mock_llm.ainvoke.await_count == 1
 
 

@@ -238,7 +238,7 @@ class Intent(BaseModel):
     summary: str = ""
     verb: str = ""
     object: str = ""
-    key: str = ""
+    key: str = ""  # derived from graph structure at persistence time (not LLM-generated)
     confidence: float | None = None
 
 

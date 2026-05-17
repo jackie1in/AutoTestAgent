@@ -123,16 +123,16 @@ def test_pathfinding_matches_dot_key_query():
     assert path[0].intent.key == "auth.fill.username"
 
 
-def test_pathfinding_matches_chinese_login_query_to_dot_key():
-    """Chinese login query should match auth.submit.login style keys."""
-    intent = _make_intent("Submit login form", key="auth.submit.login")
+def test_pathfinding_matches_summary_substring():
+    """Query substring in summary should match (summary is now primary match)."""
+    intent = _make_intent("Submit login form", key="click.submit")
     edges = [
         _make_edge("a", "b", selector="#login", intent=intent),
     ]
-    path = get_path_from_intent("登录", edges)
+    path = get_path_from_intent("login", edges)
     assert len(path) == 1
     assert path[0].intent is not None
-    assert path[0].intent.key == "auth.submit.login"
+    assert path[0].intent.summary == "Submit login form"
 
 
 def test_pathfinding_supports_self_loop_intent_match():
